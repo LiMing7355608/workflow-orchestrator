@@ -111,3 +111,52 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+.react-flow__controls-button {
+  width: 28px;
+  height: 28px;
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface);
+  color: var(--color-muted);
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-subtle);
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.react-flow__attribution {
+  background: transparent;
+  color: var(--color-passive);
+  font-size: 9px;
+}
+
+.react-flow__node {
+  cursor: pointer;
+}
+
+.react-flow__edge-textbg {
+  fill: var(--color-surface);
+}

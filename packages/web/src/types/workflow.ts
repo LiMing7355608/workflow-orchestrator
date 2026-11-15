@@ -40,12 +40,14 @@ export interface WorkflowNode {
   dependsOn: string[];
   files: string[];
   attempts: number;
+  durationMs?: number;
 }
 
 export interface WorkflowEdge {
   id: string;
   source: string;
   target: string;
+  label?: string;
 }
 
 export interface WorkflowEvent {
@@ -55,4 +57,10 @@ export interface WorkflowEvent {
   message: string;
   nodeId?: string;
   agent?: string;
+}
+
+export interface WorkflowRunDetail extends WorkflowRunSummary {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  events: WorkflowEvent[];
 }

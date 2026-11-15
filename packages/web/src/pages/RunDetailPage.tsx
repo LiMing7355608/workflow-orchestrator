@@ -1,19 +1,25 @@
-import { ArrowLeft, Boxes, CalendarClock, GitBranch } from 'lucide-react';
+import { GitBranch } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { RunStatusBadge } from '../components/run/RunStatusBadge';
+import { NodeInspector } from '../components/run/NodeInspector';
+import { RunHeader } from '../components/run/RunHeader';
+import { WorkflowCanvas } from '../components/run/WorkflowCanvas';
+import { buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
-import { Progress } from '../components/ui/Progress';
-import { buttonStyles } from '../components/ui/Button';
-import { seedRuns } from '../data/seed';
-import { formatRelativeTime } from '../lib/format';
+import { getRunDetail } from '../data/run-detail';
 import { usePageTitle } from '../lib/use-page-title';
 
 export function RunDetailPage() {
   const { runId } = useParams();
-  const run = seedRuns.find((item) => item.id === runId);
+  const run = useMemo(() => getRunDetail(runId ?? ''), [runId]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   usePageTitle(run?.title ?? '运行详情');
+
+  useEffect(() => {
+    setSelectedNodeId(null);
+  }, [runId]);
 
   if (!run) {
     return (
@@ -25,10 +31,10 @@ export function RunDetailPage() {
             description="它可能已经被删除，或者链接不完整。"
             action={
               <Link
-                to="/"
+                to="/runs"
                 className={buttonStyles({ variant: 'secondary', size: 'sm' })}
               >
-                返回工作台
+                返回运行记录
               </Link>
             }
           />
@@ -37,70 +43,33 @@ export function RunDetailPage() {
     );
   }
 
+  const selectedNode = selectedNodeId
+    ? (run.nodes.find((node) => node.id === selectedNodeId) ?? null)
+    : null;
+
   return (
-    <div className="mx-auto max-w-[1180px] px-6 py-7 max-[900px]:px-4">
-      <Link
-        to="/"
-        className="inline-flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-ink"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.8} />
-        返回工作台
-      </Link>
+    <div className="flex h-screen flex-col overflow-hidden max-[1100px]:block max-[1100px]:h-auto max-[1100px]:overflow-visible">
+      <RunHeader
+        run={run}
+        className="shrink-0 border-b border-line"
+      />
 
-      <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-[24px] font-semibold tracking-[-0.02em] text-ink">
-              {run.title}
-            </h1>
-            <RunStatusBadge status={run.status} />
-          </div>
-          <p className="mt-1.5 text-[12px] text-muted">{run.summary}</p>
-          <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] text-passive">
-            <span className="inline-flex items-center gap-1.5">
-              <GitBranch className="h-3.5 w-3.5" strokeWidth={1.8} />
-              规格 {run.specVersion}
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <Boxes className="h-3.5 w-3.5" strokeWidth={1.8} />
-              {run.nodeCount} 个节点
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <CalendarClock className="h-3.5 w-3.5" strokeWidth={1.8} />
-              更新于 {formatRelativeTime(run.updatedAt)}
-            </span>
-          </div>
-        </div>
-
-        <div className="w-[220px] max-[700px]:w-full">
-          <div className="flex items-center justify-between text-[10px] text-passive">
-            <span>整体进度</span>
-            <span className="tabular-nums">{run.progress}%</span>
-          </div>
-          <Progress
-            value={run.progress}
-            tone={run.status === 'completed' ? 'green' : 'blue'}
-            label={`${run.title} 整体进度`}
-            className="mt-2"
+      <div className="flex min-h-0 flex-1 max-[1100px]:block">
+        <div className="min-w-0 flex-1 max-[1100px]:h-[520px]">
+          <WorkflowCanvas
+            run={run}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
           />
         </div>
-      </div>
 
-      <Card className="mt-6">
-        <EmptyState
-          icon={GitBranch}
-          title="编排画布将在下一步接入"
-          description="这里会展示 DAG 拓扑、四泳道看板、节点检查器、事件流和人工审批操作。"
-          action={
-            <Link
-              to="/new"
-              className={buttonStyles({ variant: 'secondary', size: 'sm' })}
-            >
-              新建运行
-            </Link>
-          }
+        <NodeInspector
+          run={run}
+          node={selectedNode}
+          onSelectNode={setSelectedNodeId}
+          className="w-[320px] shrink-0 border-l border-line max-[1100px]:h-auto max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t"
         />
-      </Card>
+      </div>
     </div>
   );
 }
