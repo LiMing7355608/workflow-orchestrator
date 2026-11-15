@@ -15,27 +15,25 @@ interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
-  exact?: boolean;
-  hash?: string;
 }
 
 const navItems: NavItem[] = [
-  { to: '/', label: '工作台', icon: LayoutDashboard, exact: true },
+  { to: '/', label: '工作台', icon: LayoutDashboard },
   { to: '/new', label: '新建运行', icon: SquarePen },
-  { to: '/#runs', label: '运行记录', icon: History, hash: '#runs' },
+  { to: '/runs', label: '运行记录', icon: History },
 ];
 
 export function Sidebar() {
   const location = useLocation();
 
   function isActive(item: NavItem) {
-    if (item.hash) {
-      return location.pathname === '/' && location.hash === item.hash;
+    if (item.to === '/') {
+      return location.pathname === '/';
     }
-    if (item.exact) {
-      return location.pathname === '/' && location.hash === '';
-    }
-    return location.pathname === item.to;
+    return (
+      location.pathname === item.to ||
+      location.pathname.startsWith(`${item.to}/`)
+    );
   }
 
   return (

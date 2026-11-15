@@ -9,6 +9,7 @@ import { HomePage } from '../pages/HomePage';
 import { NewRunPage } from '../pages/NewRunPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { RunDetailPage } from '../pages/RunDetailPage';
+import { RunRecordsPage } from '../pages/RunRecordsPage';
 
 function ScrollToTop() {
   const { pathname, hash } = useLocation();
@@ -30,6 +31,7 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route index element={<HomePage />} />
           <Route path="new" element={<NewRunPage />} />
+          <Route path="runs" element={<RunRecordsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

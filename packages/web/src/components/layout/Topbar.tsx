@@ -10,6 +10,9 @@ function getPageTitle(pathname: string): string {
   if (pathname === '/new') {
     return '新建运行';
   }
+  if (pathname === '/runs') {
+    return '运行记录';
+  }
   if (pathname.startsWith('/runs/')) {
     return '运行详情';
   }

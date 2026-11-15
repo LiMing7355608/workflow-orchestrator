@@ -24,11 +24,11 @@ function progressTone(
   return 'blue';
 }
 
-export function RunRow({ run }: { run: WorkflowRunSummary }) {
+export function RunRecordRow({ run }: { run: WorkflowRunSummary }) {
   return (
     <Link
       to={`/runs/${run.id}`}
-      className="group grid grid-cols-[minmax(0,1fr)_104px_160px_72px_92px_20px] items-center gap-4 px-5 py-3.5 transition-colors duration-150 hover:bg-subtle/50 max-[1100px]:grid-cols-[minmax(0,1fr)_104px_92px_20px]"
+      className="group grid grid-cols-[minmax(0,1fr)_96px_96px_150px_64px_88px_20px] items-center gap-4 px-5 py-3.5 transition-colors duration-150 hover:bg-subtle/50 max-[1100px]:grid-cols-[minmax(0,1fr)_96px_150px_64px_88px_20px] max-[900px]:grid-cols-[minmax(0,1fr)_96px_88px_20px]"
     >
       <div className="min-w-0">
         <p className="truncate text-[13px] font-medium text-ink">
@@ -40,19 +40,26 @@ export function RunRow({ run }: { run: WorkflowRunSummary }) {
       <RunStatusBadge status={run.status} />
 
       <div className="max-[1100px]:hidden">
-        <div className="flex items-center justify-between text-[10px] text-passive">
-          <span>{stageLabels[run.stage]}</span>
-          <span className="tabular-nums">{run.progress}%</span>
-        </div>
-        <Progress
-          value={run.progress}
-          tone={progressTone(run.status)}
-          label={`${run.title} 运行进度`}
-          className="mt-1.5"
-        />
+        <span className="inline-flex items-center rounded-md border border-line bg-subtle/60 px-2 py-0.5 text-[10px] text-muted">
+          {stageLabels[run.stage]}
+        </span>
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px] text-muted max-[1100px]:hidden">
+      <div className="max-[900px]:hidden">
+        <div className="flex items-center gap-2">
+          <Progress
+            value={run.progress}
+            tone={progressTone(run.status)}
+            label={`${run.title} 运行进度`}
+            className="flex-1"
+          />
+          <span className="w-7 text-right text-[10px] tabular-nums text-passive">
+            {run.progress}%
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 text-[11px] text-muted max-[900px]:hidden">
         <Boxes className="h-3.5 w-3.5 text-passive" strokeWidth={1.8} />
         <span className="tabular-nums">{run.nodeCount}</span>
       </div>

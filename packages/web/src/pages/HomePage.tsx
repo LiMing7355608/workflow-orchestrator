@@ -1,19 +1,17 @@
 import {
   Activity,
+  ArrowRight,
   CheckCircle2,
   Hand,
   Plus,
-  Search,
-  SearchX,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { PipelineStrip } from '../components/home/PipelineStrip';
-import { RunRow } from '../components/home/RunRow';
+import { RecentRunItem } from '../components/home/RecentRunItem';
+import { RunOverview } from '../components/home/RunOverview';
 import { StatCard } from '../components/home/StatCard';
-import { Button, buttonStyles } from '../components/ui/Button';
+import { buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { EmptyState } from '../components/ui/EmptyState';
 import { seedRuns } from '../data/seed';
 import { usePageTitle } from '../lib/use-page-title';
 
@@ -37,28 +35,6 @@ function SectionHeading({
 export function HomePage() {
   usePageTitle('工作台');
 
-  const location = useLocation();
-  const [query, setQuery] = useState('');
-
-  useEffect(() => {
-    if (!location.hash) {
-      return;
-    }
-    document
-      .querySelector(location.hash)
-      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [location.hash]);
-
-  const filteredRuns = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    if (!keyword) {
-      return seedRuns;
-    }
-    return seedRuns.filter((run) =>
-      `${run.title} ${run.summary}`.toLowerCase().includes(keyword),
-    );
-  }, [query]);
-
   const runningCount = seedRuns.filter(
     (run) => run.status === 'running',
   ).length;
@@ -68,6 +44,13 @@ export function HomePage() {
   const completedCount = seedRuns.filter(
     (run) => run.status === 'completed',
   ).length;
+
+  const recentRuns = [...seedRuns]
+    .sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    )
+    .slice(0, 3);
 
   return (
     <div className="mx-auto max-w-[1180px] px-6 py-7 max-[900px]:px-4">
@@ -123,51 +106,36 @@ export function HomePage() {
         />
       </section>
 
-      <section id="runs" className="mt-8 scroll-mt-20">
-        <div className="flex items-end justify-between gap-4 max-[700px]:items-start">
-          <SectionHeading
-            title="最近运行"
-            description={`共 ${seedRuns.length} 个运行，按最近更新时间排序。`}
-          />
-          <div className="relative w-[230px] max-[700px]:w-[160px]">
-            <Search
-              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-passive"
-              strokeWidth={1.8}
+      <section className="mt-8 grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] items-start gap-3 max-[950px]:grid-cols-1">
+        <div>
+          <div className="flex items-end justify-between gap-4">
+            <SectionHeading
+              title="最近运行"
+              description="最近更新的 3 个运行。"
             />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索运行"
-              aria-label="搜索运行"
-              className="h-8 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-[12px] text-ink placeholder:text-passive transition-colors focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
-            />
+            <Link
+              to="/runs"
+              className="inline-flex items-center gap-1 text-[11px] text-muted transition-colors hover:text-ink"
+            >
+              查看全部
+              <ArrowRight className="h-3.5 w-3.5" strokeWidth={1.8} />
+            </Link>
           </div>
+
+          <Card className="mt-3 divide-y divide-line overflow-hidden">
+            {recentRuns.map((run) => (
+              <RecentRunItem key={run.id} run={run} />
+            ))}
+          </Card>
         </div>
 
-        <Card className="mt-3 overflow-hidden">
-          {filteredRuns.length > 0 ? (
-            <div className="divide-y divide-line">
-              {filteredRuns.map((run) => (
-                <RunRow key={run.id} run={run} />
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              icon={SearchX}
-              title="没有匹配的运行"
-              description={`没有找到包含“${query.trim()}”的运行，换个关键词试试。`}
-              action={
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setQuery('')}
-                >
-                  清除搜索
-                </Button>
-              }
-            />
-          )}
-        </Card>
+        <div>
+          <SectionHeading
+            title="运行概览"
+            description="按状态统计当前运行。"
+          />
+          <RunOverview runs={seedRuns} className="mt-3" />
+        </div>
       </section>
     </div>
   );
