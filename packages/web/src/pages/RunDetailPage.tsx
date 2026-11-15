@@ -1,8 +1,11 @@
 import { GitBranch } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { EventStream } from '../components/run/EventStream';
 import { NodeInspector } from '../components/run/NodeInspector';
+import { RunBoard } from '../components/run/RunBoard';
 import { RunHeader } from '../components/run/RunHeader';
+import { ViewBar, type RunView } from '../components/run/ViewBar';
 import { WorkflowCanvas } from '../components/run/WorkflowCanvas';
 import { buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -14,11 +17,13 @@ export function RunDetailPage() {
   const { runId } = useParams();
   const run = useMemo(() => getRunDetail(runId ?? ''), [runId]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<RunView>('graph');
 
   usePageTitle(run?.title ?? '运行详情');
 
   useEffect(() => {
     setSelectedNodeId(null);
+    setActiveView('graph');
   }, [runId]);
 
   if (!run) {
@@ -54,13 +59,33 @@ export function RunDetailPage() {
         className="shrink-0 border-b border-line"
       />
 
+      <ViewBar
+        value={activeView}
+        onChange={setActiveView}
+        nodeCount={run.nodes.length}
+        eventCount={run.events.length}
+      />
+
       <div className="flex min-h-0 flex-1 max-[1100px]:block">
-        <div className="min-w-0 flex-1 max-[1100px]:h-[520px]">
-          <WorkflowCanvas
-            run={run}
-            selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
-          />
+        <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
+          {activeView === 'graph' ? (
+            <WorkflowCanvas
+              run={run}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
+          ) : activeView === 'board' ? (
+            <RunBoard
+              run={run}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
+          ) : (
+            <EventStream
+              events={run.events}
+              onSelectNode={setSelectedNodeId}
+            />
+          )}
         </div>
 
         <NodeInspector
