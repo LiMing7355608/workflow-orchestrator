@@ -1,0 +1,39 @@
+import { useEffect } from 'react';
+import {
+  Route,
+  Routes,
+  useLocation,
+} from 'react-router-dom';
+import { AppShell } from '../components/layout/AppShell';
+import { HomePage } from '../pages/HomePage';
+import { NewRunPage } from '../pages/NewRunPage';
+import { NotFoundPage } from '../pages/NotFoundPage';
+import { RunDetailPage } from '../pages/RunDetailPage';
+
+function ScrollToTop() {
+  const { pathname, hash } = useLocation();
+
+  useEffect(() => {
+    if (!hash) {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }, [pathname, hash]);
+
+  return null;
+}
+
+export default function App() {
+  return (
+    <>
+      <ScrollToTop />
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<HomePage />} />
+          <Route path="new" element={<NewRunPage />} />
+          <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
+      </Routes>
+    </>
+  );
+}

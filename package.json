@@ -1,0 +1,19 @@
+{
+  "name": "workflow-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "基于图的 Agent 编排器：规划、调度、交叉审查与人工审批闭环",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @orchestrator/server --filter @orchestrator/web dev",
+    "dev:server": "pnpm --filter @orchestrator/server dev",
+    "dev:web": "pnpm --filter @orchestrator/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @orchestrator/e2e test"
+  }
+}

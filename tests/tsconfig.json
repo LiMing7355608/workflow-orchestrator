@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@orchestrator/core": ["../packages/core/src/index.ts"],
+      "@orchestrator/server": ["../packages/server/src/app.ts"]
+    }
+  },
+  "include": ["test", "vitest.config.ts"]
+}
