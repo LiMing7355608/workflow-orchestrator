@@ -14,6 +14,8 @@ export type DagIssueKind =
   | 'disabled-agent'
   | 'agent-not-installed'
   | 'missing-agent'
+  /** 结构层错误（字段缺失、枚举越界）。也要回灌给 Agent，否则它会一直重犯 */
+  | 'schema-invalid'
   | 'action-not-allowed';
 
 export interface DagIssue {

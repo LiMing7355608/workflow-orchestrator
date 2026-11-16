@@ -205,6 +205,31 @@ describe('用 Agent 生成 DAG', () => {
     ).rejects.toThrow(/没有可用的 Agent/);
   });
 
+  it('每次规划用独立的临时工作区，不会读到上一轮的交付文件', async () => {
+    const prepared: Array<{ runId: string; nodeId: string }> = [];
+    const tracking: WorkspacePort = {
+      prepare: async (runId, nodeId) => {
+        prepared.push({ runId, nodeId });
+        return `/tmp/${runId}/${nodeId}`;
+      },
+      release: async () => {},
+    };
+
+    const fake = fakeRunner([validPlan, validPlan]);
+    await generateDag('写一个计算器', catalog, {
+      runner: fake.runner,
+      workspace: tracking,
+    });
+    await generateDag('写一份 README', catalog, {
+      runner: fake.runner,
+      workspace: tracking,
+    });
+
+    expect(prepared).toHaveLength(2);
+    // 目录复用会让上一轮的 .orchestrator-plan.json 被当成这一轮的结果
+    expect(prepared[0]?.runId).not.toBe(prepared[1]?.runId);
+  });
+
   it('prompt 里带自查标记与可用白名单', async () => {
     let captured = '';
     const runner: AgentRunner = {

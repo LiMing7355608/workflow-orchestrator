@@ -71,7 +71,13 @@ export interface AgentConfigFile {
 
 export interface AgentSessionSpec {
   derive: SessionDerive;
+  /** 续跑时追加的参数，{session} 为原生会话 id */
   resumeArgs: string[];
+  /**
+   * 首轮启动时就指定会话 id 用。没有这一项的 Agent 只能等平台自己发 id，
+   * 于是 uuidv5 派生型也会退化成「只能续、建不出来」。
+   */
+  newSessionArgs?: string[];
 }
 
 export interface AgentProfile {
@@ -116,7 +122,10 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       modelArgs: ['--model', '{model}'],
     },
     capabilities: { streaming: true, structured: true, resume: true, tools: true },
-    availability: 'ready',
+    // 装了、但这台机器上跑不通：Claude Code 被配成指向 deepseek-v4-flash，
+    // 它报 unrecognized_model。按定义「可直接调用」要求本机实测跑通，
+    // 所以这里只能是仅安装，不能凭 --version 就认定可用
+    availability: 'installed',
     enabled: true,
     permissionArgs: {
       default: ['--permission-mode', 'plan'],
@@ -124,11 +133,15 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       auto: ['--permission-mode', 'auto'],
       'bypass-permissions': ['--permission-mode', 'bypassPermissions'],
     },
-    session: { derive: 'uuidv5', resumeArgs: ['--resume', '{session}'] },
+    session: {
+      derive: 'uuidv5',
+      resumeArgs: ['--resume', '{session}'],
+      newSessionArgs: ['--session-id', '{session}'],
+    },
     windowsShim: 'bypass',
     version: '2.1.278',
-    source: 'claude --help（本机实测）',
-    note: '提示词走 stdin。审查节点用 plan 档，实现节点用 acceptEdits 并放开 Write/Edit。',
+    source: 'claude --help（参数已核验）',
+    note: '这台机器上 claude 被配成指向 deepseek-v4-flash，非交互执行会报 unrecognized_model，先修模型配置再用。',
     timeoutMs: 600_000,
   },
   {
@@ -364,7 +377,16 @@ function hasUnresolvedPlaceholder(value: string): boolean {
  *
  * 占位符替换只做字面量替换，不做 shell 转义——参数从不经过 shell，
  * 提示词一律走 stdin，这是 Windows 上 `.cmd` 包装唯一安全的用法。
- */export function buildAgentArgv(
+ *
+ * `resume` 为真时把 profile 里声明的 `session.resumeArgs` 展开后**追加在
+ * 最后**。这是近似：不同 CLI 的续跑参数集无法穷举，有的要替换掉原有的
+ * 子命令（`codex exec` → `codex resume`），有的只是纯追加（`claude --resume`）。
+ * 精确判断需要为每个平台写一套重写规则，那等于把 profile 的声明式好处
+ * 全部换成手写分支。因此这里选择「args 在前、resumeArgs 在后」的简单拼接，
+ * 让纯追加型 CLI 立刻可用；子命令替换型平台的续跑参数需要先在 profile 里
+ * 校准，或等 profile 增加重写字段。
+ */
+export function buildAgentArgv(
   profile: AgentProfile,
   options: {
     prompt?: string;
@@ -372,6 +394,8 @@ function hasUnresolvedPlaceholder(value: string): boolean {
     session?: string;
     workdir?: string;
     policy?: PermissionPolicy;
+    /** 是否续跑：为真时追加 profile.session.resumeArgs */
+    resume?: boolean;
   } = {},
 ): string[] {
   const policy = options.policy ?? 'default';
@@ -412,5 +436,28 @@ function hasUnresolvedPlaceholder(value: string): boolean {
   }
 
   argv.push(...profile.permissionArgs[policy]);
+
+  if (options.resume) {
+    for (const arg of profile.session.resumeArgs) {
+      const expanded = expand(arg);
+      // {session} 没给就整条丢掉：拼出字面量 `--resume {session}` 只会让
+      // CLI 在参数解析阶段就失败，那比「这一轮没续上」糟糕得多。
+      if (hasUnresolvedPlaceholder(expanded)) {
+        continue;
+      }
+      argv.push(expanded);
+    }
+  } else if (options.session) {
+    // 首轮就把会话 id 钉住。不定期指定的话平台侧根本不存在这个会话，
+    // 后面重跑时的 --resume 自然是接不上的。
+    for (const arg of profile.session.newSessionArgs ?? []) {
+      const expanded = expand(arg);
+      if (hasUnresolvedPlaceholder(expanded)) {
+        continue;
+      }
+      argv.push(expanded);
+    }
+  }
+
   return argv;
 }

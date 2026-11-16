@@ -1,5 +1,8 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   buildAgentArgv,
+  createParser,
   type AgentProfile,
   type AgentRunner,
   type WorkspacePort,
@@ -21,6 +24,16 @@ import { validateDag, type DagIssue } from './validate.js';
 
 /** prompt 里带这个标记，回放执行器据此返回确定性 DAG。 */
 export const PLANNER_PROMPT_MARKER = 'PLANNER_OUTPUT_JSON';
+
+/**
+ * 约定交付文件名。
+ *
+ * 不让调用方去解析 Agent 的自由输出：CLI Agent 的 stdout 是它自己的事件流
+ * （session / status / thinking），从中捞 JSON 必须猜格式，模型一换版本就崩。
+ * 改成让 Agent 把结果写进工作区里的约定文件，后端只读文件——读了就是读了，
+ * 没读就是没交，没有中间态。
+ */
+export const PLAN_FILENAME = '.orchestrator-plan.json';
 
 /** 规划阶段不写仓库，所以权限只用最保守的一档。 */
 const PLANNER_POLICY = 'default' as const;
@@ -142,8 +155,13 @@ function buildPlannerPrompt(
     '',
     `可用 agentId 白名单：${usable.map((agent) => agent.id).join(', ') || '无'}`,
     '',
+    '## 交付方式（这是硬要求）',
+    `把最终的任务图 JSON 写入当前工作目录下的 ${PLAN_FILENAME} 文件，用你的写文件工具完成。`,
+    '这是唯一的交付渠道。只在回复里贴 JSON 不算交付，编排器读不到就等于你没做。',
+    '写完之后可以再简短说明一句，但文件必须存在且内容是合法 JSON。',
+    '',
     '## 输出要求',
-    '只输出一个 JSON 对象，不要解释，也不要在 JSON 之外写任何文字。',
+    '文件内容是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
     '结构示例：',
     '{',
     '  "title": "短标题",',
@@ -186,27 +204,63 @@ function buildPlannerPrompt(
   return lines.join('\n');
 }
 
-/** 从整段输出里找第一个配平的 JSON 对象。 */
+/**
+ * 从整段输出里找出第一个「看起来像 DAG」的 JSON 对象。
+ *
+ * 不能只取第一个 `{`：CLI Agent 的输出本身是事件流（session / status /
+ * thinking），第一个配平对象是事件而不是答案。所以逐个扫描配平对象，
+ * 只认带 `nodes` 数组的那个——这才是任务图。
+ */
 function extractJsonObject(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const candidates = fenced?.[1] ? [fenced[1], text] : [text];
+  const candidates = [/(?:```(?:json)?\s*)([\s\S]*?)```/i.exec(text)?.[1], text]
+    .filter((item): item is string => Boolean(item));
 
   for (const candidate of candidates) {
-    const start = candidate.indexOf('{');
-    if (start === -1) {
-      continue;
-    }
-    const slice = sliceBalancedObject(candidate.slice(start));
-    if (!slice) {
-      continue;
-    }
-    try {
-      return JSON.parse(slice);
-    } catch {
-      // 换下一个候选
+    let index = 0;
+    while (index < candidate.length) {
+      const start = candidate.indexOf('{', index);
+      if (start === -1) {
+        break;
+      }
+      const slice = sliceBalancedObject(candidate.slice(start));
+      if (!slice) {
+        break;
+      }
+      try {
+        const value: unknown = JSON.parse(slice);
+        if (looksLikeDag(value)) {
+          return value;
+        }
+      } catch {
+        // 这个对象不完整或是别的东西，继续往后找
+      }
+      index = start + slice.length;
     }
   }
   return undefined;
+}
+
+/**
+ * 读 Agent 写下来的交付文件。没有就是没交，不猜。
+ *
+ * 导出是为了让 `amend.ts` 用同一份读取逻辑：两条链路交付的是同一个文件，
+ * 谁先谁后改一下读取细节，就会一边读得到、一边读不到。
+ */
+export async function readSubmittedPlan(cwd: string): Promise<unknown | undefined> {
+  try {
+    const raw = await readFile(join(cwd, PLAN_FILENAME), 'utf8');
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function looksLikeDag(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as { nodes?: unknown }).nodes)
+  );
 }
 
 /** 按括号配平截取，字符串里的括号不算。 */
@@ -285,13 +339,23 @@ export async function generateDag(
   const issues: DagIssue[] = [];
   const seen = new Set<string>();
 
+  // 每次规划用一套独立的工作目录。
+  //
+  // 之前固定用 planner/plan-N，目录会在多次运行之间复用：上一轮 Agent 写下的
+  // 交付文件还留在那里，新一轮若因为模型没写文件（或还没来得及写），
+  // readSubmittedPlan 就会把上一次的计划读回来——用户看到「写计算器」
+  // 展开成「起草 README」。用一次性目录从根上避免这种事。
+  const workspaceRunId = `planner-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const prompt = buildPlannerPrompt(goal, catalog, issues);
-    const nodeId = `plan-${attempt}`;
+    const nodeId = `attempt-${attempt}`;
 
     let cwd: string;
     try {
-      cwd = await execution.workspace.prepare('planner', nodeId);
+      cwd = await execution.workspace.prepare(workspaceRunId, nodeId);
     } catch (error) {
       throw new DagGenerationError(
         `规划工作区准备失败：${(error as Error).message}`,
@@ -307,6 +371,19 @@ export async function generateDag(
       policy: PLANNER_POLICY,
     });
 
+    // 必须按平台解析，不能从裸 stdout 里捞 JSON：CLI Agent 的输出本身
+    // 就是一串 JSON 事件（session / status / thinking），第一个 `{` 抓到的是
+    // 事件而不是答案。只把 text 与 result 类事件拼成正文，再从正文里找 DAG。
+    const parser = createParser(agent.launch.parser);
+    let answer = '';
+    const collect = (events: ReturnType<typeof parser.push>): void => {
+      for (const event of events) {
+        if (event.kind === 'text' || event.kind === 'result') {
+          answer += event.text ?? '';
+        }
+      }
+    };
+
     const result = await execution.runner.run(
       {
         runId: 'planner',
@@ -320,17 +397,38 @@ export async function generateDag(
         timeoutMs: agent.timeoutMs,
         policy: PLANNER_POLICY,
       },
-      (chunk) => execution.onOutput?.(chunk),
+      (chunk) => {
+        collect(parser.push(chunk));
+        execution.onOutput?.(chunk);
+      },
     );
+    collect(parser.finish());
 
+    // 交付文件优先；读不到才退回解析 stdout（兼容不写文件的 Agent）
+    const submitted = await readSubmittedPlan(cwd);
+    const candidate = answer.trim() || result.output;
+    const raw = submitted ?? extractJsonObject(candidate);
+
+    // 读完再释放工作区，顺序不能反
     await execution.workspace.release('planner', nodeId).catch(() => {});
 
-    if (!result.ok) {
+    if (raw === undefined) {
+      // 连文件带 stdout 都没拿到东西：此时才把失败归因到执行本身
+      if (!result.ok) {
+        if (attempt === maxAttempts) {
+          throw new DagGenerationError(
+            result.timedOut
+              ? `规划 Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
+              : `规划 Agent 执行失败：${result.error ?? `退出码 ${result.exitCode ?? '未知'}`}`,
+            attempt,
+            issues,
+          );
+        }
+        continue;
+      }
       if (attempt === maxAttempts) {
         throw new DagGenerationError(
-          result.timedOut
-            ? `规划 Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
-            : `规划 Agent 执行失败：${result.error ?? `退出码 ${result.exitCode ?? '未知'}`}`,
+          `Agent 没有把任务图写入 ${PLAN_FILENAME}：${truncate(candidate, 400)}`,
           attempt,
           issues,
         );
@@ -338,11 +436,25 @@ export async function generateDag(
       continue;
     }
 
-    const parsed = safeParseDag(extractJsonObject(result.output));
+    const parsed = safeParseDag(raw);
     if (!parsed.success) {
+      // 结构错误也必须回灌：只说「不合格」，Agent 下一轮还是会犯同样的错
+      for (const zodIssue of parsed.error.issues.slice(0, 6)) {
+        const path = zodIssue.path.join('.') || '(root)';
+        const pseudo: DagIssue = {
+          kind: 'schema-invalid',
+          message: `${path}: ${zodIssue.message}`,
+          nodeIds: [],
+        };
+        const key = issueKey(pseudo);
+        if (!seen.has(key)) {
+          seen.add(key);
+          issues.push(pseudo);
+        }
+      }
       if (attempt === maxAttempts) {
         throw new DagGenerationError(
-          `Agent 没有给出合法的 DAG JSON：${truncate(result.output, 400)}`,
+          `Agent 给出的图结构不合法：${truncate(JSON.stringify(raw), 300)}`,
           attempt,
           issues,
         );

@@ -32,3 +32,20 @@ export type {
   PlannerExecution,
   PlannerOptions,
 } from './generate.js';
+
+export {
+  AMENDABLE_FIELDS,
+  CURRENT_DAG_MARKER,
+  PLANNER_AMEND_MARKER,
+  amendDag,
+  buildAmendmentPrompt,
+  extractCurrentDagFromPrompt,
+} from './amend.js';
+
+export type {
+  AmendableField,
+  AmendedPlan,
+  AmendOptions,
+} from './amend.js';
+
+export { PLAN_FILENAME, readSubmittedPlan } from './generate.js';
