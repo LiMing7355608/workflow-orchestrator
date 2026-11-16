@@ -1,16 +1,6 @@
-import {
-  ArrowLeft,
-  ChevronRight,
-  FileCode2,
-  GitBranch,
-  ShieldAlert,
-  X,
-} from 'lucide-react';
-import { useState } from 'react';
-import { decideApproval } from '../../lib/api';
+import { ChevronRight, Maximize2 } from 'lucide-react';
 import { cn } from '../../lib/cn';
-import { formatDuration } from '../../lib/format';
-import { nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
+import { displayNodeStatus, nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
 import type {
   NodeStatus,
   WorkflowNode,
@@ -19,14 +9,25 @@ import type {
 import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
+import { CollapsibleText } from '../ui/CollapsibleText';
 import { Progress } from '../ui/Progress';
+
+/**
+ * 右侧运行概览栏。
+ *
+ * 它曾经兼任「节点详情」——一个节点四五十条事件被塞进 320px 宽的一列里，
+ * 长段落读不动、diff 只能看个开头。现在节点详情搬去了独立的大面板
+ * （见 NodeDetailPanel），这一栏回到运行级视角：进度、节点状态统计、待处理
+ * 事项、参与 Agent。选中节点只留一条摘要和「展开详情」入口，用来确认
+ * 「高亮的是这个」并一键进面板。
+ */
 
 interface NodeInspectorProps {
   run: WorkflowRunDetail;
+  /** 当前选中的节点，仅用于摘要卡与高亮；详情由 NodeDetailPanel 承载 */
   node: WorkflowNode | null;
+  /** 语义不变：用于高亮，以及在概览/摘要里点条目打开详情面板 */
   onSelectNode: (nodeId: string | null) => void;
-  /** 审批落盘后刷新运行详情 */
-  onApprovalDecided?: () => void;
   className?: string;
 }
 
@@ -35,6 +36,8 @@ const statusOrder: NodeStatus[] = [
   'running',
   'waiting_approval',
   'ready',
+  // 统计按展示态算，所以「已停止」也要有一格；它与 ready 互斥（见 displayNodeStatus）
+  'interrupted',
   'pending',
   'retry',
   'failed',
@@ -51,7 +54,10 @@ function RunOverview({
   const agents = new Map<string, { total: number; running: number }>();
 
   for (const node of run.nodes) {
-    counts[node.status] = (counts[node.status] ?? 0) + 1;
+    // 按展示态统计：被停止的节点在后端仍是 ready，直接计数会让概览里
+    // 既看不到「已停止」，又把读者引向「它还在排队」
+    counts[displayNodeStatus(node)] =
+      (counts[displayNodeStatus(node)] ?? 0) + 1;
 
     const current = agents.get(node.agent) ?? { total: 0, running: 0 };
     current.total += 1;
@@ -80,7 +86,16 @@ function RunOverview({
             {run.nodes.length} 个节点
           </span>
         </div>
-        <p className="mt-1 text-[10px] leading-4 text-muted">{run.summary}</p>
+        {/*
+          这里显示完整目标而不是 summary：summary 只截了首段，用户看不到自己
+          追加的补充要求（粒度、并行度、审查轮次）。默认折叠两行，需要时展开。
+        */}
+        <CollapsibleText
+          text={run.goal || run.summary}
+          lines={2}
+          threshold={20}
+          className="mt-1 whitespace-pre-line text-[10px] leading-4 text-muted"
+        />
       </div>
 
       <div className="flex-1 space-y-5 overflow-y-auto p-4">
@@ -194,263 +209,65 @@ function RunOverview({
   );
 }
 
-/** 审批人。演示阶段固定为当前审批小组，接入身份后由会话决定。 */
-const ACTOR = '第二组';
-
-function ApprovalActions({
-  runId,
+/**
+ * 选中节点摘要。
+ *
+ * 只在「有选中」时出现，回答两件事：高亮的是哪个节点、点哪儿去看全过程。
+ * 它刻意不复述时间线——详情已经在面板里了，这里再抄一遍就等于回到从前。
+ */
+function SelectedNodeSummary({
   node,
-  onDone,
+  onOpen,
 }: {
-  runId: string;
   node: WorkflowNode;
-  onDone?: () => void;
-}) {
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState<'approve' | 'reject' | 'handoff' | null>(
-    null,
-  );
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(decision: 'approve' | 'reject' | 'handoff') {
-    setBusy(decision);
-    setError(null);
-    const result = await decideApproval(runId, node.id, {
-      decision,
-      actor: ACTOR,
-      reason: reason.trim() || undefined,
-    });
-    setBusy(null);
-    if (!result) {
-      // 后端没接上时不谎报成功
-      setError('后端未响应，审批没有提交。');
-      return;
-    }
-    setReason('');
-    onDone?.();
-  }
-
-  return (
-    <div className="px-4 py-3">
-      <div className="rounded-lg border border-warning/20 bg-warning-soft/70 p-3">
-        <div className="flex items-center gap-2 text-[11px] font-medium text-warning">
-          <ShieldAlert className="h-3.5 w-3.5" strokeWidth={1.8} />
-          等待人工审批
-        </div>
-        <p className="mt-1.5 text-[10px] leading-4 text-muted">
-          批准推进下游；驳回把上游「{node.dependsOn[0] ?? '无依赖'}」退回重做，
-          已跑完的下游一并作废；转交追加一条新的审批记录。
-        </p>
-
-        <input
-          value={reason}
-          onChange={(event) => setReason(event.target.value)}
-          placeholder="审批理由（可选）"
-          aria-label="审批理由"
-          className="mt-2.5 h-7 w-full rounded-md border border-line bg-surface px-2 text-[11px] text-ink placeholder:text-passive transition-colors focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
-        />
-
-        <div className="mt-2 flex items-center gap-1.5">
-          <Button
-            size="sm"
-            onClick={() => void submit('approve')}
-            disabled={busy !== null}
-          >
-            {busy === 'approve' ? '提交中' : '批准'}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => void submit('reject')}
-            disabled={busy !== null}
-          >
-            驳回
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void submit('handoff')}
-            disabled={busy !== null}
-          >
-            转交
-          </Button>
-        </div>
-
-        {error ? (
-          <p className="mt-2 text-[10px] leading-4 text-danger">{error}</p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function NodeDetail({
-  run,
-  node,
-  onSelectNode,
-  onApprovalDecided,
-}: {
-  run: WorkflowRunDetail;
-  node: WorkflowNode;
-  onSelectNode: (nodeId: string | null) => void;
-  onApprovalDecided?: () => void;
+  onOpen: (nodeId: string) => void;
 }) {
   const typeMeta = nodeTypeMeta[node.type];
-  const statusMeta = nodeStatusMeta[node.status];
+  const statusMeta = nodeStatusMeta[displayNodeStatus(node)];
   const Icon = typeMeta.icon;
-  const dependencies = node.dependsOn.map((id) => ({
-    id,
-    title: run.nodes.find((item) => item.id === id)?.title ?? id,
-  }));
 
   return (
-    <>
-      <div className="flex items-center gap-2 border-b border-line px-4 py-3">
-        <button
-          type="button"
-          onClick={() => onSelectNode(null)}
-          className="inline-flex items-center gap-1 text-[11px] text-muted transition-colors hover:text-ink"
+    <div className="shrink-0 border-b border-line bg-subtle/30 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            'grid h-6 w-6 shrink-0 place-items-center rounded-md',
+            typeMeta.tile,
+          )}
         >
-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.8} />
-          概览
-        </button>
-        <button
-          type="button"
-          aria-label="关闭节点详情"
-          onClick={() => onSelectNode(null)}
-          className="ml-auto grid h-6 w-6 place-items-center rounded-md text-passive transition-colors hover:bg-subtle hover:text-ink"
-        >
-          <X className="h-3.5 w-3.5" strokeWidth={1.8} />
-        </button>
+          <Icon className="h-3 w-3" strokeWidth={1.8} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-ink">
+          {node.title}
+        </span>
+        <Badge tone={statusMeta.tone} dot>
+          {statusMeta.label}
+        </Badge>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="border-b border-line px-4 py-4">
-          <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                'grid h-7 w-7 place-items-center rounded-md',
-                typeMeta.tile,
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" strokeWidth={1.8} />
-            </span>
-            <span className="text-[10px] text-muted">
-              {typeMeta.label}节点
-            </span>
-            <Badge tone={statusMeta.tone} dot className="ml-auto">
-              {statusMeta.label}
-            </Badge>
-          </div>
+      {/*
+        把描述也放进来：用户点节点是想知道「这个要做什么」，只给标题等于让他
+        再点一次。窄栏里默认两行，长任务书可以就地展开，不必开大面板。
+      */}
+      {node.description ? (
+        <CollapsibleText
+          text={node.description}
+          lines={2}
+          threshold={60}
+          className="mt-1.5 text-[11px] leading-4 text-muted"
+        />
+      ) : null}
 
-          <h2 className="mt-2 text-[15px] font-medium leading-5 text-ink">
-            {node.title}
-          </h2>
-          <p className="mt-1 text-[11px] leading-5 text-muted">
-            {node.description}
-          </p>
-        </div>
-
-        <div className="border-b border-line px-4 py-3">
-          <div className="grid grid-cols-2 gap-3 text-[11px]">
-            <div>
-              <span className="block text-[10px] text-passive">
-                执行 Agent
-              </span>
-              <AgentChip
-                agentId={node.agentId}
-                label={node.agent}
-                className="mt-1 text-ink"
-                iconClassName="h-3.5 w-3.5"
-              />
-            </div>
-            <div>
-              <span className="block text-[10px] text-passive">耗时</span>
-              <span className="mt-1 block tabular-nums text-ink">
-                {formatDuration(node.durationMs)}
-              </span>
-            </div>
-            <div>
-              <span className="block text-[10px] text-passive">
-                尝试次数
-              </span>
-              <span className="mt-1 block tabular-nums text-ink">
-                {node.attempts}
-              </span>
-            </div>
-            <div>
-              <span className="block text-[10px] text-passive">
-                上游依赖
-              </span>
-              <span className="mt-1 block tabular-nums text-ink">
-                {node.dependsOn.length}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="border-b border-line px-4 py-3">
-          <h3 className="flex items-center gap-1.5 text-[10px] font-medium text-muted">
-            <GitBranch className="h-3 w-3" strokeWidth={1.8} />
-            依赖
-          </h3>
-
-          {dependencies.length > 0 ? (
-            <div className="mt-2 space-y-1.5">
-              {dependencies.map((dependency) => (
-                <button
-                  key={dependency.id}
-                  type="button"
-                  onClick={() => onSelectNode(dependency.id)}
-                  className="flex w-full items-center gap-2 rounded-md border border-line bg-subtle/40 px-2 py-1.5 text-left text-[11px] text-muted transition-colors hover:border-line-strong hover:text-ink"
-                >
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-passive" />
-                  <span className="truncate">{dependency.title}</span>
-                  <ChevronRight
-                    className="ml-auto h-3 w-3 shrink-0 text-passive"
-                    strokeWidth={1.8}
-                  />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-2 text-[11px] text-passive">无上游依赖</p>
-          )}
-        </div>
-
-        <div className="border-b border-line px-4 py-3">
-          <h3 className="flex items-center gap-1.5 text-[10px] font-medium text-muted">
-            <FileCode2 className="h-3 w-3" strokeWidth={1.8} />
-            文件范围
-          </h3>
-
-          {node.files.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {node.files.map((file) => (
-                <code
-                  key={file}
-                  className="rounded border border-line bg-subtle/60 px-1.5 py-0.5 font-mono text-[10px] text-muted"
-                >
-                  {file}
-                </code>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-2 text-[11px] text-passive">
-              该节点不独占文件
-            </p>
-          )}
-        </div>
-
-        {node.status === 'waiting_approval' ? (
-          <ApprovalActions
-            runId={run.id}
-            node={node}
-            onDone={onApprovalDecided}
-          />
-        ) : null}
-      </div>
-    </>
+      <Button
+        size="sm"
+        variant="secondary"
+        className="mt-2 w-full"
+        onClick={() => onOpen(node.id)}
+      >
+        <Maximize2 className="h-3.5 w-3.5" strokeWidth={1.8} />
+        展开节点详情
+      </Button>
+    </div>
   );
 }
 
@@ -458,7 +275,6 @@ export function NodeInspector({
   run,
   node,
   onSelectNode,
-  onApprovalDecided,
   className,
 }: NodeInspectorProps) {
   return (
@@ -469,15 +285,9 @@ export function NodeInspector({
       )}
     >
       {node ? (
-        <NodeDetail
-          run={run}
-          node={node}
-          onSelectNode={onSelectNode}
-          onApprovalDecided={onApprovalDecided}
-        />
-      ) : (
-        <RunOverview run={run} onSelectNode={onSelectNode} />
-      )}
+        <SelectedNodeSummary node={node} onOpen={onSelectNode} />
+      ) : null}
+      <RunOverview run={run} onSelectNode={onSelectNode} />
     </aside>
   );
 }

@@ -79,6 +79,8 @@ const filterOptions: Array<{ value: EventFilter; label: string }> = [
  * 这里只标注真正需要一眼分辨的几类。
  */
 const kindMeta: Partial<Record<AgentEventKind, { label: string; className: string }>> = {
+  // 思考不是回答：这里只给一个弱标记，说明这一行分量比正文轻
+  thinking: { label: '思考', className: 'text-muted' },
   tool: { label: '工具', className: 'text-accent' },
   result: { label: '结果', className: 'text-success' },
   usage: { label: '用量', className: 'text-passive' },

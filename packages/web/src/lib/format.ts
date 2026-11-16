@@ -42,6 +42,25 @@ export function formatDateTime(iso: string): string {
   }).format(new Date(iso));
 }
 
+/**
+ * 时刻，精确到秒（HH:mm:ss）。
+ *
+ * 节点执行输出常常挤在同一分钟里，只到分钟就看不出先后；
+ * 这里不显示日期，因为一个节点的输出都在同一段时间内。
+ */
+export function formatClock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
