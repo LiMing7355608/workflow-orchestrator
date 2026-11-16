@@ -1,5 +1,5 @@
 import { buildAgentArgv, type AgentProfile } from './agents.js';
-import type { AgentRunner, WorkspacePort } from './execution.js';
+import type { NodeArtifact, AgentRunner, WorkspacePort } from './execution.js';
 import { DEFAULT_CONCURRENCY, isRunSettled, pendingHumanWork, pickBatch } from './scheduler.js';
 import type {
   NodeFacts,
@@ -18,6 +18,19 @@ export interface AdvanceDeps {
   concurrency?: number;
   /** 单次推进的最大轮次，防止调度循环失控 */
   maxRounds?: number;
+  /**
+   * 把节点产物落盘，返回文件路径。
+   *
+   * 编排内核不碰文件系统，存哪儿由宿主决定；返回 undefined 表示
+   * 存盘失败，此时事件里不带 diffPath，下游读到的是「没有 diff」。
+   */
+  saveArtifact?: (
+    runId: string,
+    nodeId: string,
+    artifact: NodeArtifact,
+  ) => Promise<string | undefined>;
+  /** 读回某节点上次落盘的 diff 文本，供审查提示词使用 */
+  loadArtifact?: (runId: string, nodeId: string) => Promise<string | undefined>;
 }
 
 export type AdvanceStopReason =
@@ -41,7 +54,73 @@ export function parseVerdict(output: string): ReviewVerdict {
   return 'approved';
 }
 
-function buildPrompt(run: RunFacts, node: NodeFacts, upstream: NodeFacts[]): string {
+/**
+ * 嵌进审查提示词的 diff 上限（字符数）。
+ *
+ * 8000 字符大约是一份中等规模改动的全量 diff。再往上贴，提示词会
+ * 挤掉真正的审查要求，而 Agent 对超长输入的注意力分布本来就不均匀。
+ */
+const DIFF_PROMPT_LIMIT = 8000;
+
+/** 上游节点没有可用 diff 时的降级说明，措辞要能让审查 Agent 明白原因。 */
+const NO_DIFF_NOTE = '该上游节点没有产出 diff（工作区可能不是 git 仓库）。';
+
+/**
+ * 拼「被审变更」段落。
+ *
+ * 审查 Agent 之前只能看到标题和描述，等于在盲审；这里把上游实现节点
+ * 落盘的 diff 读回来嵌进提示词，让它审的是真实改动。
+ * 任何读取失败都降级成一句说明，绝不因此中断审查。
+ */
+async function reviewChangesSection(
+  runId: string,
+  upstream: NodeFacts[],
+  deps: AdvanceDeps,
+): Promise<string[]> {
+  const implementNodes = upstream.filter((item) => item.type === 'implement');
+  if (implementNodes.length === 0) {
+    return [];
+  }
+
+  const lines = ['', '## 被审变更'];
+  for (const item of implementNodes) {
+    lines.push('', `### ${item.title}（${item.id}）`);
+
+    let diff: string | undefined;
+    try {
+      diff = await deps.loadArtifact?.(runId, item.id);
+    } catch {
+      diff = undefined;
+    }
+
+    if (!diff || !diff.trim()) {
+      lines.push(NO_DIFF_NOTE);
+      continue;
+    }
+
+    if (diff.length > DIFF_PROMPT_LIMIT) {
+      lines.push(
+        '```diff',
+        diff.slice(0, DIFF_PROMPT_LIMIT),
+        '```',
+        `> 注意：diff 共 ${diff.length} 字符，已截断到前 ${DIFF_PROMPT_LIMIT} 字符；`,
+        '> 未展示的部分请以代码库实际状态为准，不要当作不存在。',
+      );
+      continue;
+    }
+
+    lines.push('```diff', diff, '```');
+  }
+
+  return lines;
+}
+
+async function buildPrompt(
+  run: RunFacts,
+  node: NodeFacts,
+  upstream: NodeFacts[],
+  deps: AdvanceDeps,
+): Promise<string> {
   const lines = [
     `# 任务：${node.title}`,
     '',
@@ -61,6 +140,8 @@ function buildPrompt(run: RunFacts, node: NodeFacts, upstream: NodeFacts[]): str
   }
 
   if (node.type === 'review') {
+    // 变更段落紧贴在审查要求之前：读到这里时正好把手上的东西对照着判
+    lines.push(...(await reviewChangesSection(run.id, upstream, deps)));
     lines.push(
       '',
       '## 审查要求',
@@ -141,7 +222,7 @@ async function executeNode(
 
   // 审查节点必须用最保守的权限档位
   const policy = node.type === 'review' ? 'default' : 'accept-edits';
-  const prompt = buildPrompt(run, node, upstreamOf(run, node));
+  const prompt = await buildPrompt(run, node, upstreamOf(run, node), deps);
 
   let cwd: string;
   try {
@@ -238,7 +319,58 @@ async function executeNode(
   }
 
   await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+
+  // 实现节点的产物要在 release 之前采集——工作区一释放，
+  // 那条分支和目录就没了，diff 再也拿不回来。
+  // 采集/存盘失败只意味着下游看不到 diff，不影响本次执行的成功判定。
+  if (node.type === 'implement') {
+    await captureArtifact(runId, node.id, deps);
+  }
+
   await deps.workspace.release(runId, node.id).catch(() => {});
+}
+
+/**
+ * 采集产物 → 落盘 → 发事实。
+ *
+ * 三步都可以失败，且失败互不牵连：工作区不是 git 就没有 capture，
+ * 存盘失败就没有 diffPath，无论哪种，bytes / files 仍会如实入账，
+ * 看板至少能看到这次执行到底动了多少东西。
+ */
+async function captureArtifact(
+  runId: string,
+  nodeId: string,
+  deps: AdvanceDeps,
+): Promise<void> {
+  if (!deps.workspace.capture) {
+    return;
+  }
+
+  let artifact: NodeArtifact;
+  try {
+    artifact = await deps.workspace.capture(runId, nodeId);
+  } catch {
+    return;
+  }
+
+  let diffPath: string | undefined;
+  if (deps.saveArtifact) {
+    try {
+      diffPath = await deps.saveArtifact(runId, nodeId, artifact);
+    } catch {
+      diffPath = undefined;
+    }
+  }
+
+  await deps.emit({
+    type: 'node.artifact',
+    at: deps.now(),
+    runId,
+    nodeId,
+    bytes: artifact.bytes,
+    files: artifact.files,
+    diffPath,
+  });
 }
 
 /**

@@ -118,6 +118,8 @@ export function deriveNodeView(
     attempts: node.attempts,
     durationMs: duration !== undefined && Number.isFinite(duration) ? duration : undefined,
     escalated: node.escalated,
+    artifactBytes: node.artifactBytes,
+    artifactFiles: node.artifactFiles,
   };
 }
 
@@ -185,6 +187,7 @@ function eventKind(event: OrchestratorEvent): EventKind {
     case 'node.completed':
     case 'node.failed':
     case 'node.reset':
+    case 'node.artifact':
     case 'agent.output':
       return 'agent';
     default:
@@ -233,6 +236,8 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
             : '转交';
       return `审批${label}：${event.actor}${event.reason ? `（${event.reason}）` : ''}`;
     }
+    case 'node.artifact':
+      return `${nodeTitleOf(run, event.nodeId)} 产出 ${event.files.length} 个文件的变更（${event.bytes} 字节）`;
     case 'agent.output':
       return event.chunk.trim();
     default:

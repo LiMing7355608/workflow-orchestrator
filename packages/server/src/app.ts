@@ -26,6 +26,7 @@ import {
   type Dag,
   type DagIssue,
 } from '@orchestrator/planner';
+import { ArtifactStore } from './artifacts.js';
 import { probeCatalog } from './probe.js';
 import { MockAgentRunner, SpawnAgentRunner } from './runners.js';
 import { buildSeedEvents } from './seed.js';
@@ -96,12 +97,20 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   const runner: AgentRunner =
     runnerMode === 'real' ? new SpawnAgentRunner() : new MockAgentRunner();
 
-  const workspaceMode = process.env.AGENT_WORKSPACE ?? 'temp';
+  // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。
+  // temp 保留作为降级选项——在没有 git 的环境里仍能跑通整条编排链路，
+  // 代价是审查提示词里只会有一句「该上游节点没有产出 diff」。
+  const workspaceMode = process.env.AGENT_WORKSPACE ?? 'git';
   const repoRoot = process.cwd();
   const workspace: WorkspacePort =
     workspaceMode === 'git'
       ? new GitWorktreeWorkspace(repoRoot)
       : new TempDirWorkspace(resolve(repoRoot, '.worktrees'));
+
+  // diff 原文落盘，事件日志里只留统计量与路径。data/* 已在 gitignore 内。
+  const artifacts = new ArtifactStore(
+    process.env.AGENT_ARTIFACT_DIR ?? resolve(repoRoot, 'data/artifacts'),
+  );
 
   // 同一个运行不允许两条推进链路并行，否则会重复派发同一批节点
   const advancing = new Set<string>();
@@ -120,6 +129,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         resolveAgent: (agentId) => findAgent(agentId, catalog),
         now,
         concurrency: Number(process.env.AGENT_CONCURRENCY ?? 2),
+        // 产物落盘与读取都走同一个 store，审查节点才能读到实现节点刚写的 diff
+        saveArtifact: (runId, nodeId, artifact) =>
+          artifacts.save(runId, nodeId, artifact),
+        loadArtifact: (runId, nodeId) => artifacts.load(runId, nodeId),
       });
     } catch (error) {
       // 推进失败不能吞掉：写成一条事实，让看板能看见

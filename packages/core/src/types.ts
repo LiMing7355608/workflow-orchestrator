@@ -71,6 +71,15 @@ export interface NodeFacts {
   failureReason?: string;
   /** 审查超限后升级到人工 */
   escalated?: boolean;
+  /**
+   * 最近一次采集到的产物统计，仅供展示与提示词预算判断。
+   *
+   * diff 原文一律不进事实——它可能有几百 KB，写进事件日志等于
+   * 每重放一次就要在内存里搬一遍，而且这些字节对状态机毫无用处。
+   */
+  artifactBytes?: number;
+  /** 产物命中的路径，用于看板显示「改了哪些文件」 */
+  artifactFiles?: string[];
 }
 
 /** 审批记录：不可变追加，每次请求与决策各一条。 */
@@ -126,6 +135,15 @@ export type OrchestratorEvent =
       nodeId: string;
       agentId: string;
       chunk: string;
+    })
+  | (BaseEvent & {
+      /** 产物采集完成。只带统计量与落盘位置，diff 原文在文件里。 */
+      type: 'node.artifact';
+      nodeId: string;
+      bytes: number;
+      files: string[];
+      /** diff 文件路径；工作区不可采集或存盘失败时缺省 */
+      diffPath?: string;
     });
 
 export type EventType = OrchestratorEvent['type'];
@@ -161,6 +179,9 @@ export interface NodeView {
   attempts: number;
   durationMs?: number;
   escalated?: boolean;
+  /** 上游产物的统计量；没有产物采集时缺省 */
+  artifactBytes?: number;
+  artifactFiles?: string[];
 }
 
 export interface EdgeView {

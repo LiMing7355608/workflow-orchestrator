@@ -92,5 +92,6 @@ export type {
   AgentRunRequest,
   AgentRunResult,
   AgentRunner,
+  NodeArtifact,
   WorkspacePort,
 } from './execution.js';

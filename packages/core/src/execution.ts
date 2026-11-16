@@ -43,9 +43,34 @@ export interface AgentRunner {
   ): Promise<AgentRunResult>;
 }
 
+/**
+ * 节点产物：一次执行在工作区里留下的改动快照。
+ *
+ * 只带统一 diff 文本与统计量，diff 原文由调用方自行落盘——
+ * 事件日志里只放 bytes / files，否则日志会被 diff 撑爆。
+ */
+export interface NodeArtifact {
+  /** 统一 diff 文本，可能为空（工作区不是 git 仓库，或节点什么都没改） */
+  diff: string;
+  /** 改动到的路径 */
+  files: string[];
+  /** diff 字节数（按 UTF-8 计），用于判断该不该在提示词里全文嵌入 */
+  bytes: number;
+  capturedAt: string;
+}
+
 export interface WorkspacePort {
   /** 为节点准备独立工作目录，返回绝对路径。必须在 Agent 启动之前完成。 */
   prepare(runId: string, nodeId: string): Promise<string>;
   /** 释放工作目录。清理失败不应让编排器崩溃。 */
   release(runId: string, nodeId: string): Promise<void>;
+  /**
+   * 采集节点产物。
+   *
+   * 刻意做成可选方法：只有基于 git 的工作区才谈得上「改动」，
+   * 临时目录实现没有基线可比，调用方必须容忍它不存在。
+   * 实现方也不该抛异常——采集失败只意味着拿不到 diff，
+   * 不能因此把一次成功的执行判成失败。
+   */
+  capture?(runId: string, nodeId: string): Promise<NodeArtifact>;
 }

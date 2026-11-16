@@ -74,6 +74,10 @@ function resetNode(run: RunFacts, nodeId: string): void {
   node.finishedAt = undefined;
   node.verdict = undefined;
   node.failureReason = undefined;
+  // 旧产物随重做一并作废：留着上一轮的 diff 统计，
+  // 看板会显示一份已经不存在的变更。
+  node.artifactBytes = undefined;
+  node.artifactFiles = undefined;
   node.attempts += 1;
 
   for (const id of downstreamIds(run, nodeId)) {
@@ -85,6 +89,8 @@ function resetNode(run: RunFacts, nodeId: string): void {
     downstream.finishedAt = undefined;
     downstream.verdict = undefined;
     downstream.failureReason = undefined;
+    downstream.artifactBytes = undefined;
+    downstream.artifactFiles = undefined;
   }
 }
 
@@ -193,6 +199,15 @@ export function reduce(
     case 'agent.output':
       // 输出走事件流，不改变任何事实。
       return state;
+
+    case 'node.artifact':
+      // 产物只统计量入事实，不改变节点状态机：采集成功与否
+      // 都不该影响「这个节点是否完成」，否则一次 git 抖动就能
+      // 把已完成的节点改判成失败。
+      return withNode(state, event.runId, event.nodeId, (node) => {
+        node.artifactBytes = event.bytes;
+        node.artifactFiles = event.files;
+      });
 
     default:
       return state;
