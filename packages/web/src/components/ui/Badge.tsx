@@ -35,6 +35,7 @@ interface BadgeProps {
   tone?: BadgeTone;
   dot?: boolean;
   className?: string;
+  title?: string;
 }
 
 export function Badge({
@@ -42,9 +43,11 @@ export function Badge({
   tone = 'neutral',
   dot = false,
   className,
+  title,
 }: BadgeProps) {
   return (
     <span
+      title={title}
       className={cn(
         'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4',
         toneStyles[tone],

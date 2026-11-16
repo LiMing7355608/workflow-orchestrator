@@ -7,6 +7,7 @@ import { cn } from '../../lib/cn';
 import type { BoardCard as BoardCardModel } from '../../lib/board';
 import { formatDuration } from '../../lib/format';
 import { nodeStatusMeta } from '../../lib/workflow-meta';
+import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
 
 interface BoardCardProps {
@@ -38,9 +39,12 @@ export function BoardCard({ card, selected, onSelect }: BoardCardProps) {
         </Badge>
       </div>
 
-      <p className="mt-1 truncate text-[10px] text-muted">
-        {card.implement.agent}
-      </p>
+      <AgentChip
+        agentId={card.implement.agentId}
+        label={card.implement.agent}
+        className="mt-1 text-[10px] text-muted"
+        iconClassName="h-3 w-3"
+      />
 
       <div className="mt-2 flex items-center gap-1.5 text-[10px] text-passive">
         <GitBranch className="h-3 w-3 shrink-0" strokeWidth={1.8} />

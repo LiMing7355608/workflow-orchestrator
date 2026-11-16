@@ -1,4 +1,5 @@
 import {
+  Bot,
   History,
   LayoutDashboard,
   Plus,
@@ -21,6 +22,7 @@ const navItems: NavItem[] = [
   { to: '/', label: '工作台', icon: LayoutDashboard },
   { to: '/new', label: '新建运行', icon: SquarePen },
   { to: '/runs', label: '运行记录', icon: History },
+  { to: '/agents', label: 'Agent 管理', icon: Bot },
 ];
 
 export function Sidebar() {

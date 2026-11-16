@@ -3,6 +3,7 @@ import { cn } from '../../lib/cn';
 import { formatDuration } from '../../lib/format';
 import { nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
 import type { WorkflowNode } from '../../types/workflow';
+import { AgentChip } from '../agents/AgentChip';
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   node: WorkflowNode;
@@ -70,7 +71,12 @@ export function WorkflowNodeCard({
           </p>
 
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-passive">
-            <span className="truncate">{node.agent}</span>
+            <AgentChip
+              agentId={node.agentId}
+              label={node.agent}
+              className="min-w-0"
+              iconClassName="h-3 w-3"
+            />
             <span className="shrink-0 tabular-nums">
               {formatDuration(node.durationMs)}
             </span>
