@@ -23,11 +23,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 跨包引用解析的是 dist 里的类型声明，必须先构建再做类型检查
+      - name: Build
+        run: pnpm -r build
+
       - name: Typecheck
         run: pnpm -r typecheck
 
       - name: Test
         run: pnpm -r test
-
-      - name: Build
-        run: pnpm -r build
