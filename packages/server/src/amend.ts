@@ -349,3 +349,65 @@ export function buildAmendmentReply(plan: AmendmentPlan): string {
   }
   return lines.join('\n');
 }
+
+/* ------------------------------------------------------------------ *
+ * 指令预处理：把前面几轮对话拼成上下文
+ * ------------------------------------------------------------------ */
+
+/** 上下文里带几轮对话。够接上前文，又不会把 prompt 撑成一堵墙。 */
+export const AMEND_CONTEXT_LIMIT = 10;
+
+/**
+ * 上下文里单条消息的长度上限。
+ *
+ * 为什么压到 200：`buildAmendmentPrompt` 在 instruction 超过 4000 字符时会
+ * 追加一段「指令偏长，别重写整张图」的提醒。上下文拼进来之后，10 条长消息
+ * 就能把一条本来很短的指令顶过那条线，让 Agent 收到一句与实情不符的警告。
+ * 上下文是参考，不是交付内容，压短它比放宽那条阈值诚实。
+ */
+const CONTEXT_LINE_LIMIT = 200;
+
+/** 会话里的一轮：谁说的、说了什么。编排器的回复同样要进上下文。 */
+export interface ConversationTurn {
+  role: 'user' | 'orchestrator';
+  text: string;
+}
+
+function flatten(text: string): string {
+  const flat = text.trim().replace(/\s+/g, ' ');
+  return flat.length > CONTEXT_LINE_LIMIT ? `${flat.slice(0, CONTEXT_LINE_LIMIT)}…` : flat;
+}
+
+/**
+ * 把最近几轮对话拼到本次指令之前。
+ *
+ * 为什么这件事必须做：这个面板是「贯穿本次运行的项目负责人」，用户会说
+ * 「刚才那个改动再收一点」「换成别的方式」——只把最后一句话交给 Planner，
+ * 它没有「刚才」可指，只能照字面猜，于是改出一张谁都没要求的图。
+ *
+ * 为什么拼在指令里而不是另开一个参数：`packages/planner` 的 amend 接口是
+ * 「目标 + 当前图 + 一句话」，它的 prompt 会把这句话原样交给 Agent。上下文
+ * 不进那条契约，planner 就不必为了一个展示层需求改签名——但那也意味着
+ * 上下文和指令之间必须有明确的分界，否则模型会把历史当成新要求再执行一遍。
+ */
+export function buildAmendInstruction(
+  instruction: string,
+  history: ReadonlyArray<ConversationTurn>,
+): string {
+  const turns = history.slice(-AMEND_CONTEXT_LIMIT);
+  if (turns.length === 0) {
+    return instruction;
+  }
+
+  return [
+    '## 之前聊过什么（已经发生过的对话，只作为上下文，不要重复执行它们）',
+    '',
+    ...turns.map(
+      (turn) => `- ${turn.role === 'user' ? '用户' : '编排器'}：${flatten(turn.text)}`,
+    ),
+    '',
+    '## 本次指令（只有这一段是新要求）',
+    '',
+    instruction.trim(),
+  ].join('\n');
+}

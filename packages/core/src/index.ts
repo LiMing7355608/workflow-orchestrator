@@ -16,6 +16,7 @@ export type {
   ApprovalView,
   BaseEvent,
   BoardLane,
+  ConversationEntry,
   DagAmendment,
   EdgeView,
   EventType,
@@ -40,8 +41,10 @@ export { boardLaneOrder } from './types.js';
 
 export {
   deriveBoard,
+  deriveConversation,
   deriveEdges,
   deriveEvents,
+  deriveNodeConversation,
   deriveNodeStatus,
   deriveNodeView,
   deriveNodes,

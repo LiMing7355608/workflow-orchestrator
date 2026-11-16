@@ -1,5 +1,6 @@
 import { seedRuns } from './seed';
 import type {
+  ConversationEntry,
   NodeStatus,
   WorkflowEdge,
   WorkflowEvent,
@@ -261,6 +262,156 @@ const collabEvents: WorkflowEvent[] = [
   },
 ];
 
+/**
+ * 演示用的编排器会话。
+ *
+ * 没起后端时这个面板也要能看：它承载的是「一路聊过来」这件事本身，空的
+ * 时间线会让评审者以为功能没做。首条一律是目标原文——与后端
+ * `deriveConversation` 的做法一致，它不来自事件。
+ */
+function collabConversation(run: WorkflowRunSummary): ConversationEntry[] {
+  return [
+    { id: 'cc-1', at: minutesAgo(48), role: 'user', text: run.goal },
+    {
+      id: 'cc-2',
+      at: minutesAgo(43),
+      role: 'system',
+      text: '任务图已生成：14 个节点',
+      tone: 'success',
+    },
+    {
+      id: 'cc-3',
+      at: minutesAgo(41),
+      role: 'orchestrator',
+      text:
+        '已按目标拆成 14 个节点：账号、消息、通讯录、通知四块并行，各自带独立的审查节点，' +
+        '最后由质量门禁汇总。通知策略那一步需要你拍板默认免打扰规则。',
+    },
+    {
+      id: 'cc-4',
+      at: minutesAgo(13),
+      role: 'user',
+      text: '消息一致性审查换成 OpenCode，其它节点先别动',
+    },
+    {
+      id: 'cc-5',
+      at: minutesAgo(12),
+      role: 'system',
+      text: '改图：更新 review-message（agentId：Codex CLI → OpenCode）',
+      tone: 'info',
+    },
+    {
+      id: 'cc-6',
+      at: minutesAgo(12),
+      role: 'orchestrator',
+      text: '已按指令修改任务图：\n- review-message 的 agentId：Codex CLI → OpenCode',
+    },
+  ];
+}
+
+function genericConversation(run: WorkflowRunSummary): ConversationEntry[] {
+  return [
+    { id: 'gc-1', at: minutesAgo(52), role: 'user', text: run.goal },
+    {
+      id: 'gc-2',
+      at: minutesAgo(48),
+      role: 'system',
+      text: `任务图已生成：${run.nodeCount} 个节点`,
+      tone: 'success',
+    },
+    {
+      id: 'gc-3',
+      at: minutesAgo(9),
+      role: 'orchestrator',
+      text:
+        run.status === 'paused'
+          ? '运行已停下。要继续推进，点顶部的继续按钮；在这之前我不会派发新节点。'
+          : run.status === 'completed'
+            ? '全部节点都完成了，这一轮结束。要接着做下一批，直接说要加什么。'
+            : '正在按计划推进。要插话随时说，我会把要求落成对任务图的修改。',
+    },
+  ];
+}
+
+/**
+ * 演示数据里的节点会话。
+ *
+ * 只给一个节点配一段：一份完整的示例能让人看懂「插话 → 打断 → 按新要求重跑」
+ * 这条链路在界面上长什么样，给每个节点都配一段则只会让静态数据变成噪音。
+ * 形状与后端 `deriveNodeConversation` 完全一致（system 行画轮次边界、人话带
+ * `interrupt`、每轮输出挂在 `outputs` 下）。
+ */
+function collabNodeConversations(): Record<string, ConversationEntry[]> {
+  return {
+    'impl-account': [
+      {
+        id: 'nc-0',
+        at: minutesAgo(28),
+        role: 'system',
+        text: '开始执行（Claude Code）',
+        tone: 'info',
+        outputs: [
+          {
+            id: 'nc-0-out-0',
+            at: minutesAgo(28),
+            kind: 'thinking',
+            text: '先按既有风格搭注册与登录，口令校验用 argon2。',
+          },
+          {
+            id: 'nc-0-out-1',
+            at: minutesAgo(27),
+            kind: 'tool',
+            text: 'src/account/**',
+            toolName: 'Write',
+          },
+        ],
+      },
+      {
+        id: 'nc-1',
+        at: minutesAgo(26),
+        role: 'user',
+        text: '别用 session cookie，改成 JWT；刷新令牌放 httpOnly 里。',
+        interrupt: true,
+      },
+      {
+        id: 'nc-2',
+        at: minutesAgo(26),
+        role: 'system',
+        text: '被停止：用户打断并给出了新要求：别用 session cookie，改成 JWT',
+        tone: 'warning',
+      },
+      {
+        id: 'nc-3',
+        at: minutesAgo(25),
+        role: 'agent',
+        text: '已打断当前这轮，并按你这条要求重新开始执行。',
+      },
+      {
+        id: 'nc-4',
+        at: minutesAgo(25),
+        role: 'system',
+        text: '开始执行（Claude Code）',
+        tone: 'info',
+        outputs: [
+          {
+            id: 'nc-4-out-0',
+            at: minutesAgo(24),
+            kind: 'text',
+            text: '改为 JWT：access 放内存，refresh 走 httpOnly cookie，补齐刷新接口。',
+          },
+        ],
+      },
+      {
+        id: 'nc-5',
+        at: minutesAgo(22),
+        role: 'system',
+        text: '完成',
+        tone: 'success',
+      },
+    ],
+  };
+}
+
 function buildCollabDetail(run: WorkflowRunSummary): WorkflowRunDetail {
   return {
     ...run,
@@ -268,6 +419,8 @@ function buildCollabDetail(run: WorkflowRunSummary): WorkflowRunDetail {
     nodes: collabNodes,
     edges: collabEdges,
     events: collabEvents,
+    conversation: collabConversation(run),
+    nodeConversations: collabNodeConversations(),
   };
 }
 
@@ -452,6 +605,10 @@ function buildGenericDetail(run: WorkflowRunSummary): WorkflowRunDetail {
     nodes,
     edges,
     events,
+    conversation: genericConversation(run),
+    // 这一份演示数据不编节点会话：它演示的是「运行级概览」，节点面板里多一段
+    // 假的对话只会让人以为那是真实历史
+    nodeConversations: {},
   };
 }
 

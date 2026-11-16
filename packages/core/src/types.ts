@@ -100,6 +100,17 @@ export interface RunFacts {
    * 默认根目录，见 packages/server/src/app.ts 的 workspaceFor。
    */
   workspaceRoot: string;
+  /**
+   * 这个运行允许同时跑几个节点。
+   *
+   * 早先并发是服务级的（一个进程一个值），用户在新建立表单里选的「并行度」
+   * 只被拼进目标文本给 Planner 看，**执行时根本不读它**——用户以为要开 20 路，
+   * 实际按服务的 2 路在跑，135 个节点得排到天荒地老。并发是这次运行的属性，
+   * 不是这台机器的属性。
+   *
+   * 缺省时回落到服务级配置，旧 journal 没有这个字段也能继续。
+   */
+  concurrency?: number;
   specVersion: string;
   stage: RunStage;
   /** 注意：这里没有 status 字段——运行状态由 frozenAt / pausedAt / completedAt 与节点事实推导 */
@@ -348,6 +359,74 @@ export type OrchestratorEvent =
       changes: DagAmendment[];
     })
   | (BaseEvent & {
+      /**
+       * 编排器会话里的一句话。
+       *
+       * 为什么对话要落成事实，而不是像先前那样只存在组件 state 里：这个面板的
+       * 定位是「本次运行贯穿始终的项目负责人」——从最初的目标输入，到中途补
+       * 要求、打断拆解、纠正方向，全部发生在同一条对话流里。刷新一次就清空的
+       * 对话等于删掉「我当初是怎么说的」的唯一凭据，而后面每一次改图都是基于
+       * 那段上下文做出的决定。
+       *
+       * 注意**首条消息不落事件**：`run.goal` 就是用户最初说的那句话，
+       * `deriveConversation` 在读的时候把它合成第一条。存两份同样的目标，
+       * 迟早会出现「run.created 里的 goal 与第一条消息不一致」，而那种不一致
+       * 没有任何一处能判定谁对。
+       *
+       * 它不改变任何运行事实（见 journal 里这条分支的归约）：对话是可审计的
+       * 历史，不是状态。重放它与丢掉它得到的图完全一样。
+       */
+      type: 'orchestrator.message';
+      role: 'user' | 'orchestrator';
+      text: string;
+      /**
+       * 这条消息打断了正在进行的拆解。
+       *
+       * 只记「发生过」，不记打断的是哪一次：拆解没有 id，`plan.started` 本身
+       * 也不带序号。界面要立刻回答的是「这条是我在它干活时插的话」，一个布尔
+       * 值够用；要精确定位到某一轮，事件流里前后两条 `plan.started` 就是边界。
+       */
+      interrupt?: boolean;
+    })
+  | (BaseEvent & {
+      /**
+       * 节点会话里的一句话。
+       *
+       * 与 `orchestrator.message` 是同一套思路（可审计的历史、不进事实），
+       * 区别只有一个：它归属于某个节点。用户在这个节点正在执行时插的话
+       * （「别用 vue，改成 react」）就走这条事件，随后这条要求既会进
+       * `node.interrupted` 的原因，也会进下一次执行的提示词（见 buildPrompt）。
+       *
+       * 为什么必须落成事实，而不是只存在面板 state 里：这句话的价值恰恰在
+       * 「执行已经开始了」之后——它要影响的是**下一轮**执行的提示词，而下一轮
+       * 可能发生在刷新、重启、甚至换一台机器之后。只活在内存里的插话，等于
+       * 只对当前这个浏览器窗口生效的插话。
+       *
+       * 归约不动任何事实（见 journal 里这条分支）：一条消息不是状态。重放它
+       * 与丢掉它得到的节点事实完全一样，但「人当初要求过什么」只有它记得。
+       */
+      type: 'node.message';
+      /** 归属于哪个节点。`orchestrator.message` 没有这一栏，这是两条事件唯一的分界线 */
+      nodeId: string;
+      /**
+       * 谁说的。
+       *
+       * `agent` 是编排器替执行层记的一句回执（「已按新要求重启」），不是
+       * 模型真的说了这句话——真说出来的内容走 `agent.output`。分成两种 role
+       * 而不是加一个布尔值，是因为渲染时要走两条完全不同的视觉：人的话是
+       * 气泡，回执是旁白。
+       */
+      role: 'user' | 'agent';
+      text: string;
+      /**
+       * 这条消息打断了正在进行的执行。
+       *
+       * 与 `orchestrator.message` 的同名字段同一个约定：只有 true 才写，
+       * false 会让「是否打断过」凭空多出一个假的事实值。
+       */
+      interrupt?: boolean;
+    })
+  | (BaseEvent & {
       type: 'review.verdict';
       nodeId: string;
       verdict: ReviewVerdict;
@@ -497,6 +576,13 @@ export interface NodeView {
    * 而被停下之后答案是「能」。见 `NodeStatus` 里 `'interrupted'` 的注释。
    */
   interruptedAt?: string;
+  /**
+   * 失败原因。
+   *
+   * 必须能一眼看到：只在事件流里留一句，用户得点进时间线翻到底才知道
+   * 它为什么变红。节点卡片自己就该说得清这件事。
+   */
+  failureReason?: string;
   /** 上游产物的统计量；没有产物采集时缺省 */
   artifactBytes?: number;
   artifactFiles?: string[];
@@ -535,10 +621,72 @@ export interface EventView {
   toolName?: string;
 }
 
+/**
+ * 编排器会话里的一条：用户说的、编排器回答的，或系统记账的。
+ *
+ * 时间线不是「消息列表」：拆解开始与失败、图生成、改图结果都是这条流里的
+ * 组成部分。把它们并成一列的理由是——读这段对话的人问的是「这一路发生了什么」，
+ * 而不是「谁说了几句话」。系统行因此带 `tone` 而不是作者。
+ */
+export interface ConversationEntry {
+  id: string;
+  at: string;
+  /**
+   * `agent` 只出现在节点会话里（`deriveNodeConversation`），编排器会话永远
+   * 不会产出它。
+   *
+   * 为什么不让节点 Agent 复用 `orchestrator`：两者在同一张页面上是不同的人。
+   * 编排器负责拆图、改图、给整轮下结论；节点 Agent 只负责这一件事，它说的话
+   * 也不是对用户说的，而是对这次执行说的。合成一个值之后，界面就没法在不看
+   * 上下文的情况下回答「这条是谁说的」——而渲染成同一个样式正是它唯一的用途。
+   */
+  role: 'user' | 'orchestrator' | 'agent' | 'system';
+  text: string;
+  /** 系统行：阶段变化、改图结果、拆解失败等 */
+  tone?: 'info' | 'warning' | 'success';
+  interrupt?: boolean;
+  /**
+   * 这次拆解过程中 Agent 的输出（思考、工具调用、正文）。
+   *
+   * 归到发起它的那条系统行下面，而不是散进事件流：人读会话时想知道的是
+   * 「这张图它是怎么想出来的」，把它和节点执行混在一条流水里就没法读了。
+   * 没有拆解过程的条目不带这个字段。
+   */
+  outputs?: ConversationOutput[];
+}
+
+/** 拆解过程中的一句输出。 */
+export interface ConversationOutput {
+  id: string;
+  at: string;
+  kind?: string;
+  text: string;
+  toolName?: string;
+}
+
 export interface RunDetailView extends RunView {
   nodes: NodeView[];
   edges: EdgeView[];
   events: EventView[];
+  /**
+   * 编排器会话，按时刻排好序。
+   *
+   * 覆盖在详情视图上而不是单独开一个接口：面板打开时它要的第一屏就是
+   * 「这段对话现在长什么样」，再让前端多拉一次只会多一个会失败的请求。
+   */
+  conversation: ConversationEntry[];
+  /**
+   * 每个节点自己的会话，键是 nodeId。
+   *
+   * 与 `conversation` 分开而不是并成一条流：这两条会话回答的是不同的问题。
+   * 上面那条是「这一轮编排是怎么走过来的」，节点的这条是「这件事它是怎么
+   * 干的、我中途改过什么要求」。混在一起之后，一个运行跑二十个节点，编排器
+   * 的主线就被二十段执行日志淹掉了。
+   *
+   * 只放有内容的节点（见 deriveRunDetail）：绝大多数节点从没被插过话，
+   * 给每个节点塞一个空数组只会让响应体白白变大。
+   */
+  nodeConversations: Record<string, ConversationEntry[]>;
 }
 
 export interface ApprovalView extends ApprovalRecord {

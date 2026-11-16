@@ -1,5 +1,8 @@
 import type {
   BoardLane,
+  ConversationEntry,
+  ConversationOutput,
+  DagAmendment,
   EdgeView,
   EventView,
   NodeFacts,
@@ -169,6 +172,9 @@ export function deriveNodeView(
     // 展示用：状态是 ready/pending，但这一轮是被用户停下的，界面据此说
     // 「已停止，待恢复」而不是「就绪」
     interruptedAt: node.interruptedAt,
+    // 失败原因必须能一眼看到。只在事件流里留一句，用户得点进时间线翻到底
+    // 才知道它为什么红——这块本该是节点卡片自己说得清的事
+    failureReason: node.failureReason,
     artifactBytes: node.artifactBytes,
     artifactFiles: node.artifactFiles,
     nativeSessionId: node.nativeSessionId,
@@ -273,6 +279,32 @@ function nodeTitleOf(run: RunFacts, nodeId: string): string {
   return run.nodes[nodeId]?.title ?? nodeId;
 }
 
+/**
+ * 一次改图改了什么的紧凑说法。
+ *
+ * 事件流与会话流都要说这句话，所以只写一份：两处各写一遍，迟早会出现
+ * 「流水里说改了 agentId、对话里说改了 title」这种自相矛盾的记录。
+ */
+function describeChanges(changes: DagAmendment[]): string {
+  return changes
+    .map((change) => {
+      const label =
+        change.kind === 'add-node'
+          ? '新增'
+          : change.kind === 'remove-node'
+            ? '移除'
+            : '更新';
+      const detail =
+        change.fields && change.fields.length > 0
+          ? `（${change.fields
+              .map((field) => `${field.field}：${field.from ?? '—'} → ${field.to ?? '—'}`)
+              .join('，')}）`
+          : '';
+      return `${label} ${change.nodeId}${detail}`;
+    })
+    .join('；');
+}
+
 function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
   switch (event.type) {
     case 'run.created':
@@ -296,22 +328,7 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
     case 'dag.amended': {
       // 一行说清「谁改了什么」，且逐条列出改动对象：这是审计行，
       // 聚合成一个数字就再也无法回答「哪几个节点被动了」。
-      const parts = event.changes.map((change) => {
-        const label =
-          change.kind === 'add-node'
-            ? '新增'
-            : change.kind === 'remove-node'
-              ? '移除'
-              : '更新';
-        const detail =
-          change.fields && change.fields.length > 0
-            ? `（${change.fields
-                .map((field) => `${field.field}：${field.from ?? '—'} → ${field.to ?? '—'}`)
-                .join('，')}）`
-            : '';
-        return `${label} ${change.nodeId}${detail}`;
-      });
-      return `按指令修改任务图（${event.actor}）：${parts.join('；')}`;
+      return `按指令修改任务图（${event.actor}）：${describeChanges(event.changes)}`;
     }
     case 'node.started':
       return `${nodeTitleOf(run, event.nodeId)} 开始执行`;
@@ -364,6 +381,11 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
     case 'node.resumed_session':
       // 与「原生会话已建立」区分开：那条是平台给的 id，这条是我们复用了它
       return `${nodeTitleOf(run, event.nodeId)} 复用会话续跑：${event.sessionId}`;
+    case 'node.message':
+      // 正常走不到：deriveEvents 会先把它整个跳过（它有自己那条会话视图）。
+      // 留这一行是为了「跳过的那行被谁删掉」时不至于渲染出一条空消息——
+      // 静默地少一行，比显式地说错一行更难发现。
+      return `${event.role === 'user' ? '用户' : '节点执行者'}：${event.text}`;
     default:
       return '';
   }
@@ -406,6 +428,17 @@ export function deriveEvents(
   const views: EventView[] = [];
 
   for (const event of scoped) {
+    // 对话不进事件流：它有自己的视图（deriveConversation / deriveNodeConversation）。
+    // 放进流水会让同一句话在界面上出现两次，而流水里没有「谁在跟谁说话」这个
+    // 位置——一条用户消息夹在节点事件中间，读起来像是系统自己发出的。
+    //
+    // 节点会话同理：节点面板里的会话区与这条流水是两处刻意分工的视图
+    // （见 NodeDetailPanel 的注释），一条 node.message 若同时出现在两边，
+    // 用户会以为同一句话被发了两次。
+    if (event.type === 'orchestrator.message' || event.type === 'node.message') {
+      continue;
+    }
+
     const nodeId =
       'nodeId' in event
         ? event.nodeId
@@ -456,6 +489,330 @@ export function deriveEvents(
   return views;
 }
 
+/**
+ * 编排器会话：把「人说过的话」与「编排器做过的决定」拼成一条时间线。
+ *
+ * 三个刻意的决定：
+ *
+ * 1. **首条来自 `run.goal`，不来自事件**。目标就是用户最初说的那句话，
+ *    事件里再存一份，就多了「两份目标互相矛盾」这种无处裁决的状态。
+ * 2. **系统行也在这条流里**。拆解开始/失败、图生成、改图结果都是用户读这段
+ *    对话时要看到的上下文：「我要求改 agent，然后它卡在拆解失败」比一条孤零零
+ *    的回复有用得多。
+ * 3. **只排时刻，不重排语义**。同一毫秒里的几条事件必须保持落盘顺序——
+ *    「用户说 → 拆解失败 → 编排器回答」的顺序颠倒过来，读起来就成了它在
+ *    回答一件还没发生的事。`sort` 的稳定性正好保证这一点。
+ */
+export function deriveConversation(
+  run: RunFacts,
+  events: OrchestratorEvent[],
+): ConversationEntry[] {
+  const entries: ConversationEntry[] = [];
+
+  const goal = run.goal.trim();
+  if (goal) {
+    entries.push({
+      id: 'conv-goal',
+      at: run.createdAt,
+      role: 'user',
+      text: run.goal,
+    });
+  }
+
+  // id 用位置生成而不是 uuid：这条流每次读都从事实重新组装，位置就是它的
+  // 身份——用随机 id 会让 React 每次刷新都重建所有节点，滚动位置与展开状态
+  // 一起丢。
+  const push = (entry: Omit<ConversationEntry, 'id'>): void => {
+    entries.push({ id: `conv-${entries.length}`, ...entry });
+  };
+
+  /**
+   * 当前正在进行的拆解那条系统行。
+   *
+   * 拆解期间 Agent 的输出（thinking / tool / 正文）没有 nodeId，它们属于
+   * 「这一次拆解」，要挂到发起它的那条行的 outputs 上——散进流水里就变成
+   * 一串没有主语的条目，读的人不知道是谁在说话。
+   */
+  let planEntry: ConversationEntry | undefined;
+
+  /**
+   * 还没有归属的编排器输出。
+   *
+   * 改图时 Agent 已经在跑了，`dag.amended` 却要等它交出结果才落——中间这些
+   * 输出先攥在这里，等结论行下来再挂上去。直接丢掉就等于「只给结论不给过程」。
+   */
+  let pendingOutputs: ConversationOutput[] = [];
+
+  for (const event of events) {
+    if (event.runId !== run.id) {
+      continue;
+    }
+    switch (event.type) {
+      case 'orchestrator.message':
+        planEntry = undefined;
+        push({
+          at: event.at,
+          role: event.role,
+          text: event.text,
+          // 只有为 true 才写这个字段：`interrupt: false` 会让「是否打断过」
+          // 多出一个假的事实值，界面也得分两种情况判它
+          ...(event.interrupt ? { interrupt: true } : {}),
+        });
+        break;
+      case 'plan.started': {
+        // 新建一条系统行并记住它：这次拆解后续的输出要挂到它下面
+        const entry: ConversationEntry = {
+          id: 'pending',
+          at: event.at,
+          role: 'system',
+          text: `开始拆解任务图（${event.agentId}）`,
+          tone: 'info',
+          outputs: [],
+        };
+        push(entry);
+        planEntry = entries[entries.length - 1];
+        break;
+      }
+      case 'agent.output':
+        // nodeId 为空 = 编排器自己的执行输出（拆解或改图时还没有节点）。
+        // 有正在进行的拆解就挂到那条行下面；否则先攥着，等这次改图的
+        // `dag.amended` 落下来再挂到它下面——改图过程同样是「它是怎么想的」，
+        // 扔掉的话用户只能看到一个结论，没法判断该不该接受。
+        if (event.nodeId === undefined) {
+          const output: ConversationOutput = {
+            id: `pending-out-${pendingOutputs.length}`,
+            at: event.at,
+            kind: event.kind,
+            text: event.chunk,
+            toolName: event.toolName,
+          };
+          if (planEntry?.outputs) {
+            planEntry.outputs.push(output);
+          } else {
+            pendingOutputs.push(output);
+          }
+        }
+        break;
+      case 'plan.failed':
+        planEntry = undefined;
+        // 原因原样带出：它是人决定「改目标还是换 Agent」的唯一依据
+        push({
+          at: event.at,
+          role: 'system',
+          text: `拆解失败：${event.message}`,
+          tone: 'warning',
+        });
+        break;
+      case 'run.frozen': {
+        planEntry = undefined;
+        // 优先用这次冻结带进来的节点数，而不是当前的 `run.nodeOrder`：
+        // 冻结之后还可能有 dag.amended 增删节点，读后者会把「这次生成了几个」
+        // 说成「现在有几个」
+        const count = event.nodes?.length ?? run.nodeOrder.length;
+        push({
+          at: event.at,
+          role: 'system',
+          text: `任务图已生成：${count} 个节点`,
+          tone: 'success',
+        });
+        break;
+      }
+      case 'dag.amended':
+        // 这次改图的执行过程挂到结论行下面，默认收起、可展开
+        push({
+          at: event.at,
+          role: 'system',
+          text:
+            event.changes.length > 0
+              ? `改图：${describeChanges(event.changes)}`
+              : '改图：没有需要修改的地方',
+          tone: 'info',
+          ...(pendingOutputs.length > 0 ? { outputs: pendingOutputs } : {}),
+        });
+        pendingOutputs = [];
+        break;
+      default:
+        break;
+    }
+  }
+
+  return entries.sort((left, right) => left.at.localeCompare(right.at));
+}
+
+/**
+ * 节点开始执行时那一行的括号内容。
+ *
+ * 刻意不接 `AgentLabelResolver`：`deriveNodeConversation` 的签名只有运行事实、
+ * 事件与 nodeId，多一个回调会让「同一个节点在不同调用点显示成两个名字」成为
+ * 可能。要平台名的界面读 `NodeView.agent` 就够了——那里已经解析过一次。
+ */
+function nodeActorLabel(run: RunFacts, nodeId: string): string | undefined {
+  const node = run.nodes[nodeId];
+  const who = node?.executor?.trim() || node?.agentId?.trim();
+  return who || undefined;
+}
+
+/**
+ * 节点会话：这个节点「跑了几轮、每轮说了什么、中途被人插过什么话」。
+ *
+ * 与 `deriveConversation` 同一套组装思路（系统行也在流里、按时刻稳定排序、
+ * id 用位置生成），差别只有两处，但两处都必须说清：
+ *
+ * 1. **`agent.output` 不单独成条**。一次节点执行动辄几十条输出，摊成流水就
+ *    把「我中途改过要求」这件事彻底埋掉了。它们统一挂到所属那一轮执行
+ *    （最近一条 `node.started`）的 `outputs` 下面，形态与编排器会话一致。
+ * 2. **不做重置切片**。事件流视图（deriveEvents）会把最后一次 `node.reset`
+ *    之前的事件全部切掉，因为那是「已经作废的一轮执行」。这里**不切**：
+ *    `node.message` 里的人话是可审计的历史，重置作废的是执行事实，不是
+ *    「我当时要求过什么」——而且提示词注入读的是完整历史（见 buildPrompt），
+ *    会话里切掉、提示词里还在，两边就会互相矛盾。
+ *
+ * 归属规则：`agent.output` 只挂到当前这一轮。`node.completed` / `node.failed`
+ * / `node.interrupted` / `node.reset` 都把「当前这一轮」关掉，于是打断之后
+ * 才姗姗来迟的收尾输出不会被算进下一轮——它属于被打断的那一轮。
+ */
+export function deriveNodeConversation(
+  run: RunFacts,
+  events: OrchestratorEvent[],
+  nodeId: string,
+): ConversationEntry[] {
+  const entries: ConversationEntry[] = [];
+
+  // id 用位置生成而不是 uuid：理由与 deriveConversation 完全一样——这条流
+  // 每次读都从事实重新组装，位置就是它的身份。
+  const push = (entry: Omit<ConversationEntry, 'id'>): ConversationEntry => {
+    const next: ConversationEntry = { id: `node-conv-${entries.length}`, ...entry };
+    entries.push(next);
+    return next;
+  };
+
+  const actor = nodeActorLabel(run, nodeId);
+  /** 当前这一轮执行的那条系统行；`outputs` 往它下面挂 */
+  let executionEntry: ConversationEntry | undefined;
+
+  for (const event of events) {
+    if (event.runId !== run.id) {
+      continue;
+    }
+    // 只认「带 nodeId 且指向这个节点」的事件。运行级事件（run.paused 等）
+    // 不属于任何一个节点，混进来会让每个节点的会话都长得一样。
+    if (!('nodeId' in event) || event.nodeId !== nodeId) {
+      continue;
+    }
+
+    switch (event.type) {
+      case 'node.message':
+        push({
+          at: event.at,
+          role: event.role,
+          text: event.text,
+          // 只有 true 才写：`interrupt: false` 会让「是否打断过」多出一个
+          // 假的事实值，界面也得分两种情况判它
+          ...(event.interrupt ? { interrupt: true } : {}),
+        });
+        // 刻意不动 `executionEntry`：插话发生在一次执行**进行中**，它不是
+        // 新的一轮。新的轮次由随后那条 node.started 划开。
+        break;
+
+      case 'node.started':
+        executionEntry = push({
+          at: event.at,
+          role: 'system',
+          text: actor ? `开始执行（${actor}）` : '开始执行',
+          tone: 'info',
+          // 即使这一轮一句话都没说，也留一个空数组：界面据此知道「这一轮
+          // 有输出区」，不必再判一次 undefined
+          outputs: [],
+        });
+        break;
+
+      case 'node.completed':
+        executionEntry = undefined;
+        push({ at: event.at, role: 'system', text: '完成', tone: 'success' });
+        break;
+
+      case 'node.failed':
+        executionEntry = undefined;
+        // 原因原样带出：它是人决定「再跑一次还是先改要求」的唯一依据
+        push({ at: event.at, role: 'system', text: `失败：${event.reason}`, tone: 'warning' });
+        break;
+
+      case 'node.interrupted':
+        executionEntry = undefined;
+        // 措辞与事件流一致，不用「失败」：它不是这个节点的结论
+        push({ at: event.at, role: 'system', text: `被停止：${event.reason}`, tone: 'warning' });
+        break;
+
+      case 'node.reset':
+        executionEntry = undefined;
+        push({ at: event.at, role: 'system', text: `已重置：${event.reason}`, tone: 'info' });
+        break;
+
+      case 'agent.output': {
+        // 空正文不发：一个空思考块一个字都没说，落进会话就是凭空占一行
+        const text = event.chunk.trim();
+        if (!text || !executionEntry?.outputs) {
+          break;
+        }
+        executionEntry.outputs.push({
+          id: `${executionEntry.id}-out-${executionEntry.outputs.length}`,
+          at: event.at,
+          kind: event.kind,
+          text: event.chunk,
+          toolName: event.toolName,
+        });
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  // 同一毫秒里的几条必须保持落盘顺序：`sort` 的稳定性正好保证这一点，
+  // 「插话 → 被停止」的顺序颠倒过来，读起来就成了「它先停了，我才说话」。
+  return entries.sort((left, right) => left.at.localeCompare(right.at));
+}
+
+/**
+ * 每个节点的会话，只保留有内容的那些。
+ *
+ * 先按 nodeId 分一次桶再算：`deriveRunDetail` 是每次读运行详情都要跑一遍的
+ * 热路径（SSE 每来一条事件就刷新一次），对每个节点各扫一遍全量事件会退化成
+ * O(节点数 × 事件数)。分桶之后总成本仍然是 O(事件数)。
+ */
+function deriveNodeConversations(
+  run: RunFacts,
+  events: OrchestratorEvent[],
+): Record<string, ConversationEntry[]> {
+  const byNode = new Map<string, OrchestratorEvent[]>();
+  for (const event of events) {
+    // `agent.output` 的 nodeId 是可选字段（图生成期间的输出没有节点），
+    // 所以 `'nodeId' in event` 收窄之后还得再挡一次 undefined。
+    const nodeId = 'nodeId' in event ? event.nodeId : undefined;
+    if (event.runId !== run.id || nodeId === undefined) {
+      continue;
+    }
+    const bucket = byNode.get(nodeId);
+    if (bucket) {
+      bucket.push(event);
+    } else {
+      byNode.set(nodeId, [event]);
+    }
+  }
+
+  const result: Record<string, ConversationEntry[]> = {};
+  for (const [nodeId, scoped] of byNode) {
+    const entries = deriveNodeConversation(run, scoped, nodeId);
+    // 空会话不放键：绝大多数节点从没被插过话，给每个节点塞一个空数组
+    // 只会让每次刷新的响应体白白变大
+    if (entries.length > 0) {
+      result[nodeId] = entries;
+    }
+  }
+  return result;
+}
+
 export function deriveRunDetail(
   run: RunFacts,
   events: OrchestratorEvent[],
@@ -466,6 +823,8 @@ export function deriveRunDetail(
     nodes: deriveNodes(run, resolve),
     edges: deriveEdges(run),
     events: deriveEvents(run, events, resolve),
+    conversation: deriveConversation(run, events),
+    nodeConversations: deriveNodeConversations(run, events),
   };
 }
 

@@ -25,9 +25,10 @@ const child = spawn('pnpm', ['dev'], {
     PORT: '3000',
     AGENT_RUNNER: mode,
     AGENT_WORKSPACE: 'git',
-    AGENT_TARGET_DIR: mode === 'real' && process.env.AGENT_TARGET_DIR
-      ? process.env.AGENT_TARGET_DIR
-      : join(data, 'project'),
+    // 不设默认目标目录：目标目录必须由用户在新建运行里显式选择。
+    // 给一个 data/local/project 之类的默认值，会让成果悄悄落在没人打算用的
+    // 地方。外部可以用 AGENT_TARGET_DIR 覆盖（运维/脚本场景）。
+    AGENT_TARGET_DIR: process.env.AGENT_TARGET_DIR,
     AGENT_WORKTREE_DIR: join(data, 'worktrees'),
     AGENT_ARTIFACT_DIR: join(data, 'artifacts'),
     EVENT_LOG_PATH: join(data, 'journal', 'events.jsonl'),

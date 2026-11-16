@@ -1,6 +1,7 @@
 import type { AgentProfile } from '../types/agent';
 import type {
   AmendmentRejection,
+  ConversationEntry,
   DagAmendment,
   WorkflowEvent,
   WorkflowRunDetail,
@@ -73,6 +74,13 @@ export interface CreateRunInput {
   implementAgentId?: string;
   /** 覆盖 DAG 里的审查节点 Agent */
   reviewAgentId?: string;
+  /**
+   * 这次运行允许同时跑几个节点。
+   *
+   * 省略时按服务级配置。给了就是运行自己的属性：调度器一次派发的节点数
+   * 直接按它来，而不是永远按服务的缺省值排队。
+   */
+  concurrency?: number;
 }
 
 /** 当前执行配置：真实执行器还是回放。 */
@@ -82,12 +90,11 @@ export interface RuntimeInfo {
   concurrency: number;
   plannerAgentId: string | null;
   /**
-   * 新建运行表单里「目标目录」的默认值。
+   * 服务级默认目标目录，没有配置就是 null。
    *
-   * 只由后端算得出：它取决于服务进程的启动目录与 `AGENT_TARGET_DIR`。
-   * 前端把它填进输入框，用户看到的就是「什么都不填会发生什么」。
+   * null 表示「必须由用户自己选」——前端不要预填任何东西。
    */
-  defaultWorkspaceRoot: string;
+  defaultWorkspaceRoot: string | null;
   /** 只有 Windows 才提供原生目录选择框，前端据此决定要不要显示「浏览…」 */
   canPickDirectory: boolean;
 }
@@ -100,6 +107,8 @@ export interface PickDirectoryResult {
   /** 用户选了路径。取消或失败时为 false */
   picked: boolean;
   path?: string;
+  /** 失败原因，例如「只在 Windows 上提供」 */
+  reason?: 'cancelled' | 'unsupported' | 'failed';
   message?: string;
 }
 
@@ -214,6 +223,18 @@ export function pauseRun(runId: string): Promise<unknown> {
 
 export function resumeRun(runId: string): Promise<unknown> {
   return requestJson(`/api/runs/${encodeURIComponent(runId)}/resume`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * 重试失败的节点。
+ *
+ * 执行阶段卡死的运行不能靠「继续」恢复：没有就绪节点可调度。这个接口把
+ * 失败的节点重置回可调度状态，再推进一次。
+ */
+export function retryFailedNodes(runId: string): Promise<unknown> {
+  return requestJson(`/api/runs/${encodeURIComponent(runId)}/retry-failed`, {
     method: 'POST',
   });
 }
@@ -369,6 +390,14 @@ export interface AmendmentResult {
   applied: DagAmendment[];
   rejected: AmendmentRejection[];
   /**
+   * 后端随响应带回落库之后的完整会话。
+   *
+   * 面板本身以重新拉取的 `run.conversation` 为唯一来源（见 OrchestratorPanel
+   * 的注释：两份对话状态迟早会分叉），这个字段留给「只要会话、不关心图」的
+   * 调用方，也用来核对这条回复确实已经落进事实。
+   */
+  conversation?: ConversationEntry[];
+  /**
    * 指令没有落成改动时的错误码（`instruction_rejected` / `planner_failed` /
    * `run_not_found`…）。此时 `reply` 里是后端给的可读原因。
    *
@@ -418,6 +447,8 @@ export async function sendOrchestratorMessage(
         rejected: [],
         failure: payload?.error ?? `http_${response.status}`,
         issues: payload?.issues,
+        // 失败路径也会带会话：用户那句话与编排器的解释都已经落库了
+        conversation: payload?.conversation,
       };
     }
 
@@ -425,6 +456,73 @@ export async function sendOrchestratorMessage(
       reply: payload.reply,
       applied: payload.applied ?? [],
       rejected: payload.rejected ?? [],
+      conversation: payload.conversation,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 节点会话：对单个节点说一句话
+ * ------------------------------------------------------------------ */
+
+/**
+ * 对某个节点说一句话的结果。
+ *
+ * `interrupted` 决定界面该说什么：true 是「打断了正在跑的那一轮，已按新要求
+ * 重启」；false 是「记下了，下次运行该节点时生效」。这两句话对用户意味着
+ * 完全不同的下一步，所以由后端判、前端不复述。
+ */
+export interface NodeMessageResult {
+  ok: boolean;
+  interrupted: boolean;
+  /** 后端写下的回执原文，同时也会以 agent 消息落进会话 */
+  reply: string;
+  /** 落库之后的节点会话，界面用它立刻替换掉当前那份 */
+  conversation: ConversationEntry[];
+}
+
+/**
+ * 给节点发一句话。
+ *
+ * 不走通用 `requestJson`：404（运行/节点不存在）与 400（空消息）都会带上
+ * `error` 码，那是「为什么没发出去」的唯一依据，不能在失败分支上丢掉。
+ * 返回 null 只代表网络层失败。
+ */
+export async function sendNodeMessage(
+  runId: string,
+  nodeId: string,
+  input: { text: string; actor?: string },
+): Promise<NodeMessageResult | null> {
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          // 与其余写接口同一约定：头里只放编码后的名字
+          'X-Actor': encodeURIComponent(getActor()),
+        },
+        body: JSON.stringify(input),
+      },
+    );
+
+    const payload = (await response.json().catch(() => undefined)) as
+      | (NodeMessageResult & { error?: string; message?: string })
+      | undefined;
+
+    if (!response.ok || !payload) {
+      return null;
+    }
+
+    return {
+      ok: payload.ok,
+      interrupted: payload.interrupted === true,
+      reply: payload.reply,
+      conversation: payload.conversation ?? [],
     };
   } catch {
     return null;

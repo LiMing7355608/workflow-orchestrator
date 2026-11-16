@@ -84,6 +84,18 @@ export interface AdvanceDeps {
    * 内核自己 `new Set()` 出来的东西对下一次调用毫无约束力。
    */
   nodeInFlight?: Set<string>;
+  /**
+   * 读取某个运行的事件流。
+   *
+   * 内核不持有事件日志（`emit` 是单向的），但提示词需要一件只存在于事件里的
+   * 东西：人在这个节点开发过程中说过的话（`node.message`）。它不能进
+   * `NodeFacts`——那是可审计的历史，不是状态，理由见 journal 里那条分支。
+   *
+   * 刻意可选：不注入就等于「这个宿主不提供补充要求」，提示词退化成原样。
+   * 让它在类型上必填，会把所有只关心调度的调用方（含大量测试）一起拖下水，
+   * 而它们本来就没有历史可读。
+   */
+  eventsForRun?: (runId: string) => readonly OrchestratorEvent[];
 }
 
 /**
@@ -126,6 +138,72 @@ const DIFF_PROMPT_LIMIT = 8000;
 
 /** 上游节点没有可用 diff 时的降级说明，措辞要能让审查 Agent 明白原因。 */
 const NO_DIFF_NOTE = '该上游节点没有产出 diff（工作区可能不是 git 仓库）。';
+
+/**
+ * 提示词里最多带几条人类补充要求。
+ *
+ * 5 条是「够用且不至于反客为主」的上限：这段话是插在任务书末尾的，条数一多
+ * 就会盖掉任务本身。取的是**最近**的几条——人在第二轮插的话通常已经包含
+ * 第一轮的意思（「别用 vue」之后又说「用 react 和 vite」），越早的要求
+ * 越可能已经被覆盖。
+ */
+const HUMAN_NOTES_LIMIT = 5;
+
+/**
+ * 人类补充要求那一段的标题。
+ *
+ * 单独拎出来当常量，因为它是这段话唯一的识别标志：Agent 与调试的人都是先
+ * 看到这个标题才知道「下面这些不是任务描述，是中途加的要求」。
+ */
+const HUMAN_NOTES_HEADING = '## 人类在开发过程中的补充要求';
+
+/**
+ * 从事件里捞出这个节点上人说过的要求，拼成提示词末尾那一段。
+ *
+ * 为什么必须走这条通道：消息落进 journal 之后，唯一能让它「生效」的地方就是
+ * 这里。落了库而不进提示词，等于人对着空气说了一句话——界面上一应俱全，
+ * Agent 一个字都没收到。这是整个功能的核心，不是可选装饰。
+ *
+ * 没有要求时返回空数组，调用方一个字都不加：留一个空标题比不留更糟，Agent
+ * 会去猜「下面本来该有什么」。
+ */
+function humanNotesSection(
+  events: readonly OrchestratorEvent[],
+  nodeId: string,
+): string[] {
+  const notes: string[] = [];
+  for (const event of events) {
+    if (event.type !== 'node.message' || event.nodeId !== nodeId) {
+      continue;
+    }
+    // 只要人说的话。`role: 'agent'` 是我们自己写的回执（「已按新要求重启」），
+    // 把它塞回提示词等于让 Agent 读自己上一条通知当作新要求。
+    if (event.role !== 'user') {
+      continue;
+    }
+    const text = event.text.trim();
+    if (text) {
+      notes.push(text);
+    }
+  }
+  if (notes.length === 0) {
+    return [];
+  }
+
+  // 事件数组的顺序就是落盘顺序（= 时间顺序），所以「倒序取最近 5 条再正序
+  // 拼回来」等价于直接取尾部 5 条而保持原序。
+  const recent = notes.slice(-HUMAN_NOTES_LIMIT);
+
+  return [
+    '',
+    HUMAN_NOTES_HEADING,
+    // 先说清它和上文的关系，再说具体内容：不说这句，模型会把这段当成
+    // 「补充背景」而不是「新指令」，于是继续按原来的方案干
+    '以下是人在这个节点开发过程中追加的要求，按时间先后排列。它们与上面的任务',
+    '描述同等重要；与上文冲突时，以这里为准。上文的交付范围与输出格式要求仍然有效。',
+    ...recent.map((note, index) => `${index + 1}. ${note}`),
+  ];
+}
 
 /**
  * 拼「被审变更」段落。
@@ -220,6 +298,18 @@ async function buildPrompt(
       '完成后简要说明你做了什么。',
     );
   }
+
+  /**
+   * 人类补充要求放在最末尾。
+   *
+   * 位置是刻意的：提示词末尾是模型实际开始干活前读到的最后一段，也是唯一
+   * 「覆盖前面所有内容」的位置。把「别用 vue，改成 react」塞在上下文那一节
+   * 里，它就会和任务描述平起平坐，然后被任务描述压过去。
+   *
+   * 没有补充要求时这一段整段消失（humanNotesSection 返回空数组），不是留个
+   * 空标题。
+   */
+  lines.push(...humanNotesSection(deps.eventsForRun?.(run.id) ?? [], node.id));
 
   return lines.join('\n');
 }
@@ -957,7 +1047,9 @@ export async function advanceRun(
     // 单跑登记的标记早于它那一条 `node.started` 落盘，而这一轮读到的 run
     // 是新事实之前的那份快照，因此「就绪」里可能还留着它。不在这里筛掉，
     // 同一节点就会各起一个进程，两边的结局互相覆盖。
-    const batch = pickBatch(run, deps.concurrency ?? DEFAULT_CONCURRENCY).filter(
+    // 并发度优先用运行自己的：用户在建这次运行时选了开几路，就得按几路跑。
+    // 服务级配置只是缺省值（旧 journal 里没有这个字段）。
+    const batch = pickBatch(run, run.concurrency ?? deps.concurrency ?? DEFAULT_CONCURRENCY).filter(
       (node) => !deps.nodeInFlight?.has(nodeInFlightKey(runId, node.id)),
     );
     if (batch.length === 0) {

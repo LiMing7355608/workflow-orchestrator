@@ -14,6 +14,7 @@ import {
   deriveBoard,
   deriveEdges,
   deriveEvents,
+  deriveNodeConversation,
   deriveNodeStatus,
   deriveRunDetail,
   deriveRunStatus,
@@ -43,7 +44,7 @@ import {
   type Dag,
 } from '@orchestrator/planner';
 import { ArtifactStore } from './artifacts.js';
-import { buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
+import { buildAmendInstruction, buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
 import type { LockHandle } from './locks.js';
 import type { LogFn, LogSink } from './log.js';
 import { probeCatalog } from './probe.js';
@@ -73,6 +74,11 @@ export interface AppOptions {
    * 不传就是「不登记」，与接入登记簿之前的行为一致。
    */
   registry?: ProcessRegistry;
+  /**
+   * 覆盖执行器。测试用：只有拿到真实发出的 prompt 才能断言「人类补充要求
+   * 有没有进提示词」这类端到端行为。
+   */
+  runner?: AgentRunner;
   /**
    * 数据目录锁句柄。buildApp 不自己获取也不释放它——锁的生死属于进程
    * 生命周期，不属于应用实例；这里只是接收并带出去，避免调用方为了
@@ -120,6 +126,15 @@ const createRunBodySchema = z.object({
    * 用户填错路径却在他自己的目录里跑，是最糟的一种失败方式。
    */
   workspaceRoot: z.string().min(1).optional(),
+  /**
+   * 这次运行允许同时跑几个节点。
+   *
+   * 用户在建运行时就该能决定「开几路」——一个大目标拆出上百个节点时，
+   * 按服务的缺省 2 路要跑到天亮。上限 32：再高对单机上的 CLI Agent 没有
+   * 意义（进程、内存、模型配额都会先撑不住），且没有上限的并发是另一种
+   * 形式的不可控。
+   */
+  concurrency: z.number().int().min(1).max(32).optional(),
 });
 
 /** 编排器对话：一句话指令 + 可选的自报身份。 */
@@ -128,6 +143,49 @@ const runMessageBodySchema = z.object({
   /** 与审批一致：身份优先取请求头，body 只是手工调用的兜底 */
   actor: z.string().min(1).optional(),
 });
+
+/**
+ * 节点会话：对这个节点说一句话。
+ *
+ * 与编排器对话同一形状（text + 可选 actor），刻意不复用同一个 schema：两者的
+ * 语义完全不同——一句是「改这张图」，一句是「这一次执行按我说的改」。共用一个
+ * schema 之后，任何一边加字段都会悄悄变成对另一边的承诺。
+ */
+const nodeMessageBodySchema = z.object({
+  text: z.string().min(1),
+  actor: z.string().min(1).optional(),
+});
+
+/**
+ * 会话里的用户/编排器消息事件。
+ *
+ * 抽成一个具名类型，是因为「最近几轮对话」这段上下文要在三处使用（落库、
+ * 拼指令、回复），每处各写一遍 `Extract<...>` 只会让改动漏掉某处。
+ */
+type ConversationMessage = Extract<OrchestratorEvent, { type: 'orchestrator.message' }>;
+
+/**
+ * 打断一次正在进行的拆解之后，等它让位的上限。
+ *
+ * 为什么必须等：`startPlanning` 看到表里还有条目就直接复用那条已中止的链，
+ * 「按新要求重来」于是变成「什么都没发生」。为什么不能无限等：一个不肯退出
+ * 的 CLI 进程不能把用户已经下达的新要求永久挂起——超时之后强制作废表项，
+ * 旧链即便还活着也不可能再交出图（冻结之前有一道 `throwIfAborted`）。
+ */
+const INTERRUPT_SETTLE_TIMEOUT_MS = 2_000;
+
+/**
+ * 重新拆解时用的目标：原目标 + 这次中途插进来的要求。
+ *
+ * 不是「用新要求覆盖原目标」：重拆是从零开始的一次新任务，只给它半句话会
+ * 拆出一张只覆盖后半段的图，而人以为自己还在做原来那件事。
+ */
+function replanGoal(goal: string, instruction: string): string {
+  const base = goal.trim();
+  return base
+    ? `${base}\n\n## 用户的补充要求（中途插入，与上文同等重要）\n${instruction.trim()}`
+    : instruction.trim();
+}
 
 /**
  * 节点重置的请求体。
@@ -403,11 +461,16 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 执行层：Agent 执行器与工作区
    * ---------------------------------------------------------------- */
 
-  // 默认真跑：用户要的是看到 Agent 实际执行，回放只是没有可执行 Agent 时的兜底
+  // 默认真跑：用户要的是看到 Agent 实际执行，回放只是没有可执行 Agent 时的兜底。
+  //
+  // 允许注入：有些行为只有拿到**真实发出的 prompt** 才能断言（比如「人类的补充
+  // 要求有没有被拼进去」）。MockAgentRunner 不回显 prompt，光靠类型和代码审查
+  // 检查「buildAdvanceDeps 有没有接线」是不够的——删掉那一行不会有任何测试变红。
   const runner: AgentRunner =
-    runnerMode === 'real'
+    options.runner ??
+    (runnerMode === 'real'
       ? new SpawnAgentRunner(options.registry, log)
-      : new MockAgentRunner(workspaceMode === 'git');
+      : new MockAgentRunner(workspaceMode === 'git'));
 
   // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。
   // temp 保留作为降级选项——在没有 git 的环境里仍能跑通整条编排链路，
@@ -431,12 +494,16 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     : resolve(dataRoot, 'data/worktrees');
 
   /**
-   * 默认目标目录：请求没给、也没有 `AGENT_TARGET_DIR` 时用它。
+   * 服务级默认目标目录：只有运维显式配了 `AGENT_TARGET_DIR` 才有。
    *
-   * 保留启动目录作为兜底是为了不改变老用法的行为（在哪个仓库里启动就在哪个
-   * 仓库里干活）；但用户一旦填了目录，就必须按他填的那个来。
+   * 早先这里兜底成 `process.cwd()`，结果是「在哪个仓库里启动服务，成果就落
+   * 在哪个仓库」——用户新建运行时不填目录也能提交，等他发现时文件已经堆进
+   * 了自己没打算动的地方。目标目录必须是一次显式选择，不能有隐式默认。
    */
-  const defaultWorkspaceRoot = resolve(process.env.AGENT_TARGET_DIR ?? process.cwd());
+  const envTargetDir = process.env.AGENT_TARGET_DIR?.trim();
+  const defaultWorkspaceRoot: string | null = envTargetDir
+    ? resolve(envTargetDir)
+    : null;
 
   /**
    * 按目标目录缓存工作区实例。
@@ -464,11 +531,18 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 这个运行该用哪个工作区。
    *
    * 空 `workspaceRoot` 是旧 journal 的兜底值（见 core 里 `run.created` 的归约）：
-   * 那些运行创建时还没有「目标目录」这个概念，只能按默认根目录继续跑——
-   * 否则重启之后一条历史运行连工作区都要不出来。
+   * 那些运行创建时还没有「目标目录」这个概念。它们只能靠服务级默认目录继续，
+   * 没有那个配置就无解——此时抛出去，由调用方记成「工作区准备失败」，
+   * 比随便挑一个目录继续跑诚实。
    */
   function workspaceFor(run: RunFacts): WorkspacePort {
-    return workspaceAt(run.workspaceRoot ? resolve(run.workspaceRoot) : defaultWorkspaceRoot);
+    const root = run.workspaceRoot ? resolve(run.workspaceRoot) : defaultWorkspaceRoot;
+    if (!root) {
+      throw new Error(
+        `运行 ${run.id} 没有记录目标目录（旧数据），且服务未配置 AGENT_TARGET_DIR`,
+      );
+    }
+    return workspaceAt(root);
   }
 
   /**
@@ -513,31 +587,48 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   /** 目标目录校验的两种结局：可用，或者一句能直接展示给用户的原因。 */
   type WorkspaceCheck =
     | { ok: true; root: string }
-    | { ok: false; code: 'workspace_not_found' | 'workspace_not_git'; message: string };
+    | {
+        ok: false;
+        code: 'workspace_required' | 'workspace_not_found' | 'workspace_not_git';
+        message: string;
+      };
 
   /**
    * 弹一个原生目录选择框，返回用户选的绝对路径。
    *
    * 为什么要后端弹：浏览器拿不到绝对路径。File System Access API 的
    * `showDirectoryPicker()` 只给 handle，路径对前端是保密的，而编排器要的
-   * 恰恰是一个能传给 git 的绝对路径。所以在 Windows 上直接调系统的
-   * FolderBrowserDialog，把这个值交给前端填进输入框。
+   * 恰恰是一个能传给 git 的绝对路径。
+   *
+   * 为什么不用 FolderBrowserDialog：那是 Windows 上最老的树形选择器，不能
+   * 直接粘贴路径、没有地址栏、不能新建文件夹后立刻跳进去。这里借用
+   * OpenFileDialog 加上「允许不存在的文件名」的开关——它的外壳就是标准的
+   * 「打开文件」对话框，有地址栏、有快速访问、能粘贴路径，用户在上面选好
+   * 目录后点「打开」，我们取所在目录即得目标路径。
    */
   async function pickDirectory(): Promise<
-    { ok: true; path: string } | { ok: false; reason: 'cancelled' | 'unsupported' | 'failed'; message?: string }
+    | { picked: true; path: string }
+    | { picked: false; reason: 'cancelled' | 'unsupported' | 'failed'; message?: string }
   > {
     if (process.platform !== 'win32') {
-      return { ok: false, reason: 'unsupported', message: '原生目录选择只在 Windows 上提供' };
+      return { picked: false, reason: 'unsupported', message: '原生目录选择只在 Windows 上提供' };
     }
 
     // -STA 是 WinForms 的硬要求：MTA 线程里弹窗会直接抛异常。
     const script = [
       'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
-      '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-      "$dialog.Description = '选择 Agent 干活的目标目录'",
-      "$dialog.ShowNewFolderButton = $true",
-      "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {",
-      '  Write-Output $dialog.SelectedPath',
+      '$dialog = New-Object System.Windows.Forms.OpenFileDialog',
+      "$dialog.Title = '选择目标目录：进入文件夹后点「打开」'",
+      // 关掉文件名合法性校验，用户在同一目录里点「打开」就能确认选这个目录
+      '$dialog.ValidateNames = $false',
+      '$dialog.CheckFileExists = $false',
+      '$dialog.CheckPathExists = $true',
+      '$dialog.RestoreDirectory = $true',
+      // 这一行是占位文件名：它让对话框把「打开」解释为「选当前目录」
+      "$dialog.FileName = '选择当前文件夹'",
+      "$dialog.Filter = '文件夹|*.folder'",
+      'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+      '  Write-Output (Split-Path -Parent $dialog.FileName)',
       '} else {',
       "  Write-Output '__CANCELLED__'",
       '}',
@@ -551,12 +642,12 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       );
       const picked = stdout.trim();
       if (!picked || picked === '__CANCELLED__') {
-        return { ok: false, reason: 'cancelled' };
+        return { picked: false, reason: 'cancelled' };
       }
-      return { ok: true, path: resolve(picked) };
+      return { picked: true, path: resolve(picked) };
     } catch (error) {
       app.log.warn({ err: error }, '弹目录选择框失败');
-      return { ok: false, reason: 'failed', message: (error as Error).message };
+      return { picked: false, reason: 'failed', message: (error as Error).message };
     }
   }
 
@@ -578,6 +669,16 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     requested: string | undefined,
   ): Promise<WorkspaceCheck> {
     const raw = requested?.trim() ? requested.trim() : defaultWorkspaceRoot;
+    if (!raw) {
+      // 没有请求值、也没有服务级默认：目标目录必须是一次显式选择。
+      // 猜一个目录（比如进程的工作目录）会让成果落在用户没打算动的地方，
+      // 而他直到发现文件跑错地方才知道。
+      return {
+        ok: false,
+        code: 'workspace_required',
+        message: '请先选择目标目录：这是 Agent 干活的地方，成果会落在这里。',
+      };
+    }
     const root = resolve(raw);
 
     let isDirectory = false;
@@ -702,6 +803,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         artifacts.save(runId, nodeId, artifact),
       loadArtifact: (runId, nodeId) => artifacts.load(runId, nodeId),
       nodeInFlight,
+      // 节点提示词要带上「人在开发过程中插的话」。内核不持有事件日志，所以从
+      // 这里接出去；整轮推进与单跑共用同一个取值函数，否则同一个节点在两条
+      // 路径上会读到不同的补充要求——那正是最难解释的一类不一致。
+      eventsForRun: (id) => store.eventsForRun(id),
     };
   }
 
@@ -772,6 +877,44 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 拆解是「发起即忘」，调用方拿不到、也不需要它的结果。
    */
   const planning = new Map<string, AdvanceTask>();
+
+  /**
+   * 同一运行上的改图改成排队执行。
+   *
+   * 两个并发的 `POST /messages` 各自基于同一份旧图快照算 diff，后落地的
+   * `dag.amended` 按字段覆盖，先落地那条的改动就被**静默吃掉**了——用户看到
+   * 自己说过的两句话都在，却只有一句生效。对话从窄面板变成常驻大窗口之后，
+   * 多标签页同时开口的概率明显上升，这个窗口必须堵上。
+   *
+   * 选排队而不是拒绝：用户只是又补了一句，让他等前一句算完就能基于最新图继续，
+   * 比回一个「稍后再试」有用得多。
+   */
+  const amendChains = new Map<string, Promise<void>>();
+
+  /**
+   * 排到该运行的改图队尾，返回释放函数。
+   *
+   * 调用方拿到名额后必须**重新读快照**：前一个请求可能刚改过图，端着进端点时
+   * 那份快照已经过期了。
+   */
+  async function acquireAmendSlot(runId: string): Promise<() => void> {
+    const previous = amendChains.get(runId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const mine = previous.then(() => gate);
+    amendChains.set(runId, mine);
+    await previous;
+
+    return () => {
+      release();
+      // 队尾还是自己时才把键删掉；后面已经有人在排的话，交给最后那个人收尾
+      if (amendChains.get(runId) === mine) {
+        amendChains.delete(runId);
+      }
+    };
+  }
 
   /**
    * 后台拆解任务图：先发 `plan.started`，等 Agent 给出图，再把图冻结进事实。
@@ -900,12 +1043,49 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return;
     }
     const controller = new AbortController();
+    let task: AdvanceTask;
     const done = runPlanning(runId, request, controller.signal)
       .catch((error: unknown) => {
         app.log.error({ err: error, runId }, '拆解链路异常退出');
       })
-      .finally(() => { planning.delete(runId); });
-    planning.set(runId, { controller, done });
+      .finally(() => {
+        /**
+         * 只清理自己那一条。
+         *
+         * 中断重来会先 abort 再登记新链；旧链的收尾早不来就晚不来，无条件
+         * `delete(runId)` 会把刚登记的新链从表里抹掉——于是这个 run 又能被
+         * 第三条请求并发发起一次拆解，两张图互相覆盖。与 `startAdvance` 同一
+         * 套写法，理由也一样。
+         */
+        if (planning.get(runId) === task) {
+          planning.delete(runId);
+        }
+      });
+    task = { controller, done };
+    planning.set(runId, task);
+  }
+
+  /**
+   * 等一段被中止的拆解让位。
+   *
+   * 返回之后，表里那个 runId 要么已经空出来（正常收尾），要么被强制作废
+   * （旧链不肯退出）——两种情况下 `startPlanning` 都能登记新链。
+   */
+  async function settleAbortedPlanning(runId: string, task: AdvanceTask): Promise<void> {
+    await Promise.race([
+      task.done.catch(() => {}),
+      new Promise<void>((resolve) => {
+        // unref：这个兜底计时器不该独自把进程钉住（测试退出时尤其明显）
+        setTimeout(resolve, INTERRUPT_SETTLE_TIMEOUT_MS).unref();
+      }),
+    ]);
+    if (planning.get(runId) === task) {
+      app.log.warn(
+        { runId },
+        '被打断的拆解没有在时限内退出，强制作废并开始新的拆解',
+      );
+      planning.delete(runId);
+    }
   }
 
   /**
@@ -934,10 +1114,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     concurrency: Number(process.env.AGENT_CONCURRENCY ?? 2),
     plannerAgentId: process.env.PLANNER_AGENT_ID ?? null,
     /**
-     * 新建运行表单里「目标目录」的默认值。
+     * 服务级默认目标目录，没有配置就是 null。
      *
-     * 由后端给而不是前端猜：默认值取决于服务进程的启动目录与 AGENT_TARGET_DIR，
-     * 那两样前端一概不知道。用户看到的就是「什么都不填会发生什么」。
+     * 刻意不再兜底成进程的工作目录：目标目录必须由用户显式选择。前端拿到
+     * null 就不预填，让「选目录」这件事无法被跳过。
      */
     defaultWorkspaceRoot,
     /**
@@ -1123,6 +1303,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         goal: body.data.goal,
         // 这次运行的目标仓库。归一化之后的绝对路径，读取侧直接拿它建工作区
         workspaceRoot,
+        ...(body.data.concurrency !== undefined
+          ? { concurrency: body.data.concurrency }
+          : {}),
         specVersion: dag.specVersion,
         stage: 'decompose',
         createdAt: at,
@@ -1156,6 +1339,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       goal: body.data.goal,
       // 拆解阶段也要记住目录：起 planner 的 worktree 用它，运维复盘时也要看
       workspaceRoot,
+      // 并发度是这次运行的属性：用户选了开几路就按几路跑
+      ...(body.data.concurrency !== undefined
+        ? { concurrency: body.data.concurrency }
+        : {}),
       /**
        * 规格版本先按默认值占位。
        *
@@ -1205,6 +1392,68 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       }
       await store.emit({ type: 'run.paused', at: now(), runId: request.params.id });
       return { ok: true };
+    },
+  );
+
+  /**
+   * 重试失败的节点。
+   *
+   * 执行阶段卡死的运行（有节点失败、也没有任何就绪节点）在事实层是 `failed`，
+   * 但它跟「拆解失败」不是一回事：图是好的，只是没人能往下跑。这种运行给一个
+   * 「继续」按钮没有意义——没有就绪节点可调度，点了什么都不会发生。
+   *
+   * 所以恢复动作是「把挂掉的节点重置回可调度状态，再推进一次」。重置会连带
+   * 作废它们已经跑完的下游，这一点如实报给调用方，别让人以为只是重跑一个节点。
+   */
+  app.post<{ Params: { id: string } }>(
+    '/api/runs/:id/retry-failed',
+    async (request, reply) => {
+      const runId = request.params.id;
+      const run = store.snapshot.runs[runId];
+      if (!run) {
+        return reply.code(404).send({ error: 'run_not_found' });
+      }
+
+      const failed = Object.values(run.nodes).filter(
+        (node) => node.failureReason !== undefined,
+      );
+      if (failed.length === 0) {
+        return reply.code(409).send({
+          error: 'no_failed_nodes',
+          message: '这个运行没有失败的节点可重试',
+        });
+      }
+
+      const finishedCount = (): number =>
+        Object.values(store.snapshot.runs[runId]!.nodes).filter(
+          (node) => node.finishedAt !== undefined,
+        ).length;
+
+      // 重置会连带作废失败节点已经跑完的下游，这个数量要如实报出去：
+      // 用户以为「只重跑这一两个」，实际会往回退好几个节点
+      const before = finishedCount();
+
+      for (const node of failed) {
+        await store.emit({
+          type: 'node.reset',
+          at: now(),
+          runId,
+          nodeId: node.id,
+          reason: '重试失败节点',
+        });
+      }
+
+      const invalidatedNodes = Math.max(0, before - finishedCount());
+
+      // 重置后立刻推进：用户点这个按钮的意思就是「接着跑」
+      void advance(runId);
+
+      return {
+        ok: true,
+        resetNodes: failed.length,
+        invalidatedNodes,
+        run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
+      };
     },
   );
 
@@ -1324,10 +1573,20 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       await store.emit({ type: 'run.resumed', at: now(), runId });
       const run = store.snapshot.runs[runId]!;
       if (!run.frozenAt) {
+        // 还没拆完的运行要继续拆，必须知道在哪儿建 planner 的 worktree。
+        // 旧数据没记目录、服务也没配默认值时就只能拒绝——猜一个目录继续跑，
+        // 等于替用户决定成果落在哪。
+        const planningRoot = run.workspaceRoot || defaultWorkspaceRoot;
+        if (!planningRoot) {
+          return reply.code(409).send({
+            error: 'workspace_missing',
+            message: '这个运行没有记录目标目录（旧数据），无法继续拆解，请新建一个运行',
+          });
+        }
         startPlanning(runId, {
           goal: run.goal,
           requestedAgentId: run.plannerAgentId,
-          workspaceRoot: run.workspaceRoot || defaultWorkspaceRoot,
+          workspaceRoot: planningRoot,
           roles: { implementAgentId: run.implementAgentId, reviewAgentId: run.reviewAgentId },
         });
       } else {
@@ -1354,14 +1613,15 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   );
 
   /* ---------------------------------------------------------------- *
-   * 节点级控制：单跑 / 停止 / 重置
+   * 节点级控制：单跑 / 停止 / 重置 / 对话
    *
    * 粒度细到单个节点，是因为「整轮跑完再看」和「先跑这一个看看」是两种
    * 完全不同的工作节奏。为了重跑一个节点去新建一次运行，代价是把前面
    * 所有的执行事实一起丢掉。
    *
-   * 三个动作都不是「运行级」的：单跑不触发整轮推进，停止不写 run.paused，
-   * 重置不动图结构。要动整轮，仍然走 /advance 与 /stop。
+   * 四个动作都不是「运行级」的：单跑不触发整轮推进，停止不写 run.paused，
+   * 重置不动图结构，对话只落消息（在跑时额外打断并重跑这一个节点）。要动
+   * 整轮，仍然走 /advance 与 /stop。
    * ---------------------------------------------------------------- */
 
   /**
@@ -1378,6 +1638,257 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const node = run.nodes[nodeId];
     return node?.startedAt !== undefined && node.finishedAt === undefined;
   };
+
+  /**
+   * 立刻执行一次节点打断之后，等它让位的上限。
+   *
+   * 为什么必须等：自动重跑走的是 `runNode`，而它看到 `nodeInFlight` 里还有这个
+   * 节点就会直接回「已有一条派发在跑」。不等，这条要求就变成了一句「已打断，
+   * 但没重跑」——用户还得自己再点一次运行。
+   *
+   * 为什么不能无限等：一个不肯退出的 CLI 进程不能把用户刚下达的要求永久挂起。
+   * 超时之后放弃自动重跑，回复里明说「点运行此节点」——那一步同样会带上这条
+   * 要求，因为它读的是同一份事件历史。
+   */
+  const NODE_INTERRUPT_SETTLE_TIMEOUT_MS = 5_000;
+
+  /** 等这个节点的派发标记被撤掉。返回是否等到了。 */
+  async function settleNodeInterrupt(runId: string, nodeId: string): Promise<boolean> {
+    const key = nodeInFlightKey(runId, nodeId);
+    const deadline = Date.now() + NODE_INTERRUPT_SETTLE_TIMEOUT_MS;
+    while (nodeInFlight.has(key)) {
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      // 20ms 一拍：这里只是等一个内存标记消失，不需要更细的精度，
+      // 而更密的轮询会让「一句话打断」在整个等待期里占满一个核
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 20);
+      });
+    }
+    return true;
+  }
+
+  /**
+   * 发一次取消意图，不负责它成功。
+   *
+   * `runner.cancel` 的返回值是**确认终止**的数量，不是结论：进程可能还没起来
+   * （返回 0），可能收到了信号但还要几秒才退。所以调用方判的是「派发标记消失」
+   * 这个可观测事实，而不是这个返回值。
+   */
+  async function cancelNodeProcess(runId: string, nodeId: string): Promise<void> {
+    if (!runner.cancel) {
+      return;
+    }
+    try {
+      const cancelled = await runner.cancel({ runId, nodeId });
+      if (cancelled === 0) {
+        // 没有确认终止不等于停下来了：登记表里有、进程表里没有，说明还在启动
+        // 路上。这条日志是排查「为什么打断慢了一拍」的唯一线索。
+        app.log.debug({ runId, nodeId }, '节点打断请求没有命中任何进程');
+      }
+    } catch (error) {
+      // 终止出错不能让整个请求失败，但也不能假装停掉了什么
+      app.log.warn({ err: error, runId, nodeId }, '终止节点 Agent 时出错');
+    }
+  }
+
+  /**
+   * 等一条被取消的执行彻底让位，必要时补发一次取消。
+   *
+   * 补发是因为 `cancel` 与 `runner.run` 之间有窗口：cancel 发出去时进程可能
+   * 还没登记进进程表（返回 0），那一拍之后再发一次才命中真的进程。
+   */
+  async function settleAfterInterrupt(runId: string, nodeId: string): Promise<boolean> {
+    if (await settleNodeInterrupt(runId, nodeId)) {
+      return true;
+    }
+    await cancelNodeProcess(runId, nodeId);
+    return settleNodeInterrupt(runId, nodeId);
+  }
+
+  /** 把一句人话压成能进事件 `reason` 的短句：那条事实要出现在时间线上，不能是一整段。 */
+  function briefReason(text: string): string {
+    const oneLine = text.replace(/\s+/g, ' ').trim();
+    return oneLine.length > 40 ? `${oneLine.slice(0, 40)}…` : oneLine;
+  }
+
+  /**
+   * 对某个节点说一句话。
+   *
+   * 这是「节点也能被打断、也能对话」的落点，两条分支的语义在事实层完全不同，
+   * 靠「这个节点现在有没有在跑」区分：
+   *
+   * - **在跑**：这句话是「停下手里的活，按我说的改」。所以先终止进程、再落
+   *   消息、再落打断事实，最后自动重跑这个节点——新要求进提示词（见
+   *   core 的 buildPrompt），Agent 真的会看到它。
+   * - **没在跑**（pending / completed / failed / 等审批）：这句话是留言。
+   *   只落消息，**不自动重跑**。人可能只是想先记下来、想先看看上一轮的产物，
+   *   或者根本还在权衡；替他起一次执行，花的是钱和一段没人要的改动。回复里
+   *   明说这条要求会在下次运行该节点时生效，不让人以为「它已经照做了」。
+   *
+   * 顺序不能反的地方写在各步注释里，核心只有一条：**先杀进程，再落消息**。
+   * 反过来会出现「消息说打断了、进程其实还在跑」的窗口，而这个窗口里 Agent
+   * 写下的每一个字都还是按旧要求来的。
+   */
+  app.post<{ Params: { id: string; nodeId: string } }>(
+    '/api/runs/:id/nodes/:nodeId/messages',
+    async (request, reply) => {
+      const { id: runId, nodeId } = request.params;
+      const run = store.snapshot.runs[runId];
+      if (!run) {
+        return reply.code(404).send({ error: 'run_not_found' });
+      }
+      const node = run.nodes[nodeId];
+      if (!node) {
+        return reply.code(404).send({ error: 'node_not_found' });
+      }
+
+      const body = nodeMessageBodySchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+      }
+      const text = body.data.text.trim();
+      if (!text) {
+        return reply.code(400).send({ error: 'invalid_body' });
+      }
+
+      /**
+       * 「正在跑」必须在任何 await 之前判定。
+       *
+       * 这是个快照问题：一旦 emit 出去，事件落盘与归约要让出若干个微任务，
+       * 那一刻读到的运行事实可能已经是「刚结束」。而这条消息要不要带
+       * `interrupt: true` 是它自身的属性——事件写下去就改不了，靠随后补一条
+       * 更正事件只会让重放多出一份需要互相解释的记录。
+       */
+      const running = nodeIsRunning(run, nodeId);
+      /**
+       * 等人工审批的节点也算「在跑」（它有 startedAt、没有 finishedAt），
+       * 但它头上悬着一条审批记录，没有任何 Agent 进程。对它执行打断会把
+       * `startedAt` 清掉，节点当场从「待你审批」变成「就绪」——审批还在，
+       * 界面却不再问人了。所以这一类只算留言。
+       */
+      const awaitingApproval = deriveNodeStatus(run, node) === 'waiting_approval';
+      const at = now();
+
+      const detailOf = () =>
+        deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent);
+      /** 这个节点此刻的会话，随响应带给前端（省掉一次往返）。 */
+      const nodeConversation = () =>
+        detailOf().nodeConversations[nodeId] ?? [];
+
+      if (!running || awaitingApproval) {
+        // ---- 一、没在跑：只记录，不重跑 ----
+        await store.emit({
+          type: 'node.message',
+          at,
+          runId,
+          nodeId,
+          role: 'user',
+          text,
+        });
+
+        const replyText = awaitingApproval
+          ? '已记录。这个节点正在等人工审批，不会自动重跑；审批通过后再次运行它时会带上这条要求。'
+          : '已记录。这条要求会在下次运行该节点时带上它——点「运行此节点」即可。';
+        await store.emit({
+          type: 'node.message',
+          at: now(),
+          runId,
+          nodeId,
+          role: 'agent',
+          text: replyText,
+        });
+
+        return {
+          ok: true,
+          // 界面据此说「这次只记下了」，而不是「这次打断了它」
+          interrupted: false,
+          reply: replyText,
+          run: detailOf(),
+          conversation: nodeConversation(),
+        };
+      }
+
+      // ---- 二、在跑：打断 + 自动重跑 ----
+
+      // 第一步：杀进程。放在落消息之前，所以「消息说打断了」这个时刻，
+      // 终止意图已经发出去了。
+      await cancelNodeProcess(runId, nodeId);
+
+      // 第二步：把这句话落成事实，并标上「它打断了正在进行的执行」
+      await store.emit({
+        type: 'node.message',
+        at: now(),
+        runId,
+        nodeId,
+        role: 'user',
+        text,
+        interrupt: true,
+      });
+
+      // 第三步：落打断事实。这一步同时把 startedAt / finishedAt / failureReason
+      // 清干净（见 journal 里 node.interrupted 的归约），于是这个节点回到可派发
+      // 状态——没有它，下面的 runNode 会以「该节点正在执行」直接拒绝。
+      //
+      // 必须紧挨着消息落，不能等进程退干净再落：正在收尾的那次执行自己也会在
+      // `cancelled` 分支里落一条 node.interrupted（「运行被用户停止」）。它的
+      // 幂等判据是「事实里已经记过打断」——我们把事实先写下去，它就只退不再记，
+      // 会话里才不会出现两条「被停止」。等它退完再写，这两条就都会落下。
+      //
+      // reason 带出原话：排障时要能回答「哪句话打断了这一次执行」。
+      await store.emit({
+        type: 'node.interrupted',
+        at: now(),
+        runId,
+        nodeId,
+        reason: `用户打断并给出了新要求：${briefReason(text)}`,
+      });
+
+      // 第四步：等那条执行彻底让位。不 await 它，重跑会撞上「已有一条派发在跑」。
+      const settled = await settleAfterInterrupt(runId, nodeId);
+
+      // 第五步：按新要求重跑。提示词会带上这条要求，所以这是「真的照做了」，
+      // 不是「记下了」。没让位成功时按留言处理并说清原因。
+      const rerun = settled
+        ? await runNode(runId, nodeId, buildAdvanceDeps())
+        : { ok: false, reason: '上一次执行还没能停下来' };
+
+      // 重跑跑完了，下游就该接着走。
+      //
+      // 这一脚是必须的：`/nodes/:nodeId/run`（手动单跑）刻意不推进整轮，
+      // 那是「我只想看看这个节点」；但打断对话的语义是「这一轮按新要求重来，
+      // 然后继续往下」，不推进的话下游会永远卡在等它完成——用户看到的就是
+      // 「说完了，图也改了，可后面不动」。
+      if (rerun.ok) {
+        void advance(runId);
+      }
+
+      const replyText = rerun.ok
+        ? '已打断当前这轮，并按你这条要求重新开始执行。下游会接着往下走。'
+        : `已打断当前这轮，但没能自动重启：${rerun.reason}。点「运行此节点」会带上这条要求。`;
+
+      // 第六步：回执落库。与编排器对话同一约定——回复和用户消息走同一条通道，
+      // 界面只有一个来源。
+      await store.emit({
+        type: 'node.message',
+        at: now(),
+        runId,
+        nodeId,
+        role: 'agent',
+        text: replyText,
+      });
+
+      return {
+        ok: true,
+        interrupted: true,
+        reply: replyText,
+        run: detailOf(),
+        conversation: nodeConversation(),
+      };
+    },
+  );
+
 
   app.post<{ Params: { id: string; nodeId: string } }>(
     '/api/runs/:id/nodes/:nodeId/run',
@@ -1560,21 +2071,50 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   );
 
   /* ---------------------------------------------------------------- *
-   * 编排器对话：把一句自然语言指令落成对图的修改
+   * 编排器对话：把一句话落成事实，再决定它是「改图」还是「重拆」
    * ---------------------------------------------------------------- */
+
+  /**
+   * 最近几轮编排器对话，按落盘顺序。
+   *
+   * 只取 `orchestrator.message`：系统行（拆解开始/失败、改图结果）是派生视图，
+   * 不是人说过的话，拼进 prompt 只会让 Agent 以为有人在跟它对话。
+   */
+  function recentConversation(runId: string): ConversationMessage[] {
+    const messages: ConversationMessage[] = [];
+    for (const event of store.eventsForRun(runId)) {
+      if (event.type === 'orchestrator.message') {
+        messages.push(event);
+      }
+    }
+    return messages;
+  }
+
+  /** 把编排器的一句话落成事实。回复与用户消息走同一条通道，界面只有一个来源。 */
+  async function replyToConversation(runId: string, text: string): Promise<void> {
+    await store.emit({
+      type: 'orchestrator.message',
+      at: now(),
+      runId,
+      role: 'orchestrator',
+      text,
+    });
+  }
 
   /**
    * 与编排器对话。
    *
-   * 三步走，顺序不能换：
-   *   1. 由事实重建当前 DAG，交给 Planner 侧的 amendDag 产出一张候选新图；
-   *   2. 用白名单比对新旧图，算出真正能落地的改动与被拒的改动；
-   *   3. 有改动才 emit `dag.amended` 并继续推进——没有改动的对话不该在
-   *      事实里留下一条「改过图」的痕迹。
+   * 这个接口承担两件在事实层完全不同的事，靠「这个运行有没有图」区分：
    *
-   * 会话本身不落库：用户的这句话只作为 `dag.amended.reason` 存在，
-   * 因为对话不是编排事实，改动的结果才是。这样重放事件日志得到的是同一张图，
-   * 而不是一段无法校验的聊天记录。
+   * - **还没有图**（拆解进行中，或上一次拆解失败了）：这句话的语义是「停下，
+   *   按我说的重来」。那一刻没有任何图可改，拿 amendDag 去改一张空图，只会
+   *   得到一句「没有需要修改的地方」——而用户真正要求的是换个方向重拆，这句
+   *   回复会被读成「它没听懂」。
+   * - **图已经冻结**：这句话是对那张图的修改指令，走白名单比对。
+   *
+   * 两条路径之前都先做同一件事：把用户这句话落成事实。不管后面成不成功，
+   * 「人说过这句话」都不是结论而是已经发生的事——改图失败时用户回头还要能
+   * 看见自己要求过什么。编排器的回复同样落库，否则刷新之后只剩单方面的问话。
    */
   app.post<{ Params: { id: string } }>(
     '/api/runs/:id/messages',
@@ -1591,23 +2131,130 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       }
 
       const actor = resolveActor(request.headers, body.data.actor);
-      const currentDag = dagFromFacts(run);
-      // 已经产生执行事实的节点：它们不许再被改，必须让 Planner 事先知道
-      const lockedNodeIds = Object.values(run.nodes)
-        .filter((node) => Boolean(node.startedAt || node.finishedAt))
-        .map((node) => node.id);
+      const text = body.data.text.trim();
+      const at = now();
 
-      let amended: AmendedPlan;
+      /**
+       * 这句话之前的对话，不含它自己——它马上就是这条指令的正文，再拼一遍
+       * 等于让 Agent 以为自己被要求了两次。
+       */
+      const history = recentConversation(runId);
+
+      /**
+       * 有没有打断一次正在进行的拆解。
+       *
+       * 必须在落事件之前判定：`interrupt` 是这条消息自身的属性，事件一旦写下去
+       * 就改不了；靠随后补一条「其实刚才打断了」的更正事件，只会让重放多出一份
+       * 需要互相解释的记录。
+       */
+      const interrupted = planning.get(runId);
+      /**
+       * 这个运行还没有图。
+       *
+       * 两种情形都算：拆解正在进行中，或者上一次拆解就失败了。判据用
+       * `frozenAt` 而不是「planning 里有没有它」——对一张还不存在的图做 amend
+       * 永远只会得到「没有需要修改的地方」，而用户其实在要求换个方向重来。
+       * 这条线只在「图已经冻结」时才落到改图逻辑上，与界面那句提示一致。
+       */
+      const noGraphYet = run.frozenAt === undefined;
+
+      /**
+       * 先 abort，再落事件。
+       *
+       * 顺序反过来就会多出一个窗口：中间那一次磁盘写虽然只有几毫秒，却也够
+       * 拆解把图冻出来——那就成了一次没有打断可言的「打断」，紧接着的重拆还会
+       * 把刚生成的图整个换掉。
+       */
+      interrupted?.controller.abort();
+
+      await store.emit({
+        type: 'orchestrator.message',
+        at,
+        runId,
+        role: 'user',
+        text,
+        ...(interrupted ? { interrupt: true } : {}),
+      });
+
+      // ---- 一、还没有图：这句话是「停下重来」 ----
+      if (noGraphYet) {
+        if (interrupted) {
+          // abort 之后必须等它让位：见 settleAbortedPlanning 的注释
+          await settleAbortedPlanning(runId, interrupted);
+        }
+
+        const planningRoot = run.workspaceRoot || defaultWorkspaceRoot;
+        if (!planningRoot) {
+          // 旧日志没记目标目录：猜一个目录继续跑，等于替用户决定成果落在哪
+          const replyText =
+            '这个运行没有记录目标目录，我没法重新拆解。请新建一个运行并选定目录。';
+          await replyToConversation(runId, replyText);
+          return reply.code(409).send({
+            error: 'workspace_missing',
+            message: replyText,
+            reply: replyText,
+            applied: [],
+            rejected: [],
+            run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
+          });
+        }
+
+        startPlanning(runId, {
+          goal: replanGoal(run.goal, text),
+          requestedAgentId: run.plannerAgentId,
+          workspaceRoot: planningRoot,
+          roles: {
+            implementAgentId: run.implementAgentId,
+            reviewAgentId: run.reviewAgentId,
+          },
+        });
+
+        // 两种结局都算「重来」，但对人要说清是打断了在跑的活，还是接着上一次失败
+        const replyText = interrupted
+          ? '已打断正在进行的拆解，并按你这条要求重新拆解。新的任务图会随事件出现在运行详情里。'
+          : '上一次拆解没有交出任务图。我已经把你的要求并进原目标，重新拆解一遍，结果会随事件出现在运行详情里。';
+        await replyToConversation(runId, replyText);
+        return {
+          ok: true,
+          // 界面据此说「这次是打断了拆解」，而不是「改了一下图」
+          interrupted: Boolean(interrupted),
+          reply: replyText,
+          applied: [],
+          rejected: [],
+          run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
+        };
+      }
+
+      // ---- 二、图已经冻结：这句话是对那张图的修改指令 ----
+      //
+      // 改图必须串行：两个并发的请求各自端着一份旧快照算 diff，后落地的
+      // dag.amended 按字段覆盖，先落地那条的改动就被静默吃掉了。排队拿到
+      // 名额之后**重新读快照**——前一个请求可能刚改过图。
+      const releaseAmend = await acquireAmendSlot(runId);
       try {
-        amended = await amendDag(
-          run.goal || run.title,
-          currentDag,
-          body.data.text,
+        const current = store.snapshot.runs[runId] ?? run;
+        const currentDag = dagFromFacts(current);
+        // 已经产生执行事实的节点：它们不许再被改，必须让 Planner 事先知道
+        const lockedNodeIds = Object.values(current.nodes)
+          .filter((node) => Boolean(node.startedAt || node.finishedAt))
+          .map((node) => node.id);
+
+        let amended: AmendedPlan;
+        try {
+          amended = await amendDag(
+            current.goal || current.title,
+            currentDag,
+          // 指令之前先给它前文：用户会说「刚才那个改动再收一点」，而
+          // 「刚才」只在对话里存在，不在指令里
+          buildAmendInstruction(
+            text,
+            history.map((message) => ({ role: message.role, text: message.text })),
+          ),
           catalog,
           {
             runner,
             // 改图同样在运行自己的目标目录里做：它要读的是这个工程的代码
-            workspace: workspaceFor(run),
+            workspace: workspaceFor(current),
             onOutput: (chunk) => {
               // 与规划同理：截断后入日志，全文会淹掉启动日志
               app.log.debug(
@@ -1617,25 +2264,51 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
             },
           },
           {
-            agentId: run.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined,
+            agentId: current.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined,
             runId,
             lockedNodeIds,
           },
         );
       } catch (error) {
+        /**
+         * 失败也是这个会话的一部分，必须落成一条回复。
+         *
+         * 否则界面上只剩用户单方面说过的话，而下一次打开面板的人会以为那句话
+         * 被照办了。失败原因原样写进回复——它是人决定「换个说法还是换个 Agent」
+         * 的唯一依据。
+         */
+        const issues = error instanceof DagGenerationError ? error.issues : [];
+        const message = error instanceof Error ? error.message : String(error);
+        const replyText = [
+          `没能改这张图：${message}`,
+          ...issues.slice(0, 3).map((issue) => `- ${issue.message}`),
+        ].join('\n');
+        await replyToConversation(runId, replyText);
+
         if (error instanceof DagGenerationError) {
           // 指令落不成图属于「内容问题」：把 issues 交给调用方去展示
           return reply.code(422).send({
             error: 'instruction_rejected',
-            message: error.message,
-            issues: error.issues,
+            message,
+            reply: replyText,
+            issues,
+            applied: [],
+            rejected: [],
+            run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
           });
         }
-        const message = error instanceof Error ? error.message : String(error);
-        return reply.code(502).send({ error: 'planner_failed', message, issues: [] });
+        return reply.code(502).send({
+          error: 'planner_failed',
+          message,
+          reply: replyText,
+          issues: [],
+          applied: [],
+          rejected: [],
+          run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
+        });
       }
 
-      const plan = diffDag(currentDag, amended.dag, run);
+      const plan = diffDag(currentDag, amended.dag, current);
 
       if (plan.applied.length > 0) {
         await store.emit({
@@ -1644,7 +2317,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           runId,
           actor,
           // 原文照存：排障要能回答「哪一句话导致了这次改图」
-          reason: body.data.text,
+          reason: text,
           changes: plan.applied,
         });
         // 图变了就继续跑：新加/改过的节点应当在下一批被派发出去。
@@ -1652,16 +2325,28 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         void advance(runId);
       }
 
+      const replyText = buildAmendmentReply(plan);
+      await replyToConversation(runId, replyText);
+
+      const detail = deriveRunDetail(
+        store.snapshot.runs[runId]!,
+        runEvents(runId),
+        resolveAgent,
+      );
+
       return {
-        reply: buildAmendmentReply(plan),
+        ok: true,
+        reply: replyText,
         applied: plan.applied,
         rejected: plan.rejected,
-        run: deriveRunDetail(
-          store.snapshot.runs[runId]!,
-          runEvents(runId),
-          resolveAgent,
-        ),
+        run: detail,
+        // 显式再给一份：只想要会话（不关心图）的调用方不必从 run 里挖
+        conversation: detail.conversation,
       };
+      } finally {
+        // 无论成功、被拒还是抛错，名额都要还回去，否则这个运行的改图就永久卡住
+        releaseAmend();
+      }
     },
   );
 

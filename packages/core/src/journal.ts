@@ -320,6 +320,33 @@ export function reduce(
         }
       });
 
+    case 'orchestrator.message':
+      /**
+       * 对话是历史，不是状态：没有任何运行事实由它派生。
+       *
+       * 它必须进 journal——「人当初怎么说的」要能随日志一起被重放出来；但绝不
+       * 能写进 `RunFacts`：`run.created` 里的 goal 已经是第一条消息，再记一份
+       * 就变成两份可能分叉的真相。所以归约不动，读时由 `deriveConversation`
+       * 把事件流组装成会话。
+       */
+      return state;
+
+    case 'node.message':
+      /**
+       * 节点会话里的一句话：历史，不是状态。
+       *
+       * 与 `orchestrator.message` 完全同理——它必须能被重放出来（「人在这个
+       * 节点跑着的时候要求过什么」是审计问题），但一个字都不进 `NodeFacts`。
+       * 想让它变成「这条要求生效了吗」，只有一条合法路径：它进提示词，然后
+       * 由 `node.started` / `node.completed` 这些真正的执行事实说话。
+       *
+       * 特别提醒：`interrupt: true` 那条**看起来**像状态（「它打断了执行」），
+       * 但它描述的是这句话的来历，不是执行现状。真正的打断事实是紧随其后的
+       * `node.interrupted`，清事实的活由那一分支干。在这里顺手清 startedAt
+       * 会让同一件事有两个写入点，重放时谁先谁后就决定了结果。
+       */
+      return state;
+
     case 'review.verdict': {
       const next = withNode(state, event.runId, event.nodeId, (node) => {
         node.verdict = event.verdict;

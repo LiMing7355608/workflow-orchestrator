@@ -30,3 +30,6 @@ Thumbs.db
 
 # 演示数据归档（排查用，不入库）
 .archive/
+
+# tests may leave artifacts under a package (default dir is <cwd>/data)
+packages/*/data/

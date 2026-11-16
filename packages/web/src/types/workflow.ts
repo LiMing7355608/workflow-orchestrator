@@ -95,6 +95,8 @@ export interface WorkflowNode {
    * （见 displayNodeStatus）。
    */
   interruptedAt?: string;
+  /** 失败原因。挂在节点上而不是只在事件里，卡片与面板才能直接说清为什么红 */
+  failureReason?: string;
 }
 
 export interface WorkflowEdge {
@@ -140,6 +142,58 @@ export interface WorkflowRunDetail extends WorkflowRunSummary {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   events: WorkflowEvent[];
+  /**
+   * 编排器会话：用户 / 编排器 / 系统行，后端按时刻排好。
+   *
+   * 它是运行详情的一部分而不是另开一个接口，理由见后端 core 的
+   * `RunDetailView.conversation`：面板打开时第一屏就要它。
+   */
+  conversation: ConversationEntry[];
+  /**
+   * 每个节点自己的会话，键是 nodeId；没有会话的节点不在这个表里。
+   *
+   * 与 `conversation` 一并返回而不是再开一个接口：节点面板要的第一屏同样是
+   * 「这个节点这一路是怎么干的」，多一次往返就多一次会失败、会晚到的请求，
+   * 而它派的还是同一批事件。
+   */
+  nodeConversations: Record<string, ConversationEntry[]>;
+}
+
+/**
+ * 会话流里的一条。
+ *
+ * 与后端 core 的 `ConversationEntry` 一一对应，刻意各留一份声明（理由同
+ * `AgentEventKind`）：后端加字段时这里只是少一个标记，不会让整页编译不过。
+ */
+export interface ConversationEntry {
+  id: string;
+  at: string;
+  /**
+   * `agent` 只出现在节点会话里：它是编排器替节点执行者记的一句回执
+   * （「已按新要求重启」），或者这一轮执行里被归到轮次下面的东西。
+   * 编排器会话永远不会给这个值。
+   */
+  role: 'user' | 'orchestrator' | 'agent' | 'system';
+  text: string;
+  /** 系统行的色调：阶段变化是 info，失败是 warning，图生成成功是 success */
+  tone?: 'info' | 'warning' | 'success';
+  /** 这条是用户在拆解中途插的话，界面要标出来 */
+  interrupt?: boolean;
+  /**
+   * 这次拆解过程中 Agent 的输出（思考、工具调用、正文）。
+   *
+   * 默认收起，展开才看——它可能有几十步，一直铺开会把整段对话冲散。
+   */
+  outputs?: ConversationOutput[];
+}
+
+/** 拆解过程中的一句输出。 */
+export interface ConversationOutput {
+  id: string;
+  at: string;
+  kind?: string;
+  text: string;
+  toolName?: string;
 }
 
 /**

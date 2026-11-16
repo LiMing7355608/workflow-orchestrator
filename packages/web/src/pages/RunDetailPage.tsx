@@ -1,18 +1,17 @@
-import { AlertTriangle, GitBranch, Loader2 } from 'lucide-react';
+import { AlertTriangle, GitBranch, Loader2, MessageSquare } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { EventStream } from '../components/run/EventStream';
 import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
-import { OrchestratorChat } from '../components/run/OrchestratorChat';
+import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
 import { RunBoard } from '../components/run/RunBoard';
 import { RunHeader } from '../components/run/RunHeader';
 import { ViewBar, type RunView } from '../components/run/ViewBar';
 import { WorkflowCanvas } from '../components/run/WorkflowCanvas';
-import { buttonStyles } from '../components/ui/Button';
+import { Button, buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
-import { Segmented } from '../components/ui/Segmented';
 import { getRunDetail } from '../data/run-detail';
 import { fetchRunDetail } from '../lib/api';
 import { useApiResource, useLiveRefresh } from '../lib/use-api';
@@ -20,20 +19,13 @@ import { usePageTitle } from '../lib/use-page-title';
 import type { PlanFailure } from '../types/workflow';
 
 /**
- * 右侧面板的两个身份。
+ * 右栏只留运行级概览。
  *
- * 放在同一列里切换而不是新开页面：用户下完指令要立刻看到图变了，
- * 跳转一次就把「说 — 看结果 — 再说」这个节奏打断了。
- *
- * 注意这里已经没有「节点详情」了——点节点弹的是覆盖式大面板
- * （NodeDetailPanel），右栏只留运行级概览。
+ * 编排器对话不再挤在这一列里（它原来靠 Segmented 与本概览二选一）：那段对话
+ * 是本次运行的主线，一条被截成 320px 宽、还要和概览抢位置的时间线，读不出
+ * 「一路聊过来」这件事。现在它有自己的大面板（OrchestratorPanel），入口是
+ * 右栏顶部那个常驻按钮——概览与对话各自完整，谁也不挤谁。
  */
-type SidePanel = 'overview' | 'orchestrator';
-
-const panelOptions: Array<{ value: SidePanel; label: string }> = [
-  { value: 'overview', label: '运行概览' },
-  { value: 'orchestrator', label: '编排器' },
-];
 
 /**
  * 失败原因压成一段话。
@@ -80,7 +72,7 @@ export function RunDetailPage() {
   // 高亮要留在图上（用户还在看这个节点），两者的生命周期并不相同。
   const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<RunView>('graph');
-  const [sidePanel, setSidePanel] = useState<SidePanel>('overview');
+  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
 
   usePageTitle(run?.title ?? '运行详情');
 
@@ -88,7 +80,7 @@ export function RunDetailPage() {
     setSelectedNodeId(null);
     setDetailNodeId(null);
     setActiveView('graph');
-    setSidePanel('overview');
+    setOrchestratorOpen(false);
   }, [runId]);
 
   /**
@@ -228,38 +220,46 @@ export function RunDetailPage() {
         </div>
 
         <aside className="flex w-[340px] shrink-0 flex-col overflow-hidden border-l border-line bg-surface max-[1100px]:h-[520px] max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t">
-          <div className="shrink-0 border-b border-line px-3 py-2">
-            <Segmented
-              options={panelOptions}
-              value={sidePanel}
-              onChange={setSidePanel}
-              ariaLabel="右侧面板"
-              fill
-            />
+          {/*
+            「和编排器对话」是这一列里最先被看到的东西：说一句、看图上变了什么，
+            是这个页面最主要的工作节奏。做成常驻按钮而不是切换页签，是因为切换
+            会把概览挤走——而现在两件事可以在同一个屏幕上并存。
+          */}
+          <div className="shrink-0 border-b border-line p-2.5">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setOrchestratorOpen(true)}
+              aria-haspopup="dialog"
+              className="w-full justify-start gap-2 border-accent/25 bg-accent-soft/40 text-accent hover:border-accent/40 hover:bg-accent-soft hover:text-accent"
+            >
+              <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.8} />
+              和编排器对话
+              <span className="ml-auto rounded-full bg-surface px-1.5 text-[10px] tabular-nums text-muted">
+                {run.conversation.length}
+              </span>
+            </Button>
           </div>
 
-          {sidePanel === 'orchestrator' ? (
-            <OrchestratorChat
-              // 换运行就换一份对话：上一轮的聊天记录留在这里只会误导
-              key={run.id}
-              runId={run.id}
-              // 改动生效后重读运行详情：图、节点与事件都由后端派生
-              onRunChanged={reload}
-              className="min-h-0 flex-1"
-            />
-          ) : (
-            <NodeInspector
-              run={run}
-              node={selectedNode}
-              onSelectNode={selectNode}
-              className="min-h-0 flex-1"
-            />
-          )}
+          <NodeInspector
+            run={run}
+            node={selectedNode}
+            onSelectNode={selectNode}
+            className="min-h-0 flex-1"
+          />
         </aside>
       </div>
 
       {/* 挂在页面根节点之下、由 createPortal 送进 body：
-          父级的 overflow-hidden 与 320px 列宽都不会裁剪它 */}
+          父级的 overflow-hidden 与 340px 列宽都不会裁剪它 */}
+      <OrchestratorPanel
+        run={run}
+        open={orchestratorOpen}
+        onClose={() => setOrchestratorOpen(false)}
+        // 消息落库后重读：会话、图与节点状态全部由后端派生
+        onRunChanged={reload}
+      />
+
       <NodeDetailPanel
         run={run}
         node={detailNode}

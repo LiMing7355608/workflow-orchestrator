@@ -31,7 +31,13 @@ import { usePageTitle } from '../lib/use-page-title';
 import type { AgentProfile } from '../types/agent';
 
 type Granularity = 'coarse' | 'medium' | 'fine';
-type Parallelism = '2' | '4' | '6';
+/**
+ * 并行度：这次运行允许同时跑几个节点。
+ *
+ * 上限 32 与服务端 schema 对齐。这不再是「给 Planner 的建议」——它真的会被
+ * 落进运行事实，并决定调度器一次派发几个节点。
+ */
+type Parallelism = '2' | '4' | '8' | '16' | '32';
 type ReviewRounds = '1' | '2' | '3';
 
 interface Attachment {
@@ -52,7 +58,9 @@ const granularityOptions: Array<{ value: Granularity; label: string }> = [
 const parallelismOptions: Array<{ value: Parallelism; label: string }> = [
   { value: '2', label: '2' },
   { value: '4', label: '4' },
-  { value: '6', label: '6' },
+  { value: '8', label: '8' },
+  { value: '16', label: '16' },
+  { value: '32', label: '32' },
 ];
 
 const reviewOptions: Array<{ value: ReviewRounds; label: string }> = [
@@ -188,9 +196,11 @@ export function NewRunPage() {
   const { data: runtime } = useApiResource(fetchRuntime, null);
 
   useEffect(() => {
-    // 只在用户还没输入过时填默认值：已经手填的内容不能被后台返回盖掉
+    // 服务级配了默认目录才预填（运维用 AGENT_TARGET_DIR 指定）。
+    // 没配就是 null——此时输入框保持空，让「选目录」这件事无法被跳过：
+    // 猜一个目录会让成果落在用户没打算动的地方。
     if (runtime?.defaultWorkspaceRoot) {
-      setWorkspaceRoot((prev) => prev || runtime.defaultWorkspaceRoot);
+      setWorkspaceRoot((prev) => prev || runtime.defaultWorkspaceRoot || '');
     }
   }, [runtime]);
 
@@ -286,13 +296,13 @@ export function NewRunPage() {
   /**
    * 目标目录的就地校验结果。
    *
-   * 空串单独说一句：默认值没取到时留空提交，等于让后端用它的默认目录跑，
-   * 而用户以为自己指定了地方——这正是这次要修的那个缺陷。
+   * 空串单独说一句：这是必填项，不是可选项。留空提交等于让后端猜一个目录跑，
+   * 而用户以为自己指定了地方——成果落在错的地方，他很久之后才会发现。
    */
   const trimmedWorkspaceRoot = workspaceRoot.trim();
   const workspaceRootError =
     trimmedWorkspaceRoot.length === 0
-      ? '请填一个目标目录：Agent 的成果会落在这里'
+      ? '请选择目标目录：这是 Agent 干活的地方，成果会落在这里'
       : !isAbsolutePath(trimmedWorkspaceRoot)
         ? '需要绝对路径，例如 D:\\projects\\calculator'
         : null;
@@ -304,8 +314,9 @@ export function NewRunPage() {
     setSubmitting(true);
     setSubmitError(null);
 
-    // 这三个设置目前没有对应的后端参数，拼进目标文本交给 Planner 参考，
-    // 好过做一个看起来生效、实际被丢弃的开关
+    // 分解粒度和审查轮次仍然只是给 Planner 的参考（后端没有对应参数），
+    // 并行度不同：它会被落成运行事实、真的决定调度器一次派发几个节点，
+    // 所以下面单独传 `concurrency`，不再只靠这段文字。
     const granularityLabel =
       granularityOptions.find((option) => option.value === granularity)?.label ??
       granularity;
@@ -323,6 +334,8 @@ export function NewRunPage() {
       goal,
       // 目录必须随创建请求带走：运行一旦建好，目标仓库就是它的事实了
       workspaceRoot: trimmedWorkspaceRoot,
+      // 并行度是这次运行的属性，不是服务的属性
+      concurrency: Number(parallelism),
       plannerAgentId: plannerAgentId || undefined,
       implementAgentId: implementAgentId || undefined,
       reviewAgentId: reviewAgentId || undefined,
@@ -520,11 +533,21 @@ export function NewRunPage() {
                       disabled={picking}
                       onClick={() => {
                         setPicking(true);
+                        setSubmitError(null);
                         void pickDirectory()
                           .then((result) => {
+                            // picked 由后端给，成功时一定有绝对路径
                             if (result?.picked && result.path) {
                               setWorkspaceRoot(result.path);
-                              setSubmitError(null);
+                              return;
+                            }
+                            // 取消是用户的正常操作，不要弹提示；
+                            // 其它失败（平台不支持、弹窗起不来）要说清原因，
+                            // 否则用户只知道「点了没反应」
+                            if (result?.reason && result.reason !== 'cancelled') {
+                              setSubmitError(
+                                result.message ?? '目录选择框没有打开，请直接粘贴路径',
+                              );
                             }
                           })
                           .finally(() => setPicking(false));

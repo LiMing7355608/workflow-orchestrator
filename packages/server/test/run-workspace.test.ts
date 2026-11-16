@@ -324,6 +324,35 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
     await app.close();
   });
 
+  it('不传目录且服务未配置默认值：400 workspace_required，绝不猜一个目录', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'orchestrator-required-'));
+    tempDirs.push(root);
+    delete process.env.AGENT_TARGET_DIR;
+    process.env.AGENT_RUNNER = 'mock';
+    process.env.AGENT_WORKSPACE = 'temp';
+    process.env.AGENT_ARTIFACT_DIR = join(root, 'artifacts');
+    process.env.AGENT_WORKTREE_DIR = join(root, 'worktrees');
+
+    const { app, store } = await buildApp({ logPath: join(root, 'events.jsonl') });
+    const before = runCount(store);
+
+    const response = await createRun(app, {
+      title: '没选目录',
+      goal: '应当被拒绝',
+      dag: HANDWRITTEN_DAG,
+    });
+
+    // 目标目录是必填项：猜一个（比如进程工作目录）会让成果落在用户没打算
+    // 动的地方，而他直到发现文件跑错位置才知道。
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { error: string; message: string };
+    expect(body.error).toBe('workspace_required');
+    expect(body.message).toContain('目标目录');
+    expect(runCount(store)).toBe(before);
+
+    await app.close();
+  });
+
   it('不传目录：回落到 AGENT_TARGET_DIR，/api/runtime 把同一个默认值给前端', async () => {
     // 默认目录在 buildApp 那一刻定下，所以必须先把目标仓库准备好
     const staging = await mkdtemp(join(tmpdir(), 'orchestrator-target-'));

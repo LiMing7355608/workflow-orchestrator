@@ -25,6 +25,7 @@ const originalEnv = {
   workspace: process.env.AGENT_WORKSPACE,
   artifact: process.env.AGENT_ARTIFACT_DIR,
   worktreeDir: process.env.AGENT_WORKTREE_DIR,
+  targetDir: process.env.AGENT_TARGET_DIR,
   plannerAgent: process.env.PLANNER_AGENT_ID,
 };
 
@@ -86,6 +87,9 @@ async function createFixture(catalog?: AgentProfile[]): Promise<Fixture> {
   process.env.AGENT_RUNNER = 'mock';
   process.env.AGENT_WORKSPACE = 'temp';
   process.env.AGENT_ARTIFACT_DIR = join(root, 'artifacts');
+  // 目标目录现在是必填项（没有隐式默认），测试给一个服务级默认值，
+  // 等价于运维用 AGENT_TARGET_DIR 指定过——用例本身不关心这件事。
+  process.env.AGENT_TARGET_DIR = join(root, 'target');
   // 拆解会真的 prepare 一个工作区（回放链路的 release 用的是另一套 runId，
   // 清不掉），所以必须指到临时根，否则仓库的 data/worktrees 会越积越多
   process.env.AGENT_WORKTREE_DIR = join(root, 'worktrees');
@@ -136,6 +140,7 @@ afterEach(async () => {
   restore('AGENT_WORKSPACE', originalEnv.workspace);
   restore('AGENT_ARTIFACT_DIR', originalEnv.artifact);
   restore('AGENT_WORKTREE_DIR', originalEnv.worktreeDir);
+  restore('AGENT_TARGET_DIR', originalEnv.targetDir);
   restore('PLANNER_AGENT_ID', originalEnv.plannerAgent);
 
   await Promise.all(
