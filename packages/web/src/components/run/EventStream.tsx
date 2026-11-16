@@ -102,7 +102,7 @@ export function EventStream({ events, onSelectNode }: EventStreamProps) {
         ? events
         : events.filter((event) => event.type === filter);
 
-    return [...matched].sort(
+    return [...matched].reverse().sort(
       (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime(),
     );
   }, [events, filter]);
@@ -132,9 +132,8 @@ export function EventStream({ events, onSelectNode }: EventStreamProps) {
               const meta = eventMeta[event.type];
               const Icon = meta.icon;
               const kind = event.kind ? kindMeta[event.kind] : undefined;
-              // 工具标记直接显示工具名，比一个笼统的「工具」信息量大得多
-              const kindLabel =
-                event.kind === 'tool' ? event.toolName ?? kind?.label : kind?.label;
+              const command = event.kind === 'tool' && event.toolName &&
+                event.message !== `调用工具 ${event.toolName}` ? event.toolName : undefined;
               const content = (
                 <>
                   <span
@@ -177,17 +176,22 @@ export function EventStream({ events, onSelectNode }: EventStreamProps) {
                     </div>
 
                     <p className="mt-2 flex items-start gap-2 text-[12px] leading-5 text-ink">
-                      {kind && kindLabel ? (
+                      {kind ? (
                         <span
                           className={cn(
                             'mt-1 shrink-0 rounded border border-current/25 px-1 text-[10px] font-medium leading-4',
                             kind.className,
                           )}
                         >
-                          {kindLabel}
+                          {kind.label}
                         </span>
                       ) : null}
-                      <span className="min-w-0 break-words">{event.message}</span>
+                      <span className="min-w-0 break-words">
+                        {command ? (
+                          <code className="mb-1 block whitespace-pre-wrap text-[11px] text-muted">{command}</code>
+                        ) : null}
+                        <span className="whitespace-pre-wrap">{event.message}</span>
+                      </span>
                     </p>
                   </div>
                 </>

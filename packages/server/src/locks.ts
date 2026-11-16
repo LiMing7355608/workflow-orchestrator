@@ -1,4 +1,5 @@
-import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 
 /**
  * 数据目录锁。
@@ -108,6 +109,7 @@ export class DataDirLock {
    * 所以按「极小概率 + 失败即启动失败」的代价接受它。
    */
   async acquire(info: Omit<LockInfo, 'startedAt'>): Promise<LockHandle> {
+    await mkdir(dirname(this.lockPath), { recursive: true });
     const mine: LockInfo = { ...info, startedAt: new Date().toISOString() };
     const payload = JSON.stringify(mine, null, 2);
 

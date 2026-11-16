@@ -89,9 +89,6 @@ function harness(run: RunFacts, options: HarnessOptions = {}): Harness {
     emit: async (event) => {
       events.push(event);
       state = reduce(state, event);
-      if (event.type === 'approval.requested') {
-        state = { ...state, approvals: [...state.approvals, event.record] };
-      }
     },
     runner: {
       run: async (_request, onChunk) => {

@@ -1,4 +1,5 @@
 import type {
+  ApprovalStatus,
   DagAmendment,
   OrchestratorEvent,
   ProjectState,
@@ -83,39 +84,41 @@ function downstreamIds(run: RunFacts, nodeId: string): string[] {
  * 这一步是「回退不改变图结构」的关键——边集永远不动，
  * 只有事实被清空重新累积，因此 DAG 始终保持无环。
  */
-function resetNode(run: RunFacts, nodeId: string): void {
-  const node = run.nodes[nodeId];
-  if (!node) {
-    return;
+function resetNode(run: RunFacts, nodeId: string): string[] {
+  const affected = [nodeId, ...downstreamIds(run, nodeId)].filter((id) => run.nodes[id]);
+  for (const id of affected) {
+    const node = run.nodes[id]!;
+    run.nodes[id] = {
+      ...node,
+      startedAt: undefined,
+      finishedAt: undefined,
+      verdict: undefined,
+      failureReason: undefined,
+      interruptedAt: undefined,
+      escalated: undefined,
+      artifactBytes: undefined,
+      artifactFiles: undefined,
+      mergedBranch: undefined,
+      attempts: node.attempts + Number(id === nodeId),
+    };
   }
-  node.startedAt = undefined;
-  node.finishedAt = undefined;
-  node.verdict = undefined;
-  node.failureReason = undefined;
-  // 退回重做之后「已停止」不再成立：这一轮的打断记录属于上一次执行事实
-  node.interruptedAt = undefined;
-  // 旧产物随重做一并作废：留着上一轮的 diff 统计，
-  // 看板会显示一份已经不存在的变更。
-  node.artifactBytes = undefined;
-  node.artifactFiles = undefined;
-  // 合并结果随重做一并作废：留着上一次的分支名，看板会声称改动已在
-  // 集成分支上，而重跑出来的那一版其实还没合。
-  node.mergedBranch = undefined;
-  node.attempts += 1;
+  run.completedAt = undefined;
+  return affected;
+}
 
-  for (const id of downstreamIds(run, nodeId)) {
-    const downstream = run.nodes[id];
-    if (!downstream || !downstream.finishedAt) {
-      continue;
-    }
-    downstream.startedAt = undefined;
-    downstream.finishedAt = undefined;
-    downstream.verdict = undefined;
-    downstream.failureReason = undefined;
-    downstream.artifactBytes = undefined;
-    downstream.artifactFiles = undefined;
-    downstream.mergedBranch = undefined;
-  }
+function resetNodeState(state: ProjectState, runId: string, nodeId: string): ProjectState {
+  let affected: string[] = [];
+  const next = withRun(state, runId, (run) => {
+    affected = resetNode(run, nodeId);
+  });
+  return {
+    ...next,
+    approvals: next.approvals.map((record) =>
+      record.runId === runId && record.status === 'pending' && affected.includes(record.nodeId)
+        ? { ...record, status: 'superseded' }
+        : record,
+    ),
+  };
 }
 
 /**
@@ -256,8 +259,9 @@ export function reduce(
         run.completedAt = event.at;
       });
 
-    case 'node.started':
-      return withNode(state, event.runId, event.nodeId, (node) => {
+    case 'node.started': {
+      const next = withRun(state, event.runId, (run) => { run.completedAt = undefined; });
+      return withNode(next, event.runId, event.nodeId, (node) => {
         node.startedAt = event.at;
         node.finishedAt = undefined;
         node.failureReason = undefined;
@@ -265,6 +269,7 @@ export function reduce(
         // 说这个节点已停止，而它正在跑
         node.interruptedAt = undefined;
       });
+    }
 
     case 'node.completed':
       return withNode(state, event.runId, event.nodeId, (node) => {
@@ -300,9 +305,7 @@ export function reduce(
       });
 
     case 'node.reset':
-      return withRun(state, event.runId, (run) => {
-        resetNode(run, event.nodeId);
-      });
+      return resetNodeState(state, event.runId, event.nodeId);
 
     case 'dag.amended':
       // 图结构改动走独立事件，并在 facts 里留一条审计流水。
@@ -313,48 +316,73 @@ export function reduce(
         // 空改动不记账：一次「没有需要修改的地方」的对话不该在审计里留痕
         if (event.changes.length > 0) {
           run.amendments = [...(run.amendments ?? []), ...event.changes];
+          run.completedAt = undefined;
         }
       });
 
-    case 'review.verdict':
-      return withNode(state, event.runId, event.nodeId, (node) => {
+    case 'review.verdict': {
+      const next = withNode(state, event.runId, event.nodeId, (node) => {
         node.verdict = event.verdict;
-        node.finishedAt = node.finishedAt ?? event.at;
-        // 审查节点的 attempts 记的是「驳回过几次」，用于回退次数上限
+        if (!event.rework) {
+          node.finishedAt = node.finishedAt ?? event.at;
+        }
         if (event.verdict === 'changes_requested') {
           node.attempts += 1;
         }
       });
+      return event.rework?.nodeId
+        ? resetNodeState(next, event.runId, event.rework.nodeId)
+        : next;
+    }
 
-    case 'review.escalated':
-      return withNode(state, event.runId, event.nodeId, (node) => {
+    case 'review.escalated': {
+      const next = withNode(state, event.runId, event.nodeId, (node) => {
         node.escalated = true;
+        if (event.record) {
+          node.finishedAt = undefined;
+        }
       });
+      return event.record ? { ...next, approvals: [...next.approvals, event.record] } : next;
+    }
 
-    case 'approval.requested':
-      return withNode(state, event.runId, event.record.nodeId, (node) => {
+    case 'approval.requested': {
+      const next = withNode(state, event.runId, event.record.nodeId, (node) => {
         node.startedAt = node.startedAt ?? event.at;
+        node.finishedAt = undefined;
       });
-    // 审批记录本身在下面的分支追加，这里只记节点事实。
+      return { ...next, approvals: [...next.approvals, event.record] };
+    }
 
     case 'approval.decided': {
-      const approvals = state.approvals.map((record) =>
-        record.id === event.approvalId
-          ? {
-              ...record,
-              status:
-                event.decision === 'approve'
-                  ? ('approved' as const)
-                  : event.decision === 'reject'
-                    ? ('rejected' as const)
-                    : ('handed_off' as const),
-              actor: event.actor,
-              reason: event.reason,
-              decidedAt: event.at,
-            }
-          : record,
-      );
-      return { ...state, approvals };
+      const record = state.approvals.find((item) => item.id === event.approvalId && item.runId === event.runId);
+      if (!record || record.status !== 'pending') {
+        return state;
+      }
+      const status: ApprovalStatus = event.decision === 'approve' ? 'approved'
+        : event.decision === 'reject' ? 'rejected' : 'handed_off';
+      const approvals = state.approvals.map((item) => item === record
+        ? { ...item, status, actor: event.actor, reason: event.reason, decidedAt: event.at }
+        : item);
+      const next: ProjectState = { ...state, approvals };
+      if (!event.nodeId) {
+        return next;
+      }
+      if (event.nextRecord) {
+        return { ...next, approvals: [...approvals, event.nextRecord] };
+      }
+      if (event.resetNodeId) {
+        return resetNodeState(next, event.runId, event.resetNodeId);
+      }
+      return withNode(next, event.runId, event.nodeId, (node) => {
+        node.finishedAt = event.at;
+        node.escalated = undefined;
+        node.failureReason = event.decision === 'reject'
+          ? event.reason ?? '人工审批驳回'
+          : undefined;
+        if (node.type === 'review' && event.decision === 'approve') {
+          node.verdict = 'approved';
+        }
+      });
     }
 
     case 'agent.output':
@@ -403,17 +431,8 @@ export function reduce(
   }
 }
 
-/** `approval.requested` 需要同时追加记录与写节点事实，单独处理。 */
-function apply(state: ProjectState, event: OrchestratorEvent): ProjectState {
-  const next = reduce(state, event);
-  if (event.type === 'approval.requested') {
-    return { ...next, approvals: [...next.approvals, event.record] };
-  }
-  return next;
-}
-
 export function replay(events: OrchestratorEvent[]): ProjectState {
-  return events.reduce(apply, emptyState());
+  return events.reduce(reduce, emptyState());
 }
 
 /* ------------------------------------------------------------------ *

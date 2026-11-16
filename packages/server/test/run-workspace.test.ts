@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { FastifyInstance } from 'fastify';
 import type { AgentProfile } from '@orchestrator/core';
@@ -322,20 +322,19 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
   });
 
   it('相对路径被归一化成绝对路径再落进事实', async () => {
-    const { app } = await createFixture('git');
+    const { app, root } = await createFixture('git');
+    const target = await createRepo(root);
 
     const response = await createRun(app, {
       title: '相对路径',
       goal: '应当被归一化',
       dag: HANDWRITTEN_DAG,
-      // 服务进程的启动目录：它本身在编排器仓库里，是一个真正的 git 工作树
-      workspaceRoot: '.',
+      workspaceRoot: relative(process.cwd(), target),
     });
 
     expect(response.statusCode).toBe(201);
     const body = response.json() as { workspaceRoot: string };
-    expect(body.workspaceRoot).toBe(resolve('.'));
-    expect(body.workspaceRoot).not.toBe('.');
+    expect(body.workspaceRoot).toBe(resolve(target));
 
     await settle();
     await app.close();

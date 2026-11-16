@@ -103,7 +103,6 @@ export function isRunSettled(run: RunFacts): boolean {
 /** 是否存在需要人工介入的节点（审批等待或审查超限升级）。 */
 export function pendingHumanWork(run: RunFacts): NodeFacts[] {
   return Object.values(run.nodes).filter(
-    (node) =>
-      deriveNodeStatus(run, node) === 'waiting_approval' || node.escalated === true,
+    (node) => deriveNodeStatus(run, node) === 'waiting_approval',
   );
 }

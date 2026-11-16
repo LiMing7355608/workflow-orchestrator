@@ -23,7 +23,6 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Field } from '../components/ui/Field';
 import { Segmented } from '../components/ui/Segmented';
-import { seedAgents } from '../data/agents';
 import { createRun, fetchAgents, fetchRuntime, pickDirectory } from '../lib/api';
 import { cn } from '../lib/cn';
 import { formatFileSize } from '../lib/format';
@@ -150,7 +149,7 @@ function AgentSelect({
         {agents.map((agent) => (
           <option key={agent.id} value={agent.id}>
             {agent.label}
-            {agent.availability === 'ready' ? '' : '（未实测）'}
+            {agent.availability === 'ready' ? '' : '（已安装）'}
           </option>
         ))}
       </select>
@@ -172,9 +171,9 @@ export function NewRunPage() {
   const [reviewRounds, setReviewRounds] = useState<ReviewRounds>('2');
 
   // 三个角色的 Agent 在这里就定下来，而不是等 Planner 自己挑
-  const [plannerAgentId, setPlannerAgentId] = useState('');
-  const [implementAgentId, setImplementAgentId] = useState('');
-  const [reviewAgentId, setReviewAgentId] = useState('');
+  const [chosenPlanner, setPlannerAgentId] = useState('');
+  const [chosenImplementer, setImplementAgentId] = useState('');
+  const [chosenReviewer, setReviewAgentId] = useState('');
   /**
    * 目标目录：Agent 干活的地方，成果会落在这里。
    *
@@ -185,7 +184,7 @@ export function NewRunPage() {
   /** 原生目录选择框正在弹（它会阻塞到用户点确定或取消） */
   const [picking, setPicking] = useState(false);
 
-  const { data: agents } = useApiResource(fetchAgents, seedAgents);
+  const { data: agents, loading: loadingAgents } = useApiResource(fetchAgents, []);
   const { data: runtime } = useApiResource(fetchRuntime, null);
 
   useEffect(() => {
@@ -204,19 +203,15 @@ export function NewRunPage() {
       .sort((left, right) => rank(right) - rank(left));
   }, [agents]);
 
-  // 默认值：拆图优先给能结构化输出的，审查尽量与实现不同人
-  useEffect(() => {
-    if (usableAgents.length === 0) {
-      return;
-    }
-    const structured = usableAgents.find((agent) => agent.capabilities.structured);
-    const primary = structured?.id ?? usableAgents[0]!.id;
-    const secondary = usableAgents.find((agent) => agent.id !== primary)?.id ?? primary;
-
-    setPlannerAgentId((prev) => prev || primary);
-    setImplementAgentId((prev) => prev || primary);
-    setReviewAgentId((prev) => prev || secondary);
-  }, [usableAgents]);
+  const primary = usableAgents.find((agent) => agent.capabilities.structured)?.id
+    ?? usableAgents[0]?.id;
+  const selectedAgent = (chosen: string, fallback?: string) =>
+    usableAgents.some((agent) => agent.id === chosen) ? chosen : fallback ?? '';
+  const plannerAgentId = selectedAgent(chosenPlanner, primary);
+  const implementAgentId = selectedAgent(chosenImplementer, primary);
+  const reviewerDefault = usableAgents.find((agent) => agent.id !== implementAgentId)?.id
+    ?? implementAgentId;
+  const reviewAgentId = selectedAgent(chosenReviewer, reviewerDefault);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<Attachment[]>([]);
@@ -286,7 +281,7 @@ export function NewRunPage() {
     addFiles(event.dataTransfer.files);
   }
 
-  const canSubmit = text.trim().length > 0;
+  const canSubmit = Boolean(text.trim() && runtime && plannerAgentId && implementAgentId && reviewAgentId);
 
   /**
    * 目标目录的就地校验结果。
@@ -558,9 +553,13 @@ export function NewRunPage() {
               执行 Agent
             </div>
             <p className="mt-1 text-[10px] leading-4 text-passive">
-              {runtime?.runner === 'mock'
-                ? '当前是回放模式，不会真的调用 Agent。'
-                : '编排器负责拆图，实现与审查分别由选中的 Agent 执行。'}
+              {!runtime || loadingAgents
+                ? '等待本地后端和 Agent 列表。'
+                : runtime.runner === 'mock'
+                  ? '当前是回放模式，不会真的调用 Agent。'
+                  : usableAgents.length === 0
+                    ? '后端未检测到受支持的本地 CLI。请安装并登录 Agent 后重新打开此页。'
+                    : '真实执行模式。所选 Agent 将在各自的 Git worktree 中拆图、写代码和审查。'}
             </p>
 
             <div className="mt-3 space-y-3">

@@ -64,13 +64,8 @@ export class RunStore {
 
     const grouped = await journal.readAll();
 
-    // 分片之后不再有「全局的追加顺序」，只能按事件自带的时间重建。
-    // 排序是稳定的：同一个 run 内 `at` 相同的事件保持读回顺序，而读回顺序
-    // 就是落盘顺序，因此同毫秒的成对事件（review.verdict + node.completed）
-    // 不会被打乱。
-    const events = [...grouped.values()]
-      .flat()
-      .sort((left, right) => left.at.localeCompare(right.at));
+    // 回放以每条运行的落盘顺序为准。
+    const events = [...grouped.values()].flat();
 
     const loaded = events.length > 0 ? events : seed(new Date());
     if (events.length === 0) {
@@ -114,13 +109,6 @@ export class RunStore {
   async emit(event: OrchestratorEvent): Promise<void> {
     await this.journal.append(event);
     this.state = reduce(this.state, event);
-    // approval.requested 的记录追加由 replay 的 apply 负责，这里补齐同一行为
-    if (event.type === 'approval.requested') {
-      this.state = {
-        ...this.state,
-        approvals: [...this.state.approvals, event.record],
-      };
-    }
     this.all.push(event);
 
     const bucket = this.byRun.get(event.runId);

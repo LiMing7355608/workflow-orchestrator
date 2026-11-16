@@ -73,6 +73,7 @@ export function RunDetailPage() {
     run.nodes.length === 0;
   // 失败态只在「还没图」时成立：图一旦冻出来，那次失败就只是历史
   const planFailure = planning ? run?.planFailure : undefined;
+  const planningActive = planning && run?.status === 'draft';
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   // 面板自己记住「正在看哪个节点」而不仅仅依赖 selectedNodeId：关掉面板时
@@ -104,12 +105,12 @@ export function RunDetailPage() {
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
   useEffect(() => {
-    if (!planning) {
+    if (!planningActive) {
       return;
     }
     const timer = window.setInterval(() => reloadRef.current(), 2_000);
     return () => window.clearInterval(timer);
-  }, [planning]);
+  }, [planningActive]);
 
   // 点节点即打开详情面板：拓扑图、泳道卡片、事件流、右栏概览里的条目都走
   // 这一条。详情足够大，遮住的是「宽高都很宽裕的画布」而不是用户正在读的
@@ -174,7 +175,8 @@ export function RunDetailPage() {
       />
 
       <ViewBar
-        value={activeView}
+        value={planning ? 'events' : activeView}
+        planning={planning}
         onChange={setActiveView}
         nodeCount={run.nodes.length}
         eventCount={run.events.length}
@@ -182,31 +184,28 @@ export function RunDetailPage() {
 
       <div className="flex min-h-0 flex-1 max-[1100px]:block">
         <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
-          {/*
-            还没有图：显示「正在拆解」而不是空看板。空看板会被读成「这个运行
-            没有任务」，而真相是任务图正在生成——两者对用户的下一步完全不同。
-          */}
           {planning ? (
-            <div className="flex h-full items-center justify-center overflow-y-auto bg-canvas">
-              <EmptyState
-                icon={planFailure ? AlertTriangle : Loader2}
-                title={planFailure ? '任务图拆解失败' : '编排器正在拆解任务图…'}
-                description={
-                  planFailure
-                    ? failureText(planFailure)
-                    : '这一步要真调一次 CLI Agent，通常需要几十秒。图生成之后这里会自动出现，不必刷新。'
-                }
-                action={
-                  planFailure ? (
-                    <Link
-                      to="/runs/new"
-                      className={buttonStyles({ variant: 'secondary', size: 'sm' })}
-                    >
-                      重新拆解
-                    </Link>
-                  ) : undefined
-                }
-              />
+            <div className="flex h-full flex-col bg-canvas">
+              <div className="flex shrink-0 items-start gap-3 border-b border-line bg-surface px-4 py-3">
+                {planFailure ? (
+                  <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+                ) : planningActive ? (
+                  <Loader2 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-accent motion-reduce:animate-none" />
+                ) : null}
+                <div className="min-w-0" role="status">
+                  <h2 className="text-sm font-semibold text-ink">规划 Agent 输出</h2>
+                  <p className="mt-0.5 text-xs leading-5 text-muted">
+                    {run.status === 'paused'
+                      ? '任务拆解已暂停。点击顶部的继续按钮重新拆解。'
+                      : planFailure
+                        ? failureText(planFailure)
+                        : '正在生成任务图。Agent 输出会实时出现在下方。'}
+                  </p>
+                </div>
+              </div>
+              <div className="min-h-0 flex-1">
+                <EventStream events={run.events} onSelectNode={selectNode} />
+              </div>
             </div>
           ) : activeView === 'graph' ? (
             <WorkflowCanvas

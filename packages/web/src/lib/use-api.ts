@@ -62,11 +62,11 @@ export function useApiResource<T>(
 export function useLiveRefresh(
   enabled: boolean,
   onEvent: () => void,
-  options: { runId?: string; debounceMs?: number } = {},
+  options: { runId?: string; refreshIntervalMs?: number } = {},
 ): void {
   const callbackRef = useRef(onEvent);
   callbackRef.current = onEvent;
-  const { runId, debounceMs = 250 } = options;
+  const { runId, refreshIntervalMs = 250 } = options;
 
   useEffect(() => {
     if (!enabled) {
@@ -79,11 +79,12 @@ export function useLiveRefresh(
         return;
       }
       if (timer !== undefined) {
-        window.clearTimeout(timer);
+        return;
       }
       timer = window.setTimeout(() => {
+        timer = undefined;
         callbackRef.current();
-      }, debounceMs);
+      }, refreshIntervalMs);
     });
 
     return () => {
@@ -92,5 +93,5 @@ export function useLiveRefresh(
       }
       unsubscribe();
     };
-  }, [enabled, runId, debounceMs]);
+  }, [enabled, runId, refreshIntervalMs]);
 }

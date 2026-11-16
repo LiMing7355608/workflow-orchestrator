@@ -37,31 +37,6 @@ interface GitResult {
 }
 
 /**
- * 解析 `git status --porcelain -z` 的输出。
- *
- * 用 `-z` 而不是普通文本输出：含空格或中文的路径在文本模式下会被
- * 加引号并转义，拿到的路径直接不可用；`-z` 用 NUL 分隔，原样给出。
- * 重命名/复制在 `-z` 下会紧跟一项「原路径」，必须跳过，
- * 否则同一处改动会被算成两个不同文件。
- */
-function parsePorcelain(stdout: string): string[] {
-  const entries = stdout.split('\0').filter((entry) => entry.length > 3);
-  const paths: string[] = [];
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = entries[i];
-    if (!entry) {
-      continue;
-    }
-    const status = entry.slice(0, 2);
-    paths.push(entry.slice(3));
-    if (status.includes('R') || status.includes('C')) {
-      i += 1;
-    }
-  }
-  return paths;
-}
-
-/**
  * 目标目录是不是一个可用的 git 工作树。
  *
  * 为什么要单独问一句：`git worktree add` 在非 git 目录里会失败，但那是一句
@@ -131,7 +106,10 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     timeout = 120_000,
   ): Promise<GitResult> {
     try {
-      const { stdout, stderr } = await execFileAsync('git', args, {
+      const { stdout, stderr } = await execFileAsync('git', [
+        '-c', 'user.name=Workflow Orchestrator', '-c', 'user.email=orchestrator@localhost',
+        ...args,
+      ], {
         cwd,
         windowsHide: true,
         timeout,
@@ -152,15 +130,132 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     return resolve(this.worktreeRoot, runId, INTEGRATION_DIR);
   }
 
-  async prepare(runId: string, nodeId: string): Promise<string> {
-    const dir = this.dirOf(runId, nodeId);
-    if (existsSync(dir)) {
-      // 重试同一个节点时复用已有工作区，保留上一轮的上下文
-      return dir;
+  private baseRef(runId: string, nodeId?: string): string {
+    return nodeId
+      ? `refs/orchestrator/node-base/${runId}/${nodeId}`
+      : `refs/orchestrator/run-base/${runId}`;
+  }
+
+  private publishedRef(runId: string, nodeId: string): string {
+    return `refs/orchestrator/published/${runId}/${nodeId}/commit`;
+  }
+
+  private async commitAt(ref: string): Promise<string | undefined> {
+    const result = await this.gitRun(['rev-parse', '--verify', '--quiet', ref], this.repoRoot);
+    return result.ok ? result.stdout.trim() : undefined;
+  }
+
+  private async gitValue(args: string[], cwd = this.repoRoot): Promise<string> {
+    const result = await this.gitRun(args, cwd);
+    if (!result.ok) {
+      throw new Error(result.stderr.trim() || result.stdout.trim() || `git ${args[0]} 失败`);
     }
-    await mkdir(dirname(dir), { recursive: true });
-    await this.git(['worktree', 'add', '-b', this.branchOf(runId, nodeId), dir, 'HEAD']);
+    return result.stdout.trim();
+  }
+
+  private async runBase(runId: string): Promise<string> {
+    const ref = this.baseRef(runId);
+    const existing = await this.commitAt(ref);
+    if (existing) {
+      return existing;
+    }
+    const head = await this.gitValue(['rev-parse', 'HEAD']);
+    // 空旧值表示只能创建。并行节点会使用最先成功登记的基线。
+    const created = await this.gitRun(['update-ref', ref, head, ''], this.repoRoot);
+    if (created.ok) {
+      return head;
+    }
+    const registered = await this.commitAt(ref);
+    if (!registered) {
+      throw new Error(created.stderr.trim() || '无法登记运行的 Git 基线');
+    }
+    return registered;
+  }
+
+  private async dependencyBase(runId: string, upstreamIds: string[]): Promise<string> {
+    let base = await this.runBase(runId);
+    for (const id of upstreamIds) {
+      const upstream = await this.nodeCommit(runId, id);
+      if ((await this.gitRun(['merge-base', '--is-ancestor', upstream, base], this.repoRoot)).ok) {
+        continue;
+      }
+      if ((await this.gitRun(['merge-base', '--is-ancestor', base, upstream], this.repoRoot)).ok) {
+        base = upstream;
+        continue;
+      }
+      const tree = await this.gitValue(['merge-tree', '--write-tree', base, upstream]);
+      base = await this.gitValue([
+        'commit-tree', tree, '-p', base, '-p', upstream, '-m', `汇集节点 ${id} 的上游产物`,
+      ]);
+    }
+    return base;
+  }
+
+  async prepare(runId: string, nodeId: string, upstreamIds?: string[]): Promise<string> {
+    const dir = this.dirOf(runId, nodeId);
+    const branch = this.branchOf(runId, nodeId);
+    const base = upstreamIds ? await this.dependencyBase(runId, upstreamIds) : 'HEAD';
+    const ref = this.baseRef(runId, nodeId);
+    const previous = upstreamIds ? await this.commitAt(ref) : undefined;
+
+    if (!existsSync(dir)) {
+      await mkdir(dirname(dir), { recursive: true });
+      const branchExists = await this.commitAt(`refs/heads/${branch}`);
+      await this.git(branchExists
+        ? ['worktree', 'add', dir, branch]
+        : ['worktree', 'add', '-b', branch, dir, base]);
+    }
+
+    if (upstreamIds && previous !== base) {
+      const oldTree = previous && await this.commitAt(`${previous}^{tree}`);
+      const newTree = await this.commitAt(`${base}^{tree}`);
+      if (previous && oldTree !== newTree) {
+        if (await this.gitValue(['status', '--porcelain'], dir)) {
+          throw new Error('上游产物已更新，请先保存当前节点工作区中的未提交改动');
+        }
+        const rebased = await this.gitRun(['rebase', '--onto', base, previous], dir);
+        if (!rebased.ok) {
+          await this.gitRun(['rebase', '--abort'], dir);
+          throw new Error(`无法接入更新后的上游产物：${rebased.stderr.trim() || rebased.stdout.trim()}`);
+        }
+      }
+      if (!previous || oldTree !== newTree) {
+        await this.gitValue(['update-ref', ref, base]);
+      }
+    }
     return dir;
+  }
+
+  async publish(runId: string, nodeId: string): Promise<void> {
+    const dir = this.dirOf(runId, nodeId);
+    const branch = await this.gitValue(['symbolic-ref', '--short', 'HEAD'], dir);
+    if (branch !== this.branchOf(runId, nodeId)) {
+      throw new Error('节点执行期间切换了工作区分支');
+    }
+    const committed = await this.commitWorktree(dir, nodeId);
+    if (!committed.ok) {
+      throw new Error(committed.reason);
+    }
+    const head = await this.gitValue(['rev-parse', 'HEAD'], dir);
+    await this.gitValue(['update-ref', this.publishedRef(runId, nodeId), head]);
+  }
+
+  private async nodeCommit(runId: string, nodeId: string): Promise<string> {
+    const published = await this.commitAt(this.publishedRef(runId, nodeId));
+    if (published) {
+      return published;
+    }
+    // 兼容旧运行以及直接使用工作区的调用方。
+    const saved = await this.commitWorktree(this.dirOf(runId, nodeId), nodeId);
+    if (!saved.ok) {
+      throw new Error(saved.reason);
+    }
+    const branch = this.branchOf(runId, nodeId);
+    const commit = await this.commitAt(`refs/heads/${branch}`);
+    if (!commit) {
+      throw new Error(`节点分支不存在：${branch}`);
+    }
+    return commit;
   }
 
   /**
@@ -194,13 +289,14 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     // 另走一条分支，而且「有差异」时退出码是 1，会被 execFile 当成失败。
     await execFileAsync('git', ['add', '-N', '--all'], options).catch(() => {});
 
+    const base = await this.commitAt(this.baseRef(runId, nodeId)) ?? 'HEAD';
     let diff = '';
     try {
       // 对比 HEAD 而不是「工作区 vs index」：Agent 自己执行过 git add 时，
       // 后者会把这些改动当成已提交内容而全部漏掉。
       const { stdout } = await execFileAsync(
         'git',
-        ['diff', '--no-color', '--no-ext-diff', 'HEAD'],
+        ['diff', '--no-color', '--no-ext-diff', base],
         options,
       );
       diff = stdout;
@@ -222,10 +318,10 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     try {
       const { stdout } = await execFileAsync(
         'git',
-        ['status', '--porcelain', '-z'],
+        ['diff', '--name-only', '-z', base],
         options,
       );
-      files = parsePorcelain(stdout);
+      files = stdout.split('\0').filter(Boolean);
     } catch {
       files = [];
     }
@@ -260,8 +356,11 @@ export class GitWorktreeWorkspace implements WorkspacePort {
       return;
     }
 
-    await this.git(['worktree', 'remove', dir]).catch(() => {});
-    await this.git(['branch', '-D', this.branchOf(runId, nodeId)]).catch(() => {});
+    const removed = await this.gitRun(['worktree', 'remove', dir], this.repoRoot);
+    if (removed.ok) {
+      await this.gitRun(['branch', '-D', this.branchOf(runId, nodeId)], this.repoRoot);
+      await this.gitRun(['update-ref', '-d', this.baseRef(runId, nodeId)], this.repoRoot);
+    }
   }
 
   /**
@@ -285,7 +384,10 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     }
 
     const status = await this.gitRun(['status', '--porcelain'], dir, 60_000);
-    if (!status.ok || !status.stdout.trim()) {
+    if (!status.ok) {
+      return { ok: false, reason: `读取节点 ${nodeId} 工作区失败：${status.stderr.trim()}` };
+    }
+    if (!status.stdout.trim()) {
       return { ok: true };
     }
 
@@ -327,6 +429,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     runId: string,
     branch: string,
     dir: string,
+    base: string,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     if (existsSync(dir)) {
       return { ok: true };
@@ -341,7 +444,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     const added =
       existing.ok && existing.stdout.trim()
         ? await this.gitRun(['worktree', 'add', dir, branch], this.repoRoot)
-        : await this.gitRun(['worktree', 'add', '-b', branch, dir, 'HEAD'], this.repoRoot);
+        : await this.gitRun(['worktree', 'add', '-b', branch, dir, base], this.repoRoot);
 
     if (!added.ok) {
       return {
@@ -370,41 +473,48 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     const merged: string[] = [];
     const dir = this.integrationDirOf(runId);
 
-    const prepared = await this.ensureIntegration(runId, targetBranch, dir);
+    const runBase = await this.commitAt(this.baseRef(runId));
+    const prepared = await this.ensureIntegration(runId, targetBranch, dir, runBase ?? 'HEAD');
     if (!prepared.ok) {
       return { ok: false, branch: targetBranch, conflicts: [], merged, reason: prepared.reason };
     }
 
+    const status = await this.gitRun(['status', '--porcelain'], dir);
+    if (!status.ok || status.stdout.trim()) {
+      return { ok: false, branch: targetBranch, conflicts: [], merged, reason: '集成工作区有未提交改动或无法读取' };
+    }
+    const integrationRef = `refs/orchestrator/integration/${runId}/commit`;
+    const current = await this.commitAt(`refs/heads/${targetBranch}`);
+    const previous = await this.commitAt(integrationRef);
+    if (previous && current !== previous) {
+      return { ok: false, branch: targetBranch, conflicts: [], merged, reason: '集成分支有手动提交，请确认后再合并' };
+    }
+    if (runBase && (previous || current === runBase)) {
+      const reset = await this.gitRun(['reset', '--keep', runBase], dir);
+      if (!reset.ok) {
+        return { ok: false, branch: targetBranch, conflicts: [], merged, reason: reset.stderr.trim() };
+      }
+      const recorded = await this.gitRun(['update-ref', integrationRef, runBase], dir);
+      if (!recorded.ok) {
+        return { ok: false, branch: targetBranch, conflicts: [], merged, reason: recorded.stderr.trim() };
+      }
+    }
+
     for (const nodeId of nodeIds) {
       const nodeBranch = this.branchOf(runId, nodeId);
-
-      const committed = await this.commitWorktree(this.dirOf(runId, nodeId), nodeId);
-      if (!committed.ok) {
-        return { ok: false, branch: targetBranch, conflicts: [], merged, reason: committed.reason };
+      let commit: string;
+      try {
+        commit = await this.nodeCommit(runId, nodeId);
+      } catch (error) {
+        return { ok: false, branch: targetBranch, conflicts: [], merged, reason: (error as Error).message };
       }
-
-      // 分支不存在时自己说清楚：git 的原始报错里混着用法提示，
-      // 直接透出去等于让人去读 git 帮助文档
-      const exists = await this.gitRun(
-        ['rev-parse', '--verify', '--quiet', `refs/heads/${nodeBranch}`],
-        this.repoRoot,
-      );
-      if (!exists.ok || !exists.stdout.trim()) {
-        return {
-          ok: false,
-          branch: targetBranch,
-          conflicts: [],
-          merged,
-          reason: `节点分支不存在：${nodeBranch}`,
-        };
-      }
-
-      const result = await this.gitRun(
-        ['merge', '--no-ff', nodeBranch, '-m', `merge ${nodeBranch}`],
-        dir,
-      );
+      const result = await this.gitRun(['merge', '--no-ff', commit, '-m', `merge ${nodeBranch}`], dir);
       if (result.ok) {
         merged.push(nodeId);
+        const recorded = await this.gitRun(['update-ref', integrationRef, 'HEAD'], dir);
+        if (!recorded.ok) {
+          return { ok: false, branch: targetBranch, conflicts: [], merged, reason: recorded.stderr.trim() };
+        }
         continue;
       }
 

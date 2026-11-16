@@ -11,8 +11,7 @@
  *   <root>/<runId>/events.1.jsonl     上一片（数字越大越旧）
  *   <root>/<runId>/events.2.jsonl
  *
- * 只轮转、不删除正文，超出 `maxShards` 时删掉最旧的那一片——这是「有界的
- * 只增日志」：单 run 的磁盘占用被 `maxBytesPerShard * (maxShards + 1)` 钉住。
+ * 超出活跃归档数量的分片转入 archive/。所有分片都参与状态回放。
  */
 import type { Dirent } from 'node:fs';
 import {
@@ -22,7 +21,6 @@ import {
   readFile,
   rename,
   stat,
-  unlink,
 } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type { OrchestratorEvent } from '@orchestrator/core';
@@ -33,7 +31,7 @@ export interface JournalOptions {
   rootDir: string;
   /** 单个分片的最大字节数，超过就轮转 */
   maxBytesPerShard?: number;
-  /** 每个 run 最多保留几个归档分片 */
+  /** 每个 run 保留在活跃日志目录的归档分片数 */
   maxShards?: number;
   /** 诊断与降级告警的出口，不传则静默 */
   log?: LogSink;
@@ -124,6 +122,7 @@ export class EventJournal {
 
   /** 当前分片已写字节数的内存估计，省掉每次追加前的一次 stat */
   private readonly shardBytes = new Map<string, number>();
+  private readonly archiveSequence = new Map<string, number>();
 
   constructor(options: JournalOptions) {
     this.rootDir = options.rootDir;
@@ -195,10 +194,12 @@ export class EventJournal {
   async shards(runId: string): Promise<string[]> {
     const runDir = this.runDir(runId);
     const indices = await this.archiveIndices(runDir);
-    const paths = indices
-      .slice()
-      .sort((left, right) => right - left)
-      .map((index) => join(runDir, archiveShard(index)));
+    const coldDir = join(runDir, 'archive');
+    const archived = await this.archiveIndices(coldDir);
+    const paths = [
+      ...archived.sort((left, right) => left - right).map((index) => join(coldDir, archiveShard(index))),
+      ...indices.sort((left, right) => right - left).map((index) => join(runDir, archiveShard(index))),
+    ];
 
     const active = join(runDir, ACTIVE_SHARD);
     try {
@@ -281,42 +282,28 @@ export class EventJournal {
     return indices;
   }
 
-  /**
-   * 轮转：删最旧 → 逐个后移 → 当前片变 1 号。
-   *
-   * Windows 上 `rename` 覆盖已存在的文件依赖 `MOVEFILE_REPLACE_EXISTING`，
-   * 行为与 POSIX 一致；最旧那片先 unlink 是为了不让 `maxShards` 之外的
-   * 脏分片在改名链里存活。
-   */
+  /** 保留最早的事实，活动分片从新到旧继续使用原来的编号。 */
   private async rotate(runId: string, runDir: string): Promise<void> {
-    await unlink(join(runDir, archiveShard(this.maxShards))).catch((error: unknown) => {
-      if (!isMissing(error)) {
-        this.log.warn('删除最旧分片失败，继续轮转', { runId, error });
-      }
-    });
-
-    for (let index = this.maxShards - 1; index >= 1; index -= 1) {
-      await rename(
-        join(runDir, archiveShard(index)),
-        join(runDir, archiveShard(index + 1)),
-      ).catch((error: unknown) => {
-        // 这一片本来就不存在是正常路径（还没轮转过这么多次）
-        if (!isMissing(error)) {
-          this.log.warn('分片改名失败，继续轮转', { runId, index, error });
-        }
-      });
+    const coldDir = join(runDir, 'archive');
+    let sequence = this.archiveSequence.get(runId);
+    if (sequence === undefined) {
+      sequence = Math.max(0, ...(await this.archiveIndices(coldDir)));
     }
+    await mkdir(coldDir, { recursive: true });
 
-    await rename(join(runDir, ACTIVE_SHARD), join(runDir, archiveShard(1))).catch(
-      (error: unknown) => {
-        if (!isMissing(error)) {
-          this.log.warn('当前分片归档失败', { runId, error });
-        }
-      },
-    );
-
-    this.shardBytes.set(runId, 0);
-    this.log.debug('事件日志分片轮转', { runId, maxShards: this.maxShards });
+    const indices = await this.archiveIndices(runDir);
+    for (const index of indices.sort((left, right) => right - left)) {
+      const source = join(runDir, archiveShard(index));
+      if (index >= this.maxShards) {
+        const target = join(coldDir, archiveShard(sequence + 1));
+        await rename(source, target);
+        sequence += 1;
+        this.archiveSequence.set(runId, sequence);
+      } else {
+        await rename(source, join(runDir, archiveShard(index + 1)));
+      }
+    }
+    await rename(join(runDir, ACTIVE_SHARD), join(runDir, archiveShard(1)));
   }
 
   /**
@@ -329,17 +316,11 @@ export class EventJournal {
     return readShardEvents(join(this.rootDir, ACTIVE_SHARD));
   }
 
-  /** 按「数字大的在前、最新的在后」拼出正确时间顺序。 */
   private async readShards(runId: string): Promise<OrchestratorEvent[]> {
-    const runDir = this.runDir(runId);
-    const indices = await this.archiveIndices(runDir);
-    indices.sort((left, right) => right - left);
-
     const events: OrchestratorEvent[] = [];
-    for (const index of indices) {
-      events.push(...(await readShardEvents(join(runDir, archiveShard(index)))));
+    for (const path of await this.shards(runId)) {
+      events.push(...(await readShardEvents(path)));
     }
-    events.push(...(await readShardEvents(join(runDir, ACTIVE_SHARD))));
     return events;
   }
 

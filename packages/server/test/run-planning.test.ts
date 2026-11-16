@@ -189,6 +189,16 @@ describe('POST /api/runs：立即返回，图随后由事件推出来', () => {
     expect(atResponse[0]?.type).toBe('run.created');
     expect(atResponse.some((event) => event.type === 'run.frozen')).toBe(false);
 
+    const outputWhilePlanning = new Promise<OrchestratorEvent>((resolve) => {
+      const unsubscribe = store.bus.subscribe((event) => {
+        if (event.type === 'agent.output' && event.runId === body.id && event.nodeId === undefined) {
+          unsubscribe();
+          expect(store.snapshot.runs[body.id]?.frozenAt).toBeUndefined();
+          resolve(event);
+        }
+      });
+    });
+
     // 后台那条链随后把图交出来
     const frozen = await waitFor(() =>
       store
@@ -200,7 +210,10 @@ describe('POST /api/runs：立即返回，图随后由事件推出来', () => {
 
     const types = store.eventsForRun(body.id).map((event) => event.type);
     expect(types).toContain('plan.started');
-    expect(types.indexOf('plan.started')).toBeLessThan(types.indexOf('run.frozen'));
+    const plannerOutput = await outputWhilePlanning;
+    expect(plannerOutput).toMatchObject({ agentId: 'claude', kind: 'text' });
+    expect(types.indexOf('plan.started')).toBeLessThan(types.indexOf('agent.output'));
+    expect(types.indexOf('agent.output')).toBeLessThan(types.indexOf('run.frozen'));
     // 节点图随冻结事件落地，而不是像从前那样塞在 run.created 里
     expect(frozen.nodes?.length).toBeGreaterThan(0);
 
@@ -210,7 +223,11 @@ describe('POST /api/runs：立即返回，图随后由事件推出来', () => {
       stage: string;
       nodeCount: number;
       nodes: Array<{ id: string; agentId?: string }>;
+      events: Array<{ agent?: string; type: string; nodeId?: string; message: string }>;
     };
+    expect(view.events).toContainEqual(expect.objectContaining({
+      type: 'agent', agent: 'claude', message: expect.stringContaining('json'),
+    }));
     expect(view.stage).toBe('execute');
     expect(view.status).toBe('running');
     expect(view.nodeCount).toBe(frozen.nodes?.length);
@@ -218,6 +235,63 @@ describe('POST /api/runs：立即返回，图随后由事件推出来', () => {
 
     await settle(400);
     await app.close();
+  });
+
+  it('停止拆解会阻止任务图冻结，继续会重新拆解原运行', async () => {
+    const { app, store } = await createFixture();
+    try {
+      const created = await app.inject({
+        method: 'POST', url: '/api/runs', payload: { title: '停止拆解', goal: '搭建工作流' },
+      });
+      const id = (created.json() as { id: string }).id;
+      const path = `/api/runs/${id}`;
+      await waitFor(() => store.eventsForRun(id).find((event) => event.type === 'plan.started'));
+      const stopped = await app.inject({ method: 'POST', url: `${path}/stop` });
+      expect(stopped.json()).toMatchObject({ status: 'paused' });
+      expect(store.snapshot.runs[id]?.frozenAt).toBeUndefined();
+      expect(store.snapshot.runs[id]?.planFailure).toBeUndefined();
+
+      const resumed = await app.inject({ method: 'POST', url: `${path}/resume` });
+      expect(resumed.statusCode).toBe(200);
+      await waitFor(() => store.snapshot.runs[id]?.completedAt);
+      expect(store.eventsForRun(id).filter((event) => event.type === 'plan.started')).toHaveLength(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('审批转交后仍阻塞下游，并在接收人批准后推进', async () => {
+    const { app, store } = await createFixture();
+    try {
+      const created = await app.inject({
+        method: 'POST', url: '/api/runs',
+        payload: {
+          title: '转交审批', goal: '验证门禁',
+          dag: { title: '转交审批', nodes: [
+            { id: 'approval', type: 'approval', title: '验收' },
+            { id: 'route', type: 'route', title: '交付', dependsOn: ['approval'] },
+          ] },
+        },
+      });
+      const id = (created.json() as { id: string }).id;
+      await waitFor(() => store.snapshot.approvals.find((item) => item.runId === id));
+      const url = `/api/runs/${id}/nodes/approval/approval`;
+      const transferred = await app.inject({
+        method: 'POST', url, payload: { decision: 'handoff', actor: '审核甲', handoffTo: '审核乙' },
+      });
+      expect(transferred.json()).toMatchObject({ status: 'waiting_for_boss' });
+      expect(store.snapshot.runs[id]?.nodes.route?.startedAt).toBeUndefined();
+      expect(store.snapshot.approvals.find((item) => item.runId === id && item.status === 'pending'))
+        .toMatchObject({ handedOffTo: '审核乙' });
+
+      const denied = await app.inject({ method: 'POST', url, payload: { decision: 'approve', actor: '审核甲' } });
+      expect(denied.statusCode).toBe(403);
+      const approved = await app.inject({ method: 'POST', url, payload: { decision: 'approve', actor: '审核乙' } });
+      expect(approved.statusCode).toBe(200);
+      await waitFor(() => store.snapshot.runs[id]?.completedAt);
+    } finally {
+      await app.close();
+    }
   });
 
   it('拆解失败：plan.failed 落盘，运行派生为 failed 且不留未处理的 rejection', async () => {

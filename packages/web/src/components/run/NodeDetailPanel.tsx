@@ -493,6 +493,7 @@ function ApprovalActions({
   const actor = useIdentity((state) => state.actor);
   const setActor = useIdentity((state) => state.setActor);
   const [reason, setReason] = useState('');
+  const [handoffTo, setHandoffTo] = useState('');
   const [busy, setBusy] = useState<'approve' | 'reject' | 'handoff' | null>(
     null,
   );
@@ -505,14 +506,16 @@ function ApprovalActions({
       decision,
       actor,
       reason: reason.trim() || undefined,
+      handoffTo: decision === 'handoff' ? handoffTo.trim() : undefined,
     });
     setBusy(null);
-    if (!result) {
+    if (!result.ok) {
       // 后端没接上时不谎报成功
-      setError('后端未响应，审批没有提交。');
+      setError(result.message);
       return;
     }
     setReason('');
+    setHandoffTo('');
     onDone?.();
   }
 
@@ -524,8 +527,7 @@ function ApprovalActions({
           等待人工审批
         </div>
         <p className="mt-1.5 text-[10px] leading-4 text-muted">
-          批准推进下游；驳回把上游「{node.dependsOn[0] ?? '无依赖'}」退回重做，
-          已跑完的下游一并作废；转交追加一条新的审批记录。
+          批准后推进下游。驳回会退回上游实现。转交后由接收人继续审批。
         </p>
 
         {/* 面板够宽，审批人和理由并排放，省一行高度留给时间线 */}
@@ -551,6 +553,15 @@ function ApprovalActions({
           </label>
         </div>
 
+        <label className="mt-2.5 block w-[200px] text-[10px] text-passive">
+          转交给
+          <input
+            value={handoffTo}
+            onChange={(event) => setHandoffTo(event.target.value)}
+            className="mt-1 h-7 w-full rounded-md border border-line bg-surface px-2 text-[11px] text-ink"
+          />
+        </label>
+
         <div className="mt-2 flex items-center gap-1.5">
           <Button
             size="sm"
@@ -571,7 +582,7 @@ function ApprovalActions({
             size="sm"
             variant="ghost"
             onClick={() => void submit('handoff')}
-            disabled={busy !== null}
+            disabled={busy !== null || !handoffTo.trim()}
           >
             转交
           </Button>

@@ -8,6 +8,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "local": "pnpm build && node scripts/launch.mjs real",
+    "demo": "pnpm build && node scripts/launch.mjs mock",
     "dev": "pnpm --parallel --filter @orchestrator/server --filter @orchestrator/web dev",
     "dev:server": "pnpm --filter @orchestrator/server dev",
     "dev:web": "pnpm --filter @orchestrator/web dev",

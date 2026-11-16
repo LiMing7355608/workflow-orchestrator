@@ -48,7 +48,7 @@ export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
     return 'failed';
   }
   if (node.startedAt && !node.finishedAt) {
-    return node.type === 'approval' ? 'waiting_approval' : 'running';
+    return node.type === 'approval' || node.escalated ? 'waiting_approval' : 'running';
   }
   if (node.finishedAt) {
     return 'completed';
@@ -71,7 +71,7 @@ export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
 export function deriveRunStatus(run: RunFacts): RunStatus {
   const nodes = Object.values(run.nodes);
   const awaitingHuman = nodes.some(
-    (node) => node.type === 'approval' && node.startedAt && !node.finishedAt,
+    (node) => deriveNodeStatus(run, node) === 'waiting_approval',
   );
   // 「在等人」与「已暂停」相遇时，暂停优先。
   //
@@ -104,6 +104,10 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
      * 决定运行状态。
      */
     return run.planFailure ? 'failed' : 'draft';
+  }
+  if (nodes.some((node) => node.failureReason) &&
+      !nodes.some((node) => ['ready', 'running'].includes(deriveNodeStatus(run, node)))) {
+    return 'failed';
   }
   return 'running';
 }
@@ -336,7 +340,9 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
           : event.decision === 'reject'
             ? '驳回'
             : '转交';
-      return `审批${label}：${event.actor}${event.reason ? `（${event.reason}）` : ''}`;
+      const recipient = event.nextRecord?.handedOffTo;
+      const actor = recipient ? `${event.actor} → ${recipient}` : event.actor;
+      return `审批${label}：${actor}${event.reason ? `（${event.reason}）` : ''}`;
     }
     case 'node.artifact':
       return `${nodeTitleOf(run, event.nodeId)} 产出 ${event.files.length} 个文件的变更（${event.bytes} 字节）`;
@@ -350,8 +356,8 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
     case 'agent.output':
       // 工具调用单独说清楚：把「干了什么」和「说了什么」混成一行，
       // 事件流读起来就只剩一堵文本墙
-      return event.kind === 'tool'
-        ? `调用工具 ${event.toolName ?? '未知工具'}`
+      return event.kind === 'tool' && event.chunk === event.toolName
+        ? `调用工具 ${event.toolName}`
         : event.chunk.trim();
     case 'agent.session':
       return `原生会话已建立：${event.sessionId}`;
@@ -376,17 +382,25 @@ function lastResetOf(
 ): Map<string, string> {
   const borders = new Map<string, string>();
   for (const event of events) {
-    if (event.type === 'node.reset' && event.runId === runId) {
-      // 后来的重置覆盖先前的边界：切片点只在最后一次
-      borders.set(event.nodeId, event.at);
+    if (event.runId !== runId) {
+      continue;
+    }
+    const resetId = event.type === 'node.reset' ? event.nodeId
+      : event.type === 'review.verdict' ? event.rework?.nodeId
+        : event.type === 'approval.decided' ? event.resetNodeId : undefined;
+    if (resetId) {
+      borders.set(resetId, event.at);
     }
   }
   return borders;
 }
 
-export function deriveEvents(run: RunFacts, events: OrchestratorEvent[]): EventView[] {
+export function deriveEvents(
+  run: RunFacts,
+  events: OrchestratorEvent[],
+  resolve: AgentLabelResolver = () => undefined,
+): EventView[] {
   const scoped = events.filter((event) => event.runId === run.id);
-  const resolve: AgentLabelResolver = () => undefined;
   const resetBorders = lastResetOf(scoped, run.id);
 
   const views: EventView[] = [];
@@ -433,7 +447,7 @@ export function deriveEvents(run: RunFacts, events: OrchestratorEvent[]): EventV
       type: eventKind(event),
       message,
       nodeId,
-      agent: node ? nodeAgentLabel(node, resolve) : undefined,
+      agent: output ? resolve(output.agentId) ?? output.agentId : node ? nodeAgentLabel(node, resolve) : undefined,
       kind,
       toolName: output?.toolName,
     });
@@ -451,7 +465,7 @@ export function deriveRunDetail(
     ...deriveRunView(run),
     nodes: deriveNodes(run, resolve),
     edges: deriveEdges(run),
-    events: deriveEvents(run, events),
+    events: deriveEvents(run, events, resolve),
   };
 }
 
@@ -502,6 +516,7 @@ export function deriveBoard(
     const direct = downstream(implement.id);
     const review = direct.find((node) => node.type === 'review');
     const approval =
+      (review?.status === 'waiting_approval' ? review : undefined) ??
       direct.find((node) => node.type === 'approval') ??
       (review
         ? downstream(review.id).find((node) => node.type === 'approval')

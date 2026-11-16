@@ -537,6 +537,14 @@ function handleCodexLine(line: string): AgentEvent[] {
       // 只有元信息，没有可展示内容；产出事件只会制造噪声
       return [];
 
+    case 'item.started': {
+      const item = asRecord(record.item);
+      if (readString(item, 'type') === 'command_execution') {
+        return [{ kind: 'tool', toolName: readString(item, 'command') ?? 'command_execution' }];
+      }
+      return [];
+    }
+
     case 'item.completed':
     case 'item.updated': {
       const item = asRecord(record.item) ?? record;

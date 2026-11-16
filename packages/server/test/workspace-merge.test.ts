@@ -75,6 +75,30 @@ afterEach(async () => {
 });
 
 describe('GitWorktreeWorkspace.merge（真实 git）', () => {
+  it('下游读取已发布的实现，审查 diff 与合并保留 Agent 自己提交的文件', async () => {
+    const { root, workspace, worktreeRoot } = await createRepo();
+    const runId = 'run-with-dependencies';
+    const impl = await workspace.prepare(runId, 'commit', []);
+    await writeFile(join(impl, 'module.txt'), 'upstream\n');
+    await git(impl, ['add', 'module.txt']);
+    await git(impl, ['commit', '-m', 'implement module']);
+    await workspace.publish(runId, 'commit');
+    expect((await workspace.capture(runId, 'commit')).diff).toContain('+upstream');
+
+    const downstream = await workspace.prepare(runId, 'integration', ['commit']);
+    const inherited = await readFile(join(downstream, 'module.txt'), 'utf8');
+    await writeFile(join(downstream, 'entry.txt'), inherited);
+    await workspace.publish(runId, 'integration');
+    expect((await workspace.capture(runId, 'integration')).files).toEqual(['entry.txt']);
+
+    const targetBranch = `run/${runId}`;
+    await expect(workspace.merge({ runId, targetBranch, nodeIds: ['commit', 'integration'] }))
+      .resolves.toMatchObject({ ok: true });
+    expect(await git(root, ['show', `${targetBranch}:module.txt`])).toBe('upstream\n');
+    expect(await readFile(join(integrationDirOf(worktreeRoot, runId), 'entry.txt'), 'utf8'))
+      .toBe('upstream\n');
+  });
+
   it('两个节点改同一个文件时返回冲突，并保守地回滚现场', async () => {
     const { worktreeRoot, workspace } = await createRepo();
     const runId = 'run-conflict';

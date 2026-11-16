@@ -34,7 +34,7 @@ function event(runId: string, index: number): OrchestratorEvent {
 
 /** 从事件反推序号，顺序断言用得上。 */
 function indexOf(item: OrchestratorEvent): number {
-  const nodeId = 'nodeId' in item ? item.nodeId : '';
+  const nodeId = 'nodeId' in item ? item.nodeId ?? '' : '';
   return Number(nodeId.replace('n', ''));
 }
 
@@ -84,7 +84,7 @@ describe('EventJournal', () => {
     expect(events.map(indexOf)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
-  it('超过 maxShards 时最旧的分片被删掉', async () => {
+  it('超出活跃分片上限时旧分片归档并参与重放', async () => {
     const root = await createRoot();
     const journal = new EventJournal({ rootDir: root, maxBytesPerShard: 200, maxShards: 2 });
 
@@ -99,14 +99,10 @@ describe('EventJournal', () => {
     expect(files).toContain('events.2.jsonl');
     expect(files).not.toContain('events.3.jsonl');
 
-    const events = await journal.readRun('run-c');
-    // 尾部一定完整，头部被裁掉——这正是「有界的只增日志」的代价
-    expect(events.map(indexOf).at(-1)).toBe(14);
-    const first = events.map(indexOf)[0] ?? -1;
-    expect(first).toBeGreaterThan(0);
-    expect(events.map(indexOf)).toEqual(
-      Array.from({ length: 15 - first }, (_, offset) => first + offset),
-    );
+    const restarted = new EventJournal({ rootDir: root, maxBytesPerShard: 200, maxShards: 2 });
+    const events = await restarted.readRun('run-c');
+    expect(files).toContain('archive');
+    expect(events.map(indexOf)).toEqual(Array.from({ length: 15 }, (_, index) => index));
   });
 
   it('损坏行被跳过而不是抛异常', async () => {
