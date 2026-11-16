@@ -6,6 +6,7 @@ import {
   deriveNodes,
   deriveProgress,
   deriveRunStatus,
+  deriveUpdatedAt,
   emptyState,
   filesConflict,
   pickBatch,
@@ -40,6 +41,7 @@ function buildRun(nodes: NodeFacts[], id = 'run-1'): RunFacts {
     title: '测试运行',
     summary: '',
     goal: '',
+    workspaceRoot: '/tmp/target-repo',
     specVersion: 'v1.0',
     stage: 'execute',
     createdAt: AT,
@@ -91,6 +93,18 @@ describe('派生状态：不读任何 status 字段', () => {
     expect(deriveRunStatus({ ...run, completedAt: LATER })).toBe('waiting_for_boss');
   });
 
+  it('停止之后暂停压过「在等人」，完成态仍然最高', () => {
+    const approval = node({ id: 'a', type: 'approval', startedAt: AT });
+    const run = buildRun([approval]);
+    // 用户按了停止：审批记录还在，但编排器已经不推进了
+    expect(deriveRunStatus({ ...run, pausedAt: LATER })).toBe('paused');
+
+    const done = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: AT });
+    const completed = { ...buildRun([done]), completedAt: LATER, pausedAt: LATER };
+    // 已经跑完的运行不因为后来被点停止而倒退成「已暂停」
+    expect(deriveRunStatus(completed)).toBe('completed');
+  });
+
   it('未冻结是 draft，冻结后是 running，完成后是 completed', () => {
     const impl = node({ id: 'a', type: 'implement' });
     const run = buildRun([impl]);
@@ -104,6 +118,83 @@ describe('派生状态：不读任何 status 字段', () => {
     const todo = node({ id: 'b', type: 'implement' });
     expect(deriveProgress(buildRun([done, todo]))).toBe(50);
     expect(deriveProgress(buildRun([done]))).toBe(100);
+  });
+});
+
+describe('拆解阶段：没有图的运行靠 plan 事实说话', () => {
+  /** 异步拆解刚创建出来的样子：有运行，没有图 */
+  function emptyRun(): RunFacts {
+    return {
+      id: 'run-plan',
+      title: '拆解中',
+      summary: '',
+      goal: '',
+      workspaceRoot: '/tmp/target-repo',
+      specVersion: 'v1.0',
+      stage: 'orchestrate',
+      createdAt: AT,
+      nodeOrder: [],
+      nodes: {},
+    };
+  }
+
+  const planned = [node({ id: 'a', type: 'implement', files: ['src/a/**'] })];
+
+  it('plan.failed 且图从未冻结：派生 failed，而不是永远 running', () => {
+    const state = replay([
+      { type: 'run.created', at: AT, runId: 'run-plan', run: emptyRun() },
+      { type: 'plan.started', at: AT, runId: 'run-plan', agentId: 'claude' },
+      {
+        type: 'plan.failed',
+        at: LATER,
+        runId: 'run-plan',
+        message: 'Agent 连续 3 次给出的 DAG 都没通过校验',
+        issues: [{ kind: 'cycle', message: '图里有环' }],
+      },
+    ]);
+
+    const run = state.runs['run-plan'] as RunFacts;
+    expect(deriveRunStatus(run)).toBe('failed');
+    // 原因与问题都要留在事实里：界面只靠它解释「为什么没有图」
+    expect(run.planFailure?.message).toContain('没通过校验');
+    expect(run.planFailure?.issues?.[0]?.kind).toBe('cycle');
+    // 一次失败也是一次事实变更，列表排序要反映它
+    expect(deriveUpdatedAt(run)).toBe(LATER);
+  });
+
+  it('点「重新拆解」之后结论立刻作废，回到 draft', () => {
+    const failed = replay([
+      { type: 'run.created', at: AT, runId: 'run-plan', run: emptyRun() },
+      { type: 'plan.started', at: AT, runId: 'run-plan', agentId: 'claude' },
+      { type: 'plan.failed', at: LATER, runId: 'run-plan', message: '超时' },
+    ]);
+    const retried = reduce(failed, {
+      type: 'plan.started',
+      at: '2026-11-16T00:20:00.000Z',
+      runId: 'run-plan',
+      agentId: 'claude',
+    });
+
+    // 不清掉旧的失败，这几十秒里界面会继续报 failed，像是按钮没生效
+    const run = retried.runs['run-plan'] as RunFacts;
+    expect(run.planFailure).toBeUndefined();
+    expect(deriveRunStatus(run)).toBe('draft');
+  });
+
+  it('冻结是分界线：早期的失败不再决定状态，节点图随冻结事件落地', () => {
+    const state = replay([
+      { type: 'run.created', at: AT, runId: 'run-plan', run: emptyRun() },
+      { type: 'plan.started', at: AT, runId: 'run-plan', agentId: 'claude' },
+      { type: 'plan.failed', at: AT, runId: 'run-plan', message: '第一次超时' },
+      { type: 'plan.started', at: LATER, runId: 'run-plan', agentId: 'claude' },
+      { type: 'run.frozen', at: LATER, runId: 'run-plan', nodes: planned },
+    ]);
+
+    const run = state.runs['run-plan'] as RunFacts;
+    expect(run.nodeOrder).toEqual(['a']);
+    expect(run.nodes['a']?.title).toBe('a');
+    expect(run.stage).toBe('execute');
+    expect(deriveRunStatus(run)).toBe('running');
   });
 });
 

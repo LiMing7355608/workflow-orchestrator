@@ -11,6 +11,7 @@ import type {
   RunStatus,
   RunView,
 } from './types.js';
+import { reviveLegacyAgentText } from './legacy-text.js';
 
 /** 把 agentId 解析成平台名的回调。编排器不直接依赖 Agent 目录的具体实现。 */
 export type AgentLabelResolver = (agentId: string | undefined) => string | undefined;
@@ -26,6 +27,14 @@ function nodeAgentLabel(node: NodeFacts, resolve: AgentLabelResolver): string {
  * 优先级刻意这样排：执行中的事实压过依赖关系，
  * 被驳回过的节点在重新开始前显示为「退回重做」，
  * 其余按上游完成情况判定就绪与否。
+ *
+ * 关于 `interruptedAt`：它**不参与**这里的任何分支。节点被用户停下之后，
+ * 投影层已经把 startedAt / finishedAt / failureReason 清空，因此它会自然落到
+ * 下面的依赖判定上——依赖满足就是 ready，不满足就是 pending。这是刻意的：
+ * 状态值决定 `readyNodes` 的成员，一旦「被停止」成为一个状态值，这个节点就
+ * 永远进不了就绪集合，用户点「继续」也不会被重新调度（上一轮用
+ * `attempts > 0 → retry` 时踩的正是这个坑）。界面要显示「已停止，待恢复」
+ * 时读 `interruptedAt`，不要读状态值。
  */
 export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
   if (node.failureReason) {
@@ -64,9 +73,17 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
   const awaitingHuman = nodes.some(
     (node) => node.type === 'approval' && node.startedAt && !node.finishedAt,
   );
-  if (awaitingHuman) {
+  // 「在等人」与「已暂停」相遇时，暂停优先。
+  //
+  // 两者都表示编排器没在推进，但含义不同：前者是「我等着你批」，后者是
+  // 「你让我停了」。用户按过停止之后还显示「待你处理」，会让人以为它仍在
+  // 等审批，而实际上这轮已经停了；点继续则回到 waiting_for_boss（审批记录
+  // 从没被删掉）。
+  if (awaitingHuman && !run.pausedAt) {
     return 'waiting_for_boss';
   }
+  // 完成态仍压过暂停：一次已经跑完的运行，不该因为后来被点了停止就倒退成
+  // 「已暂停」。这个优先级是既有行为，改了会让历史运行凭空变样。
   if (run.completedAt) {
     return 'completed';
   }
@@ -74,7 +91,19 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
     return 'paused';
   }
   if (!run.frozenAt) {
-    return 'draft';
+    /**
+     * 还没有图的时候只剩两种可能：正在拆解（`draft`），或者拆解已经失败。
+     *
+     * 判据必须是「有失败事实」且「图从未冻结」两个条件同时成立：
+     * - 只看 `planFailure`：一次历史上的失败会把后来重新拆解成功、甚至已经
+     *   跑完的运行永远标成失败——失败事实是 append-only 的，事件删不掉。
+     * - 只看「没有 frozenAt」：每个刚创建、正在拆解几十秒的运行都会被误判
+     *   成失败，用户看到的是「刚建就挂了」。
+     *
+     * 所以冻结是那条分界线：`frozenAt` 一旦存在，拆解那一段历史就再也不能
+     * 决定运行状态。
+     */
+    return run.planFailure ? 'failed' : 'draft';
   }
   return 'running';
 }
@@ -92,9 +121,17 @@ export function deriveProgress(run: RunFacts): number {
 
 /** 最近一次事实变更时刻，用作列表排序依据。 */
 export function deriveUpdatedAt(run: RunFacts): string {
-  const stamps = [run.createdAt, run.frozenAt, run.pausedAt, run.completedAt];
+  const stamps = [
+    run.createdAt,
+    run.frozenAt,
+    run.pausedAt,
+    run.completedAt,
+    // 拆解失败也是一次事实变更：不记进来的话，一个刚失败不久的运行会带着
+    // 几十秒前的创建时刻排在列表底部，看起来像「很久没动静了」
+    run.planFailure?.at,
+  ];
   for (const node of Object.values(run.nodes)) {
-    stamps.push(node.startedAt, node.finishedAt);
+    stamps.push(node.startedAt, node.finishedAt, node.interruptedAt);
   }
   return stamps
     .filter((stamp): stamp is string => Boolean(stamp))
@@ -125,6 +162,9 @@ export function deriveNodeView(
     attempts: node.attempts,
     durationMs: duration !== undefined && Number.isFinite(duration) ? duration : undefined,
     escalated: node.escalated,
+    // 展示用：状态是 ready/pending，但这一轮是被用户停下的，界面据此说
+    // 「已停止，待恢复」而不是「就绪」
+    interruptedAt: node.interruptedAt,
     artifactBytes: node.artifactBytes,
     artifactFiles: node.artifactFiles,
     nativeSessionId: node.nativeSessionId,
@@ -163,8 +203,13 @@ export function deriveRunView(run: RunFacts): RunView {
     id: run.id,
     title: run.title,
     summary: run.summary,
+    goal: run.goal,
     status: deriveRunStatus(run),
     stage: run.stage,
+    // 旧日志里没有这个字段（见 run.created 的归约兜底），这里再挡一次：
+    // 视图是给界面读的，空串明确表示「这条运行的目录未知」，不能是 undefined。
+    workspaceRoot: run.workspaceRoot ?? '',
+    planFailure: run.planFailure,
     progress: deriveProgress(run),
     nodeCount: run.nodeOrder.length,
     specVersion: run.specVersion,
@@ -182,13 +227,25 @@ function eventKind(event: OrchestratorEvent): EventKind {
   switch (event.type) {
     case 'run.created':
     case 'run.frozen':
+    // 拆解属于阶段性事件，归 stage 页签：它说的是「图还没生出来」，
+    // 而不是某个 Agent 的执行过程——虽然产图这个动作是 Agent 干的。
+    case 'plan.started':
+    case 'plan.failed':
     case 'run.paused':
     case 'run.resumed':
     case 'run.completed':
+      // 改图归到 stage 页签：它改的是阶段性的结构，不是某个节点的执行过程。
+      // 归到 agent 页签会让人以为某个 Agent 干了这件事，而干这件事的是人。
+      return 'stage';
+    case 'dag.amended':
       return 'stage';
     case 'review.verdict':
     case 'review.escalated':
       return 'review';
+    case 'node.interrupted':
+      // 归 system 而不是 agent：它不是某个 Agent 说的话，也不是执行结果，
+      // 而是编排层对「这个人把运行按停了」这件事的记账。
+      return 'system';
     case 'approval.requested':
     case 'approval.decided':
       return 'approval';
@@ -201,6 +258,7 @@ function eventKind(event: OrchestratorEvent): EventKind {
     case 'node.merge_conflict':
     case 'agent.output':
     case 'agent.session':
+    case 'node.resumed_session':
       return 'agent';
     default:
       return 'system';
@@ -217,12 +275,40 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
       return `创建运行：${event.run.title}`;
     case 'run.frozen':
       return 'DAG 已冻结，进入执行阶段';
+    case 'plan.started':
+      // 带上 Agent：用户点了「开始拆解」之后唯一的进展信号就是「谁在拆」，
+      // 只写「正在拆解」等于把等待的原因藏起来
+      return `编排器开始拆解任务图（${event.agentId}）`;
+    case 'plan.failed':
+      // 原因原样带出：这是用户决定「重试还是改目标」的唯一依据，
+      // 概括成「拆解失败」等于让他再猜一次
+      return `任务图拆解失败：${event.message}`;
     case 'run.paused':
       return '运行已暂停';
     case 'run.resumed':
       return '运行已恢复';
     case 'run.completed':
       return '全部节点完成，运行结束';
+    case 'dag.amended': {
+      // 一行说清「谁改了什么」，且逐条列出改动对象：这是审计行，
+      // 聚合成一个数字就再也无法回答「哪几个节点被动了」。
+      const parts = event.changes.map((change) => {
+        const label =
+          change.kind === 'add-node'
+            ? '新增'
+            : change.kind === 'remove-node'
+              ? '移除'
+              : '更新';
+        const detail =
+          change.fields && change.fields.length > 0
+            ? `（${change.fields
+                .map((field) => `${field.field}：${field.from ?? '—'} → ${field.to ?? '—'}`)
+                .join('，')}）`
+            : '';
+        return `${label} ${change.nodeId}${detail}`;
+      });
+      return `按指令修改任务图（${event.actor}）：${parts.join('；')}`;
+    }
     case 'node.started':
       return `${nodeTitleOf(run, event.nodeId)} 开始执行`;
     case 'node.completed':
@@ -231,6 +317,10 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
       return `${nodeTitleOf(run, event.nodeId)} 失败：${event.reason}`;
     case 'node.reset':
       return `${nodeTitleOf(run, event.nodeId)} 被退回重做：${event.reason}`;
+    case 'node.interrupted':
+      // 措辞刻意不用「失败」：它不是这个节点的结论，只是人按了停止。
+      // 节点名列在这里而不是句首，是因为这句话说的是「什么被停下了」。
+      return `被停止：${nodeTitleOf(run, event.nodeId)}（${event.reason}）`;
     case 'review.verdict':
       return event.verdict === 'approved'
         ? `审查通过：${nodeTitleOf(run, event.nodeId)}`
@@ -265,36 +355,91 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
         : event.chunk.trim();
     case 'agent.session':
       return `原生会话已建立：${event.sessionId}`;
+    case 'node.resumed_session':
+      // 与「原生会话已建立」区分开：那条是平台给的 id，这条是我们复用了它
+      return `${nodeTitleOf(run, event.nodeId)} 复用会话续跑：${event.sessionId}`;
     default:
       return '';
   }
 }
 
+/**
+ * 每个节点最后一次被重置的时刻。
+ *
+ * 重置的语义是「这个节点之前那轮不算数了」，但 journal 是 append-only，事件
+ * 一条都删不掉。所以只能在读取时切片：早于这个边界的事件不再进入视图，
+ * 时间线才会真的从空开始，而不是把上一轮的执行记录继续挂着。
+ */
+function lastResetOf(
+  events: OrchestratorEvent[],
+  runId: string,
+): Map<string, string> {
+  const borders = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === 'node.reset' && event.runId === runId) {
+      // 后来的重置覆盖先前的边界：切片点只在最后一次
+      borders.set(event.nodeId, event.at);
+    }
+  }
+  return borders;
+}
+
 export function deriveEvents(run: RunFacts, events: OrchestratorEvent[]): EventView[] {
   const scoped = events.filter((event) => event.runId === run.id);
   const resolve: AgentLabelResolver = () => undefined;
+  const resetBorders = lastResetOf(scoped, run.id);
 
-  return scoped.map((event, index) => {
+  const views: EventView[] = [];
+
+  for (const event of scoped) {
     const nodeId =
       'nodeId' in event
         ? event.nodeId
         : event.type === 'approval.requested'
           ? event.record.nodeId
           : undefined;
+
+    // 发生在最后一次重置之前的节点事件属于已经作废的那一轮。重置事件本身
+    // 要留下——它是「从这里重新开始」的标记。
+    if (nodeId !== undefined && event.type !== 'node.reset') {
+      const border = resetBorders.get(nodeId);
+      if (border !== undefined && event.at < border) {
+        continue;
+      }
+    }
+
     const node = nodeId ? run.nodes[nodeId] : undefined;
     const output = event.type === 'agent.output' ? event : undefined;
 
-    return {
-      id: `ev-${index}`,
+    // 旧版本把解析器认不出的整行原样当正文写进了 journal，读出来再补一次
+    // 解析：status 这类进度噪音丢弃，thinking 重新归类。已经写死的历史数据
+    // 只能这样救，改前端是救不回来的。
+    let kind = output?.kind;
+    let message = eventMessage(run, event);
+    if (output) {
+      const revived = reviveLegacyAgentText(output.chunk);
+      if (revived === null) {
+        continue;
+      }
+      if (revived !== undefined) {
+        kind = revived.kind;
+        message = revived.text;
+      }
+    }
+
+    views.push({
+      id: `ev-${views.length}`,
       at: event.at,
       type: eventKind(event),
-      message: eventMessage(run, event),
+      message,
       nodeId,
       agent: node ? nodeAgentLabel(node, resolve) : undefined,
-      kind: output?.kind,
+      kind,
       toolName: output?.toolName,
-    };
-  });
+    });
+  }
+
+  return views;
 }
 
 export function deriveRunDetail(

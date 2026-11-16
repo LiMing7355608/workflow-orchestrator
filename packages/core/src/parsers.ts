@@ -17,7 +17,24 @@
 
 import type { AgentParserId } from './agents.js';
 
-export type AgentEventKind = 'text' | 'tool' | 'result' | 'usage' | 'session' | 'error';
+/**
+ * 事件的语义分级。
+ *
+ * `thinking` 与 `status` 是后补的两类，补它们的原因是缺了它们就只能退化：
+ * 模型的内部独白会和正式回答混成一片正文，而 `{"type":"status","phase":...}`
+ * 这种纯进度信号会带着一坨 JSON 直接铺进时间线。语义上它们完全不同——
+ * 一个是「它在想」（弱化的内容），一个是「它进行到哪了」（不是内容），
+ * 所以必须是两个独立的 kind，而不是塞进 text 再让前端去猜。
+ */
+export type AgentEventKind =
+  | 'text'
+  | 'thinking'
+  | 'status'
+  | 'tool'
+  | 'result'
+  | 'usage'
+  | 'session'
+  | 'error';
 
 export interface AgentUsage {
   promptTokens?: number;
@@ -27,10 +44,17 @@ export interface AgentUsage {
 
 export interface AgentEvent {
   kind: AgentEventKind;
-  /** text / result / error 的正文；tool 事件里存工具描述（如 opcode 的 state.title） */
+  /** text / thinking / result / error 的正文；tool 事件里存入参摘要或工具描述 */
   text?: string;
   /** tool 事件的工具名 */
   toolName?: string;
+  /**
+   * status 事件的阶段（turn_start / step_start / step_end …）。
+   *
+   * 为什么阶段要单独成字段而不是拼进 text：编排层要按阶段判断该不该落事件
+   * （只有 step_end 带用量才值得记），靠文案匹配会在 CLI 换个措辞时静默失效。
+   */
+  phase?: string;
   usage?: AgentUsage;
   /** session 事件的原生会话 id */
   sessionId?: string;
@@ -212,6 +236,122 @@ function textEvent(text: string): AgentEvent {
 }
 
 /* ------------------------------------------------------------------ *
+ * 工具入参摘要：只留「这次调用冲谁去的」那一句
+ * ------------------------------------------------------------------ */
+
+/**
+ * 摘要里优先取用的入参字段。
+ *
+ * 刻意不含 `name`：它和工具名重复，摘要变成「name=read_file」等于什么都没说。
+ * 顺序按信息量排：命令 > 路径 > 模式 > 查询 > 描述。
+ */
+const SUMMARY_INPUT_KEYS = [
+  'command',
+  'cmd',
+  'file_path',
+  'filePath',
+  'path',
+  'pattern',
+  'glob',
+  'query',
+  'url',
+  'description',
+  'prompt',
+] as const;
+
+/** 摘要长度上限：时间线上这一截是要用来扫一眼的，不是用来读的。 */
+const SUMMARY_MAX_CHARS = 80;
+
+/** 摘要最多拼几个字段。多于两个就开始像 JSON 了。 */
+const SUMMARY_MAX_PARTS = 2;
+
+function truncateSummary(value: string): string {
+  return value.length > SUMMARY_MAX_CHARS ? `${value.slice(0, SUMMARY_MAX_CHARS)}…` : value;
+}
+
+/** 多行入参（补丁、prompt）只取第一句有内容的话，剩下的交给原文。 */
+function firstMeaningfulLine(value: string): string {
+  const line = value.split('\n').find((item) => item.trim() !== '') ?? '';
+  return line.trim();
+}
+
+/**
+ * 把工具入参压成一行 `key=value · key=value` 的短摘要。
+ *
+ * 为什么不能整段贴 JSON：一次 apply_patch 或 Read 的入参动辄上万字符，
+ * 铺进时间线等于把「它调了什么」淹成一片括号，而人真正想知道的只是
+ * 「它在哪个文件、跑什么命令」。拼不出任何字段就返回 undefined，
+ * 上层据此退化成只有工具名的单行，而不是给一个空括号。
+ */
+function summarizeToolInput(input: unknown): string | undefined {
+  if (typeof input === 'string') {
+    const line = firstMeaningfulLine(input);
+    return line ? truncateSummary(line) : undefined;
+  }
+
+  const record = asRecord(input);
+  if (!record) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  for (const key of SUMMARY_INPUT_KEYS) {
+    const value = record[key];
+    if (typeof value !== 'string' || value.trim() === '') {
+      continue;
+    }
+    parts.push(`${key}=${firstMeaningfulLine(value)}`);
+    if (parts.length >= SUMMARY_MAX_PARTS) {
+      break;
+    }
+  }
+
+  return parts.length > 0 ? truncateSummary(parts.join(' · ')) : undefined;
+}
+
+/** 入参可能包在若干别名容器里，也可能直接摊在事件顶层。两处都找。 */
+const SUMMARY_INPUT_CONTAINERS = [
+  'input',
+  'args',
+  'arguments',
+  'params',
+  'parameters',
+  'tool_input',
+] as const;
+
+function readToolSummary(record: JsonRecord): string | undefined {
+  for (const key of SUMMARY_INPUT_CONTAINERS) {
+    const nested = summarizeToolInput(record[key]);
+    if (nested) {
+      return nested;
+    }
+  }
+  return summarizeToolInput(record);
+}
+
+/* ------------------------------------------------------------------ *
+ * 进度信号：只有结算那一拍才带用量
+ * ------------------------------------------------------------------ */
+
+/**
+ * 结算阶段的别名。
+ *
+ * 用量只在「这一段/这一轮结束」时才有意义：`turn_start` 上即便带着
+ * token 计数，它也是到目前为止的累计值，落一条只会在成本账上重复计入。
+ * 各平台叫法不同，这里一次收干净。
+ */
+const SETTLEMENT_PHASES = new Set(['step_end', 'turn_end', 'step_finish', 'complete', 'completed']);
+
+function statusEvent(phase: string | undefined, record: JsonRecord): AgentEvent {
+  return {
+    kind: 'status',
+    phase: phase ?? 'status',
+    text: readString(record, 'text', 'message', 'detail'),
+    usage: phase && SETTLEMENT_PHASES.has(phase) ? extractUsage(record) : undefined,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * 行缓冲：NDJSON 的 chunk 边界必然切在行中间
  * ------------------------------------------------------------------ */
 
@@ -295,6 +435,16 @@ function handleClaudeLine(line: string): AgentEvent[] {
         events.push({ kind: 'tool', toolName: readString(item, 'name') ?? 'tool' });
         continue;
       }
+      if (blockType === 'thinking' || blockType === 'redacted_thinking' || blockType === 'reasoning') {
+        // 思考块是模型的内部独白，不是回答：映射成 thinking 让渲染层降级到
+        // muted + 折叠，否则它会和正式回答在视觉上完全平等。
+        // redacted_thinking 只有签名没有正文，text 缺省——交给编排层当空内容丢掉。
+        events.push({
+          kind: 'thinking',
+          text: readString(item, 'thinking', 'text', 'reasoning'),
+        });
+        continue;
+      }
       if (blockType === 'tool_result') {
         // 工具结果回灌是显式内容块，保留下来
         const value = flattenText(item.content) ?? readString(item, 'text');
@@ -353,6 +503,11 @@ function handleClaudeLine(line: string): AgentEvent[] {
     return [{ kind: 'error', text: errorText(record, line) }];
   }
 
+  if (type === 'status') {
+    // 进度信号不是内容：解析成 status，落不落事件由编排层按「有没有用量」决定
+    return [statusEvent(readString(record, 'phase', 'subtype'), record)];
+  }
+
   return [textEvent(line)];
 }
 
@@ -390,8 +545,13 @@ function handleCodexLine(line: string): AgentEvent[] {
         readString(item, 'text', 'message', 'content', 'aggregated_output') ??
         flattenText(item.content);
 
-      if (itemType === 'agent_message' || itemType === 'reasoning') {
+      if (itemType === 'agent_message') {
         return value ? [{ kind: 'text', text: value }] : [textEvent(line)];
+      }
+      if (itemType === 'reasoning' || itemType === 'reasoning_summary') {
+        // codex 的推理摘要曾经混在 agent_message 里一起当正文：它是模型在
+        // 自言自语，不是交付给用户的话，必须降一级渲染
+        return [{ kind: 'thinking', text: value }];
       }
       if (itemType === 'command_execution') {
         return [
@@ -431,10 +591,16 @@ function handleCodexLine(line: string): AgentEvent[] {
     }
 
     // ---- 老格式（msg.type） ----
-    case 'agent_message':
-    case 'agent_reasoning': {
+    case 'agent_message': {
       const value = readString(msg, 'message', 'text') ?? readString(record, 'text', 'message');
       return value ? [{ kind: 'text', text: value }] : [textEvent(line)];
+    }
+
+    case 'agent_reasoning': {
+      // 老格式的推理同样只是内部独白。空文本也认——它是 thinking 事件，
+      // 编排层会按「有没有正文」决定丢不丢，退化成正文明明更糟
+      const value = readString(msg, 'message', 'text') ?? readString(record, 'text', 'message');
+      return [{ kind: 'thinking', text: value }];
     }
 
     case 'task_complete': {
@@ -480,7 +646,19 @@ function handleOpencodeLine(line: string): AgentEvent[] {
 
     case 'text': {
       const value = readString(part, 'text') ?? readString(record, 'text');
-      return value ? [{ kind: 'text', text: value }] : [textEvent(line)];
+      if (!value) {
+        return [textEvent(line)];
+      }
+      // opencode 把推理也塞在 text 事件里，只靠 part.type 区分。不认这一层
+      // 就会把模型的自我推演当成回答铺进时间线
+      const reasoning =
+        readString(part, 'type') === 'reasoning' || readString(record, 'subtype') === 'reasoning';
+      return [{ kind: reasoning ? 'thinking' : 'text', text: value }];
+    }
+
+    case 'reasoning': {
+      const value = readString(part, 'text', 'reasoning') ?? readString(record, 'text');
+      return [{ kind: 'thinking', text: value }];
     }
 
     case 'tool_use': {
@@ -535,7 +713,43 @@ function handleDshLine(line: string): AgentEvent[] {
     }
 
     case 'tool_call':
-      return [{ kind: 'tool', toolName: readString(record, 'name', 'tool', 'toolName') ?? 'tool' }];
+      // 入参不进事件流，但摘要必须进：只有工具名的话，「它到底对谁动手」无从知晓。
+      // 摘要由 summarizeToolInput 保证是一行短文本，不会把原始 JSON 带出来
+      return [
+        {
+          kind: 'tool',
+          toolName: readString(record, 'name', 'tool', 'toolName') ?? 'tool',
+          text: readToolSummary(record),
+        },
+      ];
+
+    case 'thinking':
+    case 'reasoning': {
+      // 空文本的 thinking 是真实存在的（{"type":"thinking","text":""}）。
+      // 这里照实给出 thinking 事件：它确实是模型说的一句话，只是没有内容，
+      // 丢不丢由编排层按「有没有正文」判定——解析层不替编排层做回收决策
+      return [
+        {
+          kind: 'thinking',
+          text: readString(record, 'text', 'thinking', 'content', 'delta'),
+        },
+      ];
+    }
+
+    case 'status':
+    case 'step_start':
+    case 'step_end':
+    case 'turn_start':
+    case 'turn_end': {
+      // 进度信号不是内容。它一旦退化成 text，时间线上就多出一整行
+      // `{"type":"status","phase":"turn_start","turn":1}`。
+      // 用量的落库留到编排层：只有 step_end 那一拍真带 usage
+      const phase =
+        type === 'status'
+          ? readString(record, 'phase', 'stage', 'subtype')
+          : type;
+      return [statusEvent(phase, record)];
+    }
 
     case 'tool_result': {
       // 显式的结果事件：正文保留，没有正文就退化成一条工具事件

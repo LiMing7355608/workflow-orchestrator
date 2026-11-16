@@ -227,6 +227,149 @@ describe('dsh-json', () => {
     const events = parseAll('dsh-json', '{"type":"tool_result","name":"apply_patch"}');
     expect(events).toEqual([{ kind: 'tool', toolName: 'apply_patch' }]);
   });
+
+  it('tool_call 带上入参摘要，且不带原始 JSON 结构', () => {
+    const events = parseAll(
+      'dsh-json',
+      '{"type":"tool_call","name":"pwsh","input":{"command":"pnpm -r build"}}',
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe('tool');
+    expect(events[0]?.toolName).toBe('pwsh');
+    // 摘要存在的意义是「它在跑什么」，不是把入参原样搬进时间线
+    expect(events[0]?.text).toBe('command=pnpm -r build');
+    expect(events[0]?.text ?? '').not.toMatch(/[{}[\]]/);
+  });
+
+  it('没有入参的 tool_call 不造空摘要', () => {
+    expect(parseAll('dsh-json', '{"type":"tool_call","name":"read_file"}')).toEqual([
+      { kind: 'tool', toolName: 'read_file' },
+    ]);
+  });
+
+  it('超长入参被截断成一行短摘要', () => {
+    const long = 'x'.repeat(400);
+    const events = parseAll(
+      'dsh-json',
+      JSON.stringify({ type: 'tool_call', name: 'pwsh', input: { command: long } }),
+    );
+    const summary = events[0]?.text ?? '';
+
+    expect(summary.startsWith('command=')).toBe(true);
+    expect(summary.length).toBeLessThan(120);
+    expect(summary.endsWith('…')).toBe(true);
+  });
+
+  it('thinking 映射成 thinking，而不是正文', () => {
+    expect(parseAll('dsh-json', '{"type":"thinking","text":"先看依赖图"}')).toEqual([
+      { kind: 'thinking', text: '先看依赖图' },
+    ]);
+  });
+
+  it('空 thinking 仍是 thinking 事件：丢不丢由编排层按内容判定', () => {
+    // 解析层的职责是如实翻译。这里若退化成正文明明更糟——一条空 JSON 会
+    // 占掉时间线的一行
+    const events = parseAll('dsh-json', '{"type":"thinking","text":""}');
+    expect(kinds(events)).toEqual(['thinking']);
+    expect(events[0]?.text).toBeUndefined();
+  });
+
+  it('status 带 phase，且不当正文', () => {
+    expect(parseAll('dsh-json', '{"type":"status","phase":"turn_start","turn":1}')).toEqual([
+      { kind: 'status', phase: 'turn_start' },
+    ]);
+  });
+
+  it('step_end 的 status 附带用量，进度信号本身不留正文', () => {
+    const events = parseAll(
+      'dsh-json',
+      '{"type":"status","phase":"step_end","usage":{"prompt_tokens":12,"completion_tokens":3}}',
+    );
+
+    expect(events).toEqual([
+      {
+        kind: 'status',
+        phase: 'step_end',
+        usage: { promptTokens: 12, completionTokens: 3, totalTokens: 15 },
+      },
+    ]);
+  });
+
+  it('非结算阶段的 status 即便带用量也不挂用量', () => {
+    // turn_start 上的 token 计数是累计值，落成用量会在成本账上重复计入
+    const events = parseAll(
+      'dsh-json',
+      '{"type":"status","phase":"turn_start","turn":2,"usage":{"prompt_tokens":900}}',
+    );
+
+    expect(events).toEqual([{ kind: 'status', phase: 'turn_start' }]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * thinking / status：跨平台都不能退化成正文
+ * ------------------------------------------------------------------ */
+
+describe('thinking 在各平台的映射', () => {
+  it('claude-stream-json 的 thinking 内容块单独成条，与正文分开', () => {
+    const events = parseAll(
+      'claude-stream-json',
+      '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"先梳理事件流"},{"type":"text","text":"开始改"}]}}',
+    );
+
+    expect(kinds(events)).toEqual(['thinking', 'text']);
+    // 正文口径不变：thinking 不进 bodies（那三个 kind 才是正文）
+    expect(bodies(events)).toEqual(['开始改']);
+    expect(events[0]?.text).toBe('先梳理事件流');
+  });
+
+  it('claude-stream-json 的 redacted_thinking 只有签名时是空 thinking', () => {
+    const events = parseAll(
+      'claude-stream-json',
+      '{"type":"assistant","message":{"content":[{"type":"redacted_thinking","data":"Zm9v"}]}}',
+    );
+
+    expect(kinds(events)).toEqual(['thinking']);
+    expect(events[0]?.text).toBeUndefined();
+  });
+
+  it('codex-json 的 reasoning 条目不再是正文', () => {
+    const events = parseAll(
+      'codex-json',
+      '{"type":"item.completed","item":{"type":"reasoning","text":"先读一遍测试"}}',
+    );
+
+    expect(kinds(events)).toEqual(['thinking']);
+    expect(events[0]?.text).toBe('先读一遍测试');
+  });
+
+  it('codex-json 老格式的 agent_reasoning 同样映射成 thinking', () => {
+    expect(parseAll('codex-json', '{"msg":{"type":"agent_reasoning","message":"想一下"}}')).toEqual([
+      { kind: 'thinking', text: '想一下' },
+    ]);
+  });
+
+  it('opencode-json 的 reasoning 事件映射成 thinking', () => {
+    expect(parseAll('opencode-json', '{"type":"reasoning","part":{"text":"先看看"}}')).toEqual([
+      { kind: 'thinking', text: '先看看' },
+    ]);
+  });
+
+  it('opencode-json 里 part.type 为 reasoning 的 text 事件也降级为 thinking', () => {
+    const events = parseAll(
+      'opencode-json',
+      '{"type":"text","part":{"type":"reasoning","text":"权衡两套方案"}}',
+    );
+
+    expect(kinds(events)).toEqual(['thinking']);
+  });
+
+  it('认不出的类型仍然整行退化成 text', () => {
+    // 防回归：新增 thinking / status 之后，未知类型不能顺手被吞掉
+    const line = '{"type":"future.phase","phase":"nope"}';
+    expect(parseAll('dsh-json', line)).toEqual([{ kind: 'text', text: line }]);
+  });
 });
 
 /* ------------------------------------------------------------------ *
