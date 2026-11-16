@@ -16,6 +16,9 @@ function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/runs/')) {
     return '运行详情';
   }
+  if (pathname === '/agents') {
+    return 'Agent 管理';
+  }
   return '页面未找到';
 }
 

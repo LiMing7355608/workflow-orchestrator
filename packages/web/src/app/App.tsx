@@ -5,6 +5,7 @@ import {
   useLocation,
 } from 'react-router-dom';
 import { AppShell } from '../components/layout/AppShell';
+import { AgentsPage } from '../pages/AgentsPage';
 import { HomePage } from '../pages/HomePage';
 import { NewRunPage } from '../pages/NewRunPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="new" element={<NewRunPage />} />
           <Route path="runs" element={<RunRecordsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="agents" element={<AgentsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

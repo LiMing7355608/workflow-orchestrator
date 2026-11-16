@@ -14,6 +14,7 @@ import type {
   WorkflowNode,
   WorkflowRunDetail,
 } from '../../types/workflow';
+import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
 import { Progress } from '../ui/Progress';
 
@@ -138,9 +139,12 @@ function RunOverview({
                     <span className="block truncate text-[11px] font-medium text-ink">
                       {node.title}
                     </span>
-                    <span className="block truncate text-[10px] text-muted">
-                      {node.agent}
-                    </span>
+                    <AgentChip
+                      agentId={node.agentId}
+                      label={node.agent}
+                      className="mt-0.5 text-[10px] text-muted"
+                      iconClassName="h-3 w-3"
+                    />
                   </span>
                   <ChevronRight
                     className="h-3.5 w-3.5 shrink-0 text-passive"
@@ -159,13 +163,18 @@ function RunOverview({
         <section>
           <h3 className="text-[10px] font-medium text-muted">参与 Agent</h3>
           <div className="mt-2 space-y-2">
-            {Array.from(agents.entries()).map(([agent, info]) => (
+            {Array.from(agents.entries()).map(([agentName, info]) => (
               <div
-                key={agent}
+                key={agentName}
                 className="flex items-center gap-2 text-[11px]"
               >
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-passive" />
-                <span className="truncate text-muted">{agent}</span>
+                <AgentChip
+                  label={agentName}
+                  iconOnly
+                  className="shrink-0"
+                  iconClassName="h-3.5 w-3.5"
+                />
+                <span className="truncate text-muted">{agentName}</span>
                 <span className="ml-auto shrink-0 text-[10px] text-passive">
                   {info.running > 0
                     ? `${info.running} 运行中`
@@ -251,7 +260,12 @@ function NodeDetail({
               <span className="block text-[10px] text-passive">
                 执行 Agent
               </span>
-              <span className="mt-1 block text-ink">{node.agent}</span>
+              <AgentChip
+                agentId={node.agentId}
+                label={node.agent}
+                className="mt-1 text-ink"
+                iconClassName="h-3.5 w-3.5"
+              />
             </div>
             <div>
               <span className="block text-[10px] text-passive">耗时</span>

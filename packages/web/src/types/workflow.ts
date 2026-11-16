@@ -36,7 +36,10 @@ export interface WorkflowNode {
   description: string;
   type: NodeType;
   status: NodeStatus;
+  /** 执行者名称。有 agentId 时以 Agent 目录里的平台名为准 */
   agent: string;
+  /** 绑定的可调度 Agent id；人类审批与编排器节点为空 */
+  agentId?: string;
   dependsOn: string[];
   files: string[];
   attempts: number;
