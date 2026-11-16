@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type {
   AgentRunRequest,
   AgentRunResult,
@@ -209,6 +211,22 @@ export class MockAgentRunner implements AgentRunner {
           `在 ${request.nodeId} 的独占范围内实施变更…`,
           '写入文件并自检…',
         ];
+
+    // 实现节点真的落一份产物：这样 diff 采集、产物落盘、审查提示词里的
+    // 「被审变更」在演示与 CI 里都有真实内容，而不是一条空链路。
+    if (!isReview) {
+      try {
+        const dir = join(request.cwd, 'src');
+        await mkdir(dir, { recursive: true });
+        await writeFile(
+          join(dir, `${request.nodeId}.md`),
+          `# ${request.nodeId}\n\n由回放执行器生成，用于演示产物采集与审查上下文。\n`,
+          'utf8',
+        );
+      } catch {
+        // 工作区不可写时不影响回放本身
+      }
+    }
 
     for (const line of lines) {
       await delay(120);
