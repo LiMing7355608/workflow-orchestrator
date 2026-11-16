@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentAvailability, AgentProfile } from '@orchestrator/core';
+import { silentLog, type LogSink } from './log.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +21,26 @@ export interface ProbeResult {
  * 不经过 shell 根本解析不了，会把装好的 CLI 误判为未安装。
  * `where` / `which` 走的是与用户终端一致的解析规则，是「装没装」的权威判据。
  */
+/**
+ * Windows 上 npm 会同时装出两个入口：无扩展名的 unix shell 脚本（给 Git Bash）
+ * 和 `.cmd` 包装。`spawn` 只认后者——直接执行无扩展名的那个是 ENOENT。
+ * 所以按可执行性排序，而不是取 `where` 的第一行。
+ */
+const EXECUTABLE_PRIORITY = ['.exe', '.cmd', '.bat', '.ps1'];
+
+function executableRank(path: string): number {
+  const index = EXECUTABLE_PRIORITY.indexOf(extensionOf(path));
+  // 无扩展名的排最后：它存在，但 spawn 起不来
+  return index === -1 ? EXECUTABLE_PRIORITY.length : index;
+}
+
+function pickBestCandidate(paths: string[]): string | undefined {
+  const ranked = [...paths].sort(
+    (left, right) => executableRank(left) - executableRank(right),
+  );
+  return ranked[0];
+}
+
 async function locateBinary(bin: string): Promise<string | undefined> {
   const tool = process.platform === 'win32' ? 'where' : 'which';
   try {
@@ -27,10 +48,12 @@ async function locateBinary(bin: string): Promise<string | undefined> {
       timeout: PROBE_TIMEOUT_MS,
       windowsHide: true,
     });
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)[0];
+    return pickBestCandidate(
+      stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    );
   } catch {
     return undefined;
   }
@@ -172,14 +195,33 @@ export function mergeProbe(
   };
 }
 
-/** 并行探测整份目录。单条超时不会拖住整体。 */
+/**
+ * 并行探测整份目录。单条超时不会拖住整体。
+ *
+ * 探测结果以前是完全静默的：界面显示「未安装」时看不出是真没装，还是
+ * 路径解析被环境卡住了。现在把汇总打一条 debug 日志，`bin` 与版本缺失
+ * 都能在日志里对上。
+ */
 export async function probeCatalog(
   catalog: AgentProfile[],
+  log: LogSink = silentLog,
 ): Promise<AgentProfile[]> {
-  return Promise.all(
+  const probed = await Promise.all(
     catalog.map(async (profile) => {
       const probe = await probeBinary(profile.launch.bin);
       return mergeProbe(profile, probe);
     }),
   );
+
+  log.debug('Agent 目录探测完成', {
+    total: probed.length,
+    missing: probed
+      .filter((profile) => profile.availability === 'missing')
+      .map((profile) => profile.id),
+    versionUnknown: probed
+      .filter((profile) => profile.availability !== 'missing' && !profile.version)
+      .map((profile) => profile.id),
+  });
+
+  return probed;
 }

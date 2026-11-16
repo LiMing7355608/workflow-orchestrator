@@ -25,7 +25,8 @@ export function buildSeedEvents(now: Date): OrchestratorEvent[] {
     partial: Omit<NodeFacts, 'attempts' | 'maxAttempts'> &
       Partial<Pick<NodeFacts, 'attempts' | 'maxAttempts'>>,
   ): NodeFacts => ({
-    attempts: 1,
+    // 没被退回过就是 0：显示成 1 会让看板以为每个节点都重试过一轮
+    attempts: 0,
     maxAttempts: 3,
     ...partial,
   });
@@ -110,6 +111,13 @@ export function buildSeedEvents(now: Date): OrchestratorEvent[] {
     title: '团队协作平台 · 首期核心体验',
     summary: '账号、消息、通讯录与通知的首期编排',
     goal: '做出团队协作平台的首期核心体验，覆盖账号、消息和通讯录三条主路径。',
+    /**
+     * 示例数据没有真实目标目录。
+     *
+     * 空串是「目录未知」的哨兵值：读取侧见到它就回落到服务端默认根目录，
+     * 而写一个假路径会让看板声称这份演示运行改过某个真实仓库。
+     */
+    workspaceRoot: '',
     specVersion: 'v1.2',
     stage: 'execute',
     createdAt: iso(base, 0),
@@ -142,7 +150,11 @@ export function buildSeedEvents(now: Date): OrchestratorEvent[] {
     { type: 'node.started', at: iso(base, 10 * MINUTE), runId, nodeId: 'impl-message' },
     { type: 'node.completed', at: iso(base, 14 * MINUTE), runId, nodeId: 'impl-message' },
 
-    { type: 'node.started', at: iso(base, 15 * MINUTE), runId, nodeId: 'review-message' },
+    // 示例数据不造「正在执行」的节点：那需要真的有一个进程在跑，
+    // 否则启动自愈会把它判成僵死并落 interrupted。要看运行中的效果，
+    // 请新建一个运行让真实 Agent 跑起来。
+    { type: 'node.started', at: iso(base, 14 * MINUTE), runId, nodeId: 'review-message' },
+    { type: 'node.completed', at: iso(base, 16 * MINUTE), runId, nodeId: 'review-message' },
 
     { type: 'node.started', at: iso(base, 10 * MINUTE), runId, nodeId: 'impl-contacts' },
     { type: 'node.completed', at: iso(base, 13 * MINUTE), runId, nodeId: 'impl-contacts' },

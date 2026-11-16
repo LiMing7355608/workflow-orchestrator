@@ -30,12 +30,16 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 interface Fixture {
   root: string;
+  /** worktree 存放根，刻意不在 root 里：真实服务把它放在编排器自己的 data 下 */
+  worktreeRoot: string;
   workspace: GitWorktreeWorkspace;
 }
 
 async function createRepo(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'orchestrator-merge-'));
   tempRepos.push(root);
+  const worktreeRoot = await mkdtemp(join(tmpdir(), 'orchestrator-merge-wt-'));
+  tempRepos.push(worktreeRoot);
 
   await execFileAsync('git', ['init'], { cwd: root, ...g });
   // 本机可能没有全局身份，临时仓库自带一份，否则 merge 提交会直接失败
@@ -50,12 +54,12 @@ async function createRepo(): Promise<Fixture> {
   await git(root, ['add', '--all']);
   await git(root, ['commit', '-m', 'init']);
 
-  return { root, workspace: new GitWorktreeWorkspace(root) };
+  return { root, worktreeRoot, workspace: new GitWorktreeWorkspace(root, worktreeRoot) };
 }
 
 /** 集成工作区目录，与 GitWorktreeWorkspace 内部的布局一致 */
-function integrationDirOf(root: string, runId: string): string {
-  return join(root, '.worktrees', runId, '_integration');
+function integrationDirOf(worktreeRoot: string, runId: string): string {
+  return join(worktreeRoot, runId, '_integration');
 }
 
 afterEach(async () => {
@@ -72,7 +76,7 @@ afterEach(async () => {
 
 describe('GitWorktreeWorkspace.merge（真实 git）', () => {
   it('两个节点改同一个文件时返回冲突，并保守地回滚现场', async () => {
-    const { root, workspace } = await createRepo();
+    const { worktreeRoot, workspace } = await createRepo();
     const runId = 'run-conflict';
     const targetBranch = `run/${runId}`;
 
@@ -100,14 +104,14 @@ describe('GitWorktreeWorkspace.merge（真实 git）', () => {
     expect(result.reason).toContain('impl-b');
 
     // 现场必须收干净：留着 MERGING 状态，下一次合并会直接报错
-    const integration = integrationDirOf(root, runId);
+    const integration = integrationDirOf(worktreeRoot, runId);
     const status = await git(integration, ['status', '--porcelain']);
     expect(status).not.toContain('UU');
     expect(existsSync(join(integration, '.git')) || existsSync(integration)).toBe(true);
   });
 
   it('两个节点改不同文件时合并成功，merged 如实列出两个节点', async () => {
-    const { root, workspace } = await createRepo();
+    const { root, worktreeRoot, workspace } = await createRepo();
     const runId = 'run-clean';
     const targetBranch = `run/${runId}`;
 
@@ -131,7 +135,7 @@ describe('GitWorktreeWorkspace.merge（真实 git）', () => {
     expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
 
     // 未提交的改动要真的进集成分支：两个文件都在集成工作区里
-    const integration = integrationDirOf(root, runId);
+    const integration = integrationDirOf(worktreeRoot, runId);
     expect(await readFile(join(integration, 'c.txt'), 'utf8')).toBe('c\n');
     expect(await readFile(join(integration, 'd.txt'), 'utf8')).toBe('d\n');
 
@@ -149,7 +153,9 @@ describe('GitWorktreeWorkspace.merge（真实 git）', () => {
 
     // 合并结束后不删节点 worktree 与分支：冲突排查需要现场
     expect(await git(root, ['branch', '--list', `node/${runId}/impl-c`])).toContain('impl-c');
-    expect(existsSync(join(root, '.worktrees', runId, 'impl-c'))).toBe(true);
+    expect(existsSync(join(worktreeRoot, runId, 'impl-c'))).toBe(true);
+    // 而目标仓库本身必须干净：worktree 一律不落在用户工程里
+    expect(existsSync(join(root, '.worktrees'))).toBe(false);
   });
 
   it('节点分支不存在时返回结构化失败，而不是抛异常', async () => {
