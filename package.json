@@ -11,7 +11,7 @@
     "dev": "pnpm --parallel --filter @orchestrator/server --filter @orchestrator/web dev",
     "dev:server": "pnpm --filter @orchestrator/server dev",
     "dev:web": "pnpm --filter @orchestrator/web dev",
-    "build": "pnpm -r build",
+    "build": "pnpm --filter @orchestrator/web build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "test:e2e": "pnpm --filter @orchestrator/e2e test"
