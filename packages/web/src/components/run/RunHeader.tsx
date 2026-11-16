@@ -58,8 +58,8 @@ export function RunHeader({
 
   // 待人工处理的运行同样允许停止：审批节点在等人，但别的节点可能还在跑。
   // 已完成的运行不给操作按钮——那已经没有「正在跑的东西」可停了。
-  const canStop = run.status === 'running' || run.status === 'waiting_for_boss';
-  const canResume = run.status === 'paused';
+  const canStop = ['draft', 'running', 'waiting_for_boss'].includes(run.status);
+  const canResume = run.status === 'paused' || (run.status === 'failed' && run.nodes.length === 0);
 
   async function handleStop(): Promise<void> {
     if (pending) {

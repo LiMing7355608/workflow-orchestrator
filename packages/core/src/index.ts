@@ -102,8 +102,10 @@ export type { SessionResolution } from './session.js';
 
 export {
   advanceRun,
+  createAgentEventRelay,
   nodeInFlightKey,
   parseVerdict,
+  reworkTarget,
   runNode,
   runSingleNode,
 } from './orchestrator.js';

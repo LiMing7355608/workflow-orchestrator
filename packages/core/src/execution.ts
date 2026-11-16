@@ -23,6 +23,7 @@ export interface AgentRunRequest {
   timeoutMs: number;
   /** 权限档位。审查节点固定用 default，不追加任何提权参数 */
   policy: PermissionPolicy;
+  signal?: AbortSignal;
 }
 
 export interface AgentRunResult {
@@ -123,7 +124,9 @@ export type MergeResult =
  */
 export interface WorkspacePort {
   /** 为节点准备独立工作目录，返回绝对路径。必须在 Agent 启动之前完成。 */
-  prepare(runId: string, nodeId: string): Promise<string>;
+  prepare(runId: string, nodeId: string, upstreamIds?: string[]): Promise<string>;
+  /** 提交节点改动并保留分支，供下游节点读取。 */
+  publish?(runId: string, nodeId: string): Promise<void>;
   /** 释放工作目录。清理失败不应让编排器崩溃。 */
   release(runId: string, nodeId: string): Promise<void>;
   /**

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   buildAgentArgv,
   createParser,
+  type AgentEvent,
   type AgentProfile,
   type AgentRunner,
   type WorkspacePort,
@@ -35,8 +36,8 @@ export const PLANNER_PROMPT_MARKER = 'PLANNER_OUTPUT_JSON';
  */
 export const PLAN_FILENAME = '.orchestrator-plan.json';
 
-/** 规划阶段不写仓库，所以权限只用最保守的一档。 */
-const PLANNER_POLICY = 'default' as const;
+/** 规划器在独立工作区中写入任务图。 */
+const PLANNER_POLICY = 'accept-edits' as const;
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 
@@ -45,9 +46,13 @@ export interface PlannerExecution {
   workspace: WorkspacePort;
   /** 回传 Agent 的增量输出，便于上层记事件或打到日志 */
   onOutput?: (chunk: string) => void;
+  /** 回传平台解析后的输出，与任务图交付共用同一个解析器。 */
+  onEvents?: (events: AgentEvent[]) => void;
 }
 
 export interface PlannerOptions {
+  runId?: string;
+  signal?: AbortSignal;
   /** 指定用哪个 Agent 规划；留空则按能力与可用性自动挑 */
   agentId?: string;
   /** Agent 产出不合格时最多重来几次 */
@@ -186,7 +191,7 @@ function buildPlannerPrompt(
     '- type 只能是 implement / review / approval / route',
     '- implement 与 review 必须填 agentId，且只能取上面白名单里的值',
     '- approval 填 executor（人类角色名），不要填 agentId',
-    '- route 两者都不填，它是编排器的纯逻辑节点',
+    '- route 两者都不填。交付代码的任务图最后加入人工审批节点以及依赖它的 route 节点，并给 route 设置 action: merge',
     '- 无依赖关系的并行 implement 节点，files 不得相交',
     '- 图不允许有环',
     '- 让审查节点使用与实现节点不同的 Agent，以获得异构视角',
@@ -352,6 +357,7 @@ export async function generateDag(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const prompt = buildPlannerPrompt(goal, catalog, issues);
     const nodeId = `attempt-${attempt}`;
+    options.signal?.throwIfAborted();
 
     let cwd: string;
     try {
@@ -376,7 +382,8 @@ export async function generateDag(
     // 事件而不是答案。只把 text 与 result 类事件拼成正文，再从正文里找 DAG。
     const parser = createParser(agent.launch.parser);
     let answer = '';
-    const collect = (events: ReturnType<typeof parser.push>): void => {
+    const collect = (events: AgentEvent[]): void => {
+      execution.onEvents?.(events);
       for (const event of events) {
         if (event.kind === 'text' || event.kind === 'result') {
           answer += event.text ?? '';
@@ -386,7 +393,7 @@ export async function generateDag(
 
     const result = await execution.runner.run(
       {
-        runId: 'planner',
+        runId: options.runId ?? workspaceRunId,
         nodeId,
         agentId: agent.id,
         bin: agent.launch.bin,
@@ -395,6 +402,7 @@ export async function generateDag(
         stdin: agent.launch.stdin ? prompt : undefined,
         cwd,
         timeoutMs: agent.timeoutMs,
+        signal: options.signal,
         policy: PLANNER_POLICY,
       },
       (chunk) => {
@@ -410,7 +418,11 @@ export async function generateDag(
     const raw = submitted ?? extractJsonObject(candidate);
 
     // 读完再释放工作区，顺序不能反
-    await execution.workspace.release('planner', nodeId).catch(() => {});
+    await execution.workspace.release(workspaceRunId, nodeId).catch(() => {});
+    options.signal?.throwIfAborted();
+    if (result.cancelled) {
+      throw new DagGenerationError('规划执行已取消', attempt, issues);
+    }
 
     if (raw === undefined) {
       // 连文件带 stdout 都没拿到东西：此时才把失败归因到执行本身

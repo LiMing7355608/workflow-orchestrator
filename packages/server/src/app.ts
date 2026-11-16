@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
@@ -8,9 +10,11 @@ import { z } from 'zod';
 import {
   DEFAULT_AGENT_PROFILES,
   advanceRun,
+  createAgentEventRelay,
   deriveBoard,
   deriveEdges,
   deriveEvents,
+  deriveNodeStatus,
   deriveRunDetail,
   deriveRunStatus,
   deriveRunView,
@@ -18,6 +22,7 @@ import {
   isRunSettled,
   nodeInFlightKey,
   runNode,
+  reworkTarget,
   type AdvanceDeps,
   type AgentProfile,
   type AgentRunner,
@@ -61,7 +66,7 @@ export interface AppOptions {
    * 传 `false` 彻底关掉（单测里不希望有日志噪声时用）。
    */
   logger?: boolean | { level?: string };
-  /** 分片参数，覆盖 EventJournal 的默认值（8MB / 5 片） */
+  /** 分片参数，覆盖 EventJournal 的默认值（8MB / 5 个活跃归档） */
   journal?: { maxBytesPerShard?: number; maxShards?: number };
   /**
    * 子进程登记簿。传入则真拉起 Agent 时会登记 / 注销；
@@ -345,7 +350,13 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   });
   const baseline = options.catalog ?? DEFAULT_AGENT_PROFILES;
 
-  let catalog = await probeCatalog(baseline, log);
+  const runnerMode = process.env.AGENT_RUNNER ?? 'real';
+  const workspaceMode = process.env.AGENT_WORKSPACE ?? 'git';
+  const loadCatalog = async (): Promise<AgentProfile[]> =>
+    runnerMode === 'mock' && !options.catalog
+      ? baseline.map((agent) => ({ ...agent, availability: 'ready' }))
+      : probeCatalog(baseline, log);
+  let catalog = await loadCatalog();
 
   const resolveAgent = (agentId: string | undefined): string | undefined =>
     findAgent(agentId, catalog)?.label;
@@ -393,17 +404,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * ---------------------------------------------------------------- */
 
   // 默认真跑：用户要的是看到 Agent 实际执行，回放只是没有可执行 Agent 时的兜底
-  const runnerMode = process.env.AGENT_RUNNER ?? 'real';
   const runner: AgentRunner =
     runnerMode === 'real'
       ? new SpawnAgentRunner(options.registry, log)
-      : new MockAgentRunner();
+      : new MockAgentRunner(workspaceMode === 'git');
 
   // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。
   // temp 保留作为降级选项——在没有 git 的环境里仍能跑通整条编排链路，
   // 代价是审查提示词里只会有一句「该上游节点没有产出 diff」。
-  const workspaceMode = process.env.AGENT_WORKSPACE ?? 'git';
-
   /**
    * 编排器自己的数据根目录（启动目录），与「这次在哪干活」完全无关。
    *
@@ -763,7 +771,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 与 `advancing` 同一套互斥思路，区别是这里不需要可等待的句柄：
    * 拆解是「发起即忘」，调用方拿不到、也不需要它的结果。
    */
-  const planning = new Set<string>();
+  const planning = new Map<string, AdvanceTask>();
 
   /**
    * 后台拆解任务图：先发 `plan.started`，等 Agent 给出图，再把图冻结进事实。
@@ -777,7 +785,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 每个出口都必须落事件，否则运行会永远卡在没有图的中间态：
    * 成功落冻结事件（节点图随事件进入事实）并踢一轮推进，失败落 `plan.failed`。
    */
-  async function runPlanning(runId: string, request: PlanRequest): Promise<void> {
+  async function runPlanning(runId: string, request: PlanRequest, signal: AbortSignal): Promise<void> {
     const requestedAgentId =
       request.requestedAgentId || process.env.PLANNER_AGENT_ID || undefined;
 
@@ -795,6 +803,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       'orchestrator';
 
     await store.emit({ type: 'plan.started', at: now(), runId, agentId });
+    const relay = createAgentEventRelay({ emit: (event) => store.emit(event), now }, { runId, agentId });
 
     try {
       const generated = await generateDag(
@@ -810,16 +819,13 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
            * 用服务启动目录，等于让拆解去看另一个工程。
            */
           workspace: workspaceAt(request.workspaceRoot),
-          onOutput: (chunk) => {
-            // 与同步时代同一套处置：截断到 200 字符。规划输出常带整张 DAG，
-            // 全文进日志会把启动日志淹掉，而且它本来也会作为事件流进入事实源。
-            app.log.debug({ chunk: chunk.trim().slice(0, 200) }, 'planner 输出');
-          },
+          onEvents: relay.forward,
         },
-        { agentId: requestedAgentId },
-      );
+        { agentId: requestedAgentId, runId, signal },
+      ).finally(relay.flush);
 
       // 角色覆盖要在校验之前：校验看的是最终 agentId，不是 Planner 猜的那个
+      signal.throwIfAborted();
       const dag = applyRoleAgents(generated.dag, request.roles);
 
       // 冻结前的最后一道闸。覆盖可能把 agentId 换成目录里不存在的值，
@@ -855,6 +861,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       // 冻结即可开跑，不必等客户端再踢一脚
       void advance(runId);
     } catch (error) {
+      if (signal.aborted) {
+        return;
+      }
       // 图不合格与 Agent 跑不起来要分开说：前者是内容问题（带 issues，
       // 用户改目标或换 Agent 就能救），后者是编排器自身的问题。
       const failure =
@@ -890,17 +899,13 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     if (planning.has(runId)) {
       return;
     }
-    planning.add(runId);
-    void runPlanning(runId, request)
+    const controller = new AbortController();
+    const done = runPlanning(runId, request, controller.signal)
       .catch((error: unknown) => {
-        // 最后一层保险：这条链没有调用方 await，任何漏出的异常都会变成
-        // 未处理的 rejection（Node 默认当致命错误，测试里直接判失败）。
         app.log.error({ err: error, runId }, '拆解链路异常退出');
       })
-      .finally(() => {
-        // 只清理自己那次登记；上面的 catch/finally 保证无论成败都会清
-        planning.delete(runId);
-      });
+      .finally(() => { planning.delete(runId); });
+    planning.set(runId, { controller, done });
   }
 
   /**
@@ -945,7 +950,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   app.post('/api/agents/probe', async () => {
     // 始终基于基线重新探测：拿上一次探测结果当输入会把 ready 磨成 installed
-    catalog = await probeCatalog(baseline, log);
+    catalog = await loadCatalog();
     return catalog;
   });
 
@@ -989,7 +994,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       if (!run) {
         return reply.code(404).send({ error: 'run_not_found' });
       }
-      return deriveEvents(run, runEvents(run.id));
+      return deriveEvents(run, runEvents(run.id), resolveAgent);
     },
   );
 
@@ -1043,7 +1048,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       if (!run || !run.nodes[request.params.nodeId]) {
         return reply.code(404).send({ error: 'node_not_found' });
       }
-      return deriveEvents(run, runEvents(run.id)).filter(
+      return deriveEvents(run, runEvents(run.id), resolveAgent).filter(
         (event) => event.nodeId === request.params.nodeId,
       );
     },
@@ -1076,7 +1081,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const actor = resolveActor(request.headers);
 
     const at = now();
-    const runId = `run-${Date.now().toString(36)}`;
+    const runId = `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 
     /**
      * 调用方自带图：没有拆解这一步，直接冻结。
@@ -1159,6 +1164,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
        * 换来的是一处几乎没人会读到的精度。
        */
       specVersion: 'v1.0',
+      plannerAgentId: body.data.plannerAgentId,
+      implementAgentId: body.data.implementAgentId,
+      reviewAgentId: body.data.reviewAgentId,
       // 图还没生出来：这一阶段的运行只由 plan.* 与 run.frozen 推进
       stage: 'orchestrate',
       createdAt: at,
@@ -1226,7 +1234,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
       // 没有在推进的链路也照样往下走：进程可能只是上一轮遗留的，
       // 「停止」对用户来说是幂等的，不是「必须先有活跃链路」。
-      const task = advancing.get(runId);
+      const task = advancing.get(runId) ?? planning.get(runId);
       task?.controller.abort();
 
       // 先落暂停事实，再去做清理。
@@ -1308,15 +1316,23 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       // 这里能续上的前提是 stop 那次已经让被打断的节点落下 `node.interrupted`
       // （投影层因此清空了它的 startedAt / finishedAt，节点回到 ready），
       // 所以下面的 advance 会把它当作一个没跑过的节点重新派发。
-      const current = advancing.get(runId);
+      const current = advancing.get(runId) ?? planning.get(runId);
       if (current?.controller.signal.aborted) {
         await current.done.catch(() => {});
       }
 
       await store.emit({ type: 'run.resumed', at: now(), runId });
-      // 走到这里 advancing 已经不含该 run（或含一条未被中止的有效链路），
-      // 所以这里必然能为它重建一份 AbortController
-      void advance(runId);
+      const run = store.snapshot.runs[runId]!;
+      if (!run.frozenAt) {
+        startPlanning(runId, {
+          goal: run.goal,
+          requestedAgentId: run.plannerAgentId,
+          workspaceRoot: run.workspaceRoot || defaultWorkspaceRoot,
+          roles: { implementAgentId: run.implementAgentId, reviewAgentId: run.reviewAgentId },
+        });
+      } else {
+        void advance(runId);
+      }
       return { ok: true };
     },
   );
@@ -1373,6 +1389,12 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       }
       if (!run.nodes[nodeId]) {
         return reply.code(404).send({ error: 'node_not_found' });
+      }
+
+      const node = run.nodes[nodeId]!;
+      if (node.action === 'merge' && !node.dependsOn.every((id) =>
+        run.nodes[id] && deriveNodeStatus(run, run.nodes[id]!) === 'completed')) {
+        return reply.code(409).send({ error: 'merge_dependencies_pending', message: '请先完成合并节点依赖的任务和审批' });
       }
 
       // 同步跑完这一个节点再返回：一次执行就是这个请求的全部意义，
@@ -1595,7 +1617,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
             },
           },
           {
-            agentId: process.env.PLANNER_AGENT_ID || undefined,
+            agentId: run.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined,
+            runId,
             lockedNodeIds,
           },
         );
@@ -1659,6 +1682,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     }));
   });
 
+  const deciding = new Set<string>();
+
   app.post<{ Params: { id: string; nodeId: string } }>(
     '/api/runs/:id/nodes/:nodeId/approval',
     async (request, reply) => {
@@ -1668,71 +1693,57 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         return reply.code(404).send({ error: 'run_not_found' });
       }
       const node = run.nodes[nodeId];
-      if (!node || node.type !== 'approval') {
+      if (!node || (node.type !== 'approval' && !node.escalated)) {
         return reply.code(404).send({ error: 'approval_node_not_found' });
       }
-
       const body = approvalBodySchema.safeParse(request.body);
       if (!body.success) {
         return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
       }
 
-      // 身份解析必须早于事件落盘：审批记录里写的就是这个值
-      const actor = resolveActor(request.headers, body.data.actor);
-
       const record = store.snapshot.approvals.find(
         (item) => item.runId === runId && item.nodeId === nodeId && item.status === 'pending',
       );
-      if (!record) {
-        return reply.code(409).send({ error: 'no_pending_approval' });
+      if (!record || deciding.has(record.id) || deriveNodeStatus(run, node) !== 'waiting_approval') {
+        return reply.code(409).send({ error: 'no_pending_approval', message: '当前节点没有可提交的审批' });
+      }
+      const { decision, reason } = body.data;
+      const actor = resolveActor(request.headers, body.data.actor);
+      const handoffTo = body.data.handoffTo?.trim();
+      if (decision === 'handoff' && !handoffTo) {
+        return reply.code(400).send({ error: 'handoff_target_required', message: '请填写接收审批的人' });
+      }
+      if (record.handedOffTo && record.handedOffTo !== actor) {
+        return reply.code(403).send({ error: 'approval_assigned', message: `该审批已转交给 ${record.handedOffTo}` });
       }
 
+      deciding.add(record.id);
       const at = now();
-      await store.emit({
-        type: 'approval.decided',
-        at,
-        runId,
-        approvalId: record.id,
-        decision: body.data.decision,
-        actor,
-        reason: body.data.reason,
-      });
-      await store.emit({ type: 'node.completed', at, runId, nodeId });
-
-      if (body.data.decision === 'reject') {
-        // 驳回不改图结构，只重置目标实现节点；下游已完成的事实一并作废
-        const target = node.dependsOn[0];
-        if (target) {
-          await store.emit({
-            type: 'node.reset',
-            at: now(),
-            runId,
-            nodeId: target,
-            reason: body.data.reason ?? '审批驳回',
-          });
-        }
-      }
-
-      if (body.data.decision === 'handoff') {
-        const nextAt = now();
+      try {
         await store.emit({
-          type: 'approval.requested',
-          at: nextAt,
+          type: 'approval.decided',
+          at,
           runId,
-          record: {
-            id: `${record.id}-handoff-${Date.now().toString(36)}`,
+          nodeId,
+          approvalId: record.id,
+          decision,
+          actor,
+          reason,
+          resetNodeId: decision === 'reject' ? reworkTarget(run, node)?.id : undefined,
+          nextRecord: decision === 'handoff' ? {
+            id: `ap-${randomUUID()}`,
             runId,
             nodeId,
             status: 'pending',
-            requestedAt: nextAt,
-            handedOffTo: body.data.handoffTo,
-          },
+            requestedAt: at,
+            handedOffTo: handoffTo,
+          } : undefined,
         });
+      } finally {
+        deciding.delete(record.id);
       }
 
-      // 审批落盘后接着往下跑：批准放行下游，驳回则重跑被退回的节点
       void advance(runId);
-
       return deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent);
     },
   );
@@ -1741,7 +1752,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * SSE：编排层只发布，看板只订阅
    * ---------------------------------------------------------------- */
 
-  app.get('/events', async (request, reply) => {
+  const eventStreams = new Set<ServerResponse>();
+  app.addHook('preClose', async () => {
+    for (const response of eventStreams) {
+      response.end();
+    }
+  });
+
+  app.get('/events', async (_request, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1749,11 +1767,12 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+    eventStreams.add(reply.raw);
     reply.raw.write(': connected\n\n');
 
     const unsubscribe = store.bus.subscribe((event: OrchestratorEvent) => {
       const run = store.snapshot.runs[event.runId];
-      const view = run ? deriveEvents(run, [event])[0] : undefined;
+      const view = run ? deriveEvents(run, [event], resolveAgent)[0] : undefined;
       reply.raw.write(
         `data: ${JSON.stringify({ runId: event.runId, event: view, raw: event })}\n\n`,
       );
@@ -1763,7 +1782,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       reply.raw.write(': ping\n\n');
     }, 15_000);
 
-    request.raw.on('close', () => {
+    reply.raw.once('close', () => {
+      eventStreams.delete(reply.raw);
       clearInterval(heartbeat);
       unsubscribe();
     });
@@ -1818,7 +1838,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         if (!node || node.startedAt === undefined || node.finishedAt !== undefined) {
           continue;
         }
-        if (active.has(`${runId}\u0000${nodeId}`)) {
+        if (deriveNodeStatus(run, node) === 'waiting_approval' ||
+            active.has(`${runId}\u0000${nodeId}`)) {
           continue;
         }
         await store.emit({
@@ -1843,7 +1864,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     let pausedRuns = 0;
     let interruptedPlans = 0;
     for (const [runId, run] of Object.entries(store.snapshot.runs)) {
-      if (run.pausedAt !== undefined || run.completedAt !== undefined) {
+      if (run.pausedAt !== undefined || run.completedAt !== undefined ||
+          ['waiting_for_boss', 'failed'].includes(deriveRunStatus(run))) {
         continue;
       }
       if (run.frozenAt === undefined) {

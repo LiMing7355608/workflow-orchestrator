@@ -57,7 +57,7 @@ export type ReviewVerdict = 'approved' | 'changes_requested';
 
 export type ApprovalDecision = 'approve' | 'reject' | 'handoff';
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'handed_off';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'handed_off' | 'superseded';
 
 /** 拆解失败时带出来的一条具体问题（结构不合法、Agent 缺失等）。 */
 export interface PlanIssue {
@@ -119,6 +119,9 @@ export interface RunFacts {
    * 重新拆解（`plan.started`）会清掉它。
    */
   planFailure?: PlanFailure;
+  plannerAgentId?: string;
+  implementAgentId?: string;
+  reviewAgentId?: string;
   /**
    * 通过对话下发的图改动，累计追加。
    *
@@ -344,19 +347,30 @@ export type OrchestratorEvent =
       /** 这次实际生效的改动；被拒的改动不进事件，只走接口返回值 */
       changes: DagAmendment[];
     })
-  | (BaseEvent & { type: 'review.verdict'; nodeId: string; verdict: ReviewVerdict })
-  | (BaseEvent & { type: 'review.escalated'; nodeId: string })
+  | (BaseEvent & {
+      type: 'review.verdict';
+      nodeId: string;
+      verdict: ReviewVerdict;
+      /** 有此字段表示驳回仍阻塞下游。可与退回上游在同一事件生效。 */
+      rework?: { nodeId?: string };
+    })
+  | (BaseEvent & { type: 'review.escalated'; nodeId: string; record?: ApprovalRecord })
   | (BaseEvent & { type: 'approval.requested'; record: ApprovalRecord })
   | (BaseEvent & {
       type: 'approval.decided';
       approvalId: string;
+      /** 旧事件没有此字段，继续按其后续的 node.* 事件重放。 */
+      nodeId?: string;
+      resetNodeId?: string;
+      nextRecord?: ApprovalRecord;
       decision: ApprovalDecision;
       actor: string;
       reason?: string;
     })
   | (BaseEvent & {
       type: 'agent.output';
-      nodeId: string;
+      /** 任务图生成期间的输出由运行持有，此时还没有节点。 */
+      nodeId?: string;
       agentId: string;
       chunk: string;
       /**

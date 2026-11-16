@@ -280,6 +280,7 @@ export async function amendDag(
       previousIssues: issues,
     });
     const nodeId = `attempt-${attempt}`;
+    options.signal?.throwIfAborted();
 
     let cwd: string;
     try {
@@ -296,7 +297,7 @@ export async function amendDag(
     const argv = buildAgentArgv(agent, {
       prompt,
       workdir: cwd,
-      policy: 'default',
+      policy: 'accept-edits',
     });
 
     const parser = createParser(agent.launch.parser);
@@ -311,7 +312,7 @@ export async function amendDag(
 
     const result = await execution.runner.run(
       {
-        runId: 'planner',
+        runId: options.runId ?? workspaceRunId,
         nodeId,
         agentId: agent.id,
         bin: agent.launch.bin,
@@ -319,7 +320,8 @@ export async function amendDag(
         stdin: agent.launch.stdin ? prompt : undefined,
         cwd,
         timeoutMs: agent.timeoutMs,
-        policy: 'default',
+        signal: options.signal,
+        policy: 'accept-edits',
       },
       (chunk) => {
         collect(parser.push(chunk));
@@ -330,7 +332,11 @@ export async function amendDag(
 
     const submitted = await readSubmittedPlan(cwd);
     // 读完再释放工作区，顺序不能反
-    await execution.workspace.release('planner', nodeId).catch(() => {});
+    await execution.workspace.release(workspaceRunId, nodeId).catch(() => {});
+    options.signal?.throwIfAborted();
+    if (result.cancelled) {
+      throw new DagGenerationError('规划执行已取消', attempt, issues);
+    }
 
     if (submitted === undefined) {
       if (!result.ok && attempt === maxAttempts) {

@@ -3,6 +3,7 @@ import { cn } from '../../lib/cn';
 interface SegmentedOption<T extends string> {
   value: T;
   label: string;
+  disabled?: boolean;
 }
 
 interface SegmentedProps<T extends string> {
@@ -40,10 +41,12 @@ export function Segmented<T extends string>({
             key={option.value}
             type="button"
             aria-pressed={active}
+            disabled={option.disabled}
             onClick={() => onChange(option.value)}
             className={cn(
               'h-7 whitespace-nowrap rounded-md px-2.5 text-[11px] font-medium transition-colors duration-150',
               fill && 'flex-1',
+              option.disabled && 'cursor-not-allowed opacity-45',
               active
                 ? 'bg-subtle text-ink'
                 : 'text-muted hover:bg-subtle/60 hover:text-ink',

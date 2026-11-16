@@ -8,7 +8,6 @@ import type {
 import {
   createParser,
   type AgentEvent,
-  type AgentOutputParser,
   type AgentUsage,
 } from './parsers.js';
 import { DEFAULT_CONCURRENCY, isRunSettled, pendingHumanWork, pickBatch } from './scheduler.js';
@@ -111,12 +110,10 @@ export interface AdvanceResult {
 }
 
 /** 审查节点要靠输出末尾的裁决标记决定分支，格式在这里收敛成一处。 */
-export function parseVerdict(output: string): ReviewVerdict {
-  const tail = output.slice(-2000).toUpperCase();
-  if (tail.includes('VERDICT: CHANGES_REQUESTED') || tail.includes('VERDICT:CHANGES_REQUESTED')) {
-    return 'changes_requested';
-  }
-  return 'approved';
+export function parseVerdict(output: string): ReviewVerdict | undefined {
+  const lastLine = output.trim().split(/\r?\n/).at(-1)?.trim();
+  const verdict = /^VERDICT:\s*(APPROVED|CHANGES_REQUESTED)$/i.exec(lastLine ?? '')?.[1];
+  return verdict?.toLowerCase() as ReviewVerdict | undefined;
 }
 
 /**
@@ -228,9 +225,24 @@ async function buildPrompt(
 }
 
 function upstreamOf(run: RunFacts, node: NodeFacts): NodeFacts[] {
-  return node.dependsOn
-    .map((id) => run.nodes[id])
-    .filter((item): item is NodeFacts => Boolean(item));
+  const seen = new Set<string>();
+  const ordered: NodeFacts[] = [];
+  function visit(id: string): void {
+    const upstream = run.nodes[id];
+    if (!upstream || seen.has(id)) {
+      return;
+    }
+    seen.add(id);
+    upstream.dependsOn.forEach(visit);
+    ordered.push(upstream);
+  }
+  node.dependsOn.forEach(visit);
+  return ordered;
+}
+
+export function reworkTarget(run: RunFacts, node: NodeFacts): NodeFacts | undefined {
+  const targets = upstreamOf(run, node).filter((item) => item.type === 'implement');
+  return targets.find((item) => node.dependsOn.includes(item.id)) ?? targets.at(-1);
 }
 
 /**
@@ -269,21 +281,11 @@ function formatUsage(usage: AgentUsage | undefined): string | undefined {
  * onChunk 立刻返回，队列保证事件落盘顺序与产生顺序一致，错误则攒起来由
  * `flush` 在 Agent 结束后统一抛出——既不阻塞流，也不 fire-and-forget 到无人接管。
  */
-function createEventRelay(
-  deps: AdvanceDeps,
-  target: {
-    runId: string;
-    nodeId: string;
-    agentId: string;
-    parserId: AgentProfile['launch']['parser'];
-  },
-): {
-  parser: AgentOutputParser;
-  forward: (events: AgentEvent[]) => void;
-  flush: () => Promise<void>;
-} {
+export function createAgentEventRelay(
+  deps: Pick<AdvanceDeps, 'emit' | 'now'>,
+  target: { runId: string; agentId: string; nodeId?: string },
+) {
   const { runId, nodeId, agentId } = target;
-  const parser = createParser(target.parserId);
 
   // 串行队列：保证落盘顺序 == 产生顺序
   let queue: Promise<void> = Promise.resolve();
@@ -304,7 +306,7 @@ function createEventRelay(
       const at = deps.now();
 
       if (item.kind === 'session') {
-        if (!item.sessionId || item.sessionId === lastSessionId) {
+        if (!nodeId || !item.sessionId || item.sessionId === lastSessionId) {
           continue;
         }
         lastSessionId = item.sessionId;
@@ -345,7 +347,7 @@ function createEventRelay(
         agentId,
         chunk: chunk.slice(0, OUTPUT_CHUNK_LIMIT),
         kind: item.kind,
-        toolName: item.toolName,
+        toolName: item.toolName?.slice(0, OUTPUT_CHUNK_LIMIT),
       });
     }
   };
@@ -361,7 +363,7 @@ function createEventRelay(
     }
   };
 
-  return { parser, forward, flush };
+  return { forward, flush };
 }
 
 /**
@@ -381,16 +383,10 @@ function integrationBranchOf(runId: string): string {
  * 半成品，合进去会把别人的正确改动连带污染。顺序取 nodeOrder，
  * 保证同一张图重放多次得到相同的合并顺序。
  */
-function mergeCandidates(run: RunFacts): string[] {
-  return run.nodeOrder.filter((id) => {
-    const item = run.nodes[id];
-    return (
-      item !== undefined &&
-      item.type === 'implement' &&
-      Boolean(item.finishedAt) &&
-      !item.failureReason
-    );
-  });
+function mergeCandidates(run: RunFacts, node: NodeFacts): string[] {
+  return upstreamOf(run, node)
+    .filter((item) => item.type === 'implement' && item.finishedAt && !item.failureReason)
+    .map((item) => item.id);
 }
 
 /**
@@ -422,7 +418,15 @@ async function executeMerge(
     return;
   }
 
-  const nodeIds = mergeCandidates(run);
+  const blocked = upstreamOf(run, node).find((upstream) => !upstream.finishedAt || upstream.failureReason);
+  if (blocked) {
+    await deps.emit({
+      type: 'node.failed', at: deps.now(), runId, nodeId: node.id,
+      reason: `合并前需完成上游节点：${blocked.title}`,
+    });
+    return;
+  }
+  const nodeIds = mergeCandidates(run, node);
   if (nodeIds.length === 0) {
     // 没有上游改动可合并不等于「合成功了」。这种情况多半是图写错了
     // （合并节点没声明 dependsOn），必须报出来而不是悄悄放行。
@@ -579,7 +583,8 @@ async function executeNode(
 
   // 审查节点必须用最保守的权限档位
   const policy = node.type === 'review' ? 'default' : 'accept-edits';
-  const prompt = await buildPrompt(run, node, upstreamOf(run, node), deps);
+  const upstream = upstreamOf(run, node);
+  const prompt = await buildPrompt(run, node, upstream, deps);
 
   // 续跑判定只能在这里做：此刻 node 是「这一轮」的事实快照，
   // attempts 已经反映了被退回的次数，nativeSessionId 也已经是上一轮捕获到的值。
@@ -611,7 +616,10 @@ async function executeNode(
 
   let cwd: string;
   try {
-    cwd = await workspace.prepare(runId, node.id);
+    const upstreamIds = upstream
+      .filter((item) => item.type === 'implement' && item.finishedAt && !item.failureReason)
+      .map((item) => item.id);
+    cwd = await workspace.prepare(runId, node.id, upstreamIds);
   } catch (error) {
     await deps.emit({
       type: 'node.failed',
@@ -623,7 +631,11 @@ async function executeNode(
     return;
   }
 
-  await deps.emit({ type: 'node.started', at: deps.now(), runId, nodeId: node.id });
+  if (deps.signal?.aborted) {
+    return 'interrupted';
+  }
+  const startedAt = deps.now();
+  await deps.emit({ type: 'node.started', at: startedAt, runId, nodeId: node.id });
 
   const argv = buildAgentArgv(agent, {
     prompt,
@@ -635,13 +647,20 @@ async function executeNode(
 
   // profile 里声明的 parser 就是「这台 CLI 的输出怎么读」的唯一事实源。
   // 解析器与事件转发在启动前后建好，Agent 一开口就能按结构入流。
-  const relay = createEventRelay(deps, {
-    runId,
-    nodeId: node.id,
-    agentId: agent.id,
-    parserId: agent.launch.parser,
-  });
+  const parser = createParser(agent.launch.parser);
+  const relay = createAgentEventRelay(deps, { runId, nodeId: node.id, agentId: agent.id });
 
+  let reviewOutput = '';
+  const forward = (events: ReturnType<typeof parser.push>): void => {
+    if (node.type === 'review') {
+      for (const event of events) {
+        if (event.kind === 'text' || event.kind === 'result') {
+          reviewOutput = (reviewOutput + '\n' + (event.text ?? '')).slice(-4000);
+        }
+      }
+    }
+    relay.forward(events);
+  };
   const result = await deps.runner.run(
     {
       runId,
@@ -653,18 +672,26 @@ async function executeNode(
       cwd,
       timeoutMs: agent.timeoutMs,
       policy,
+      signal: deps.signal,
     },
     (chunk) => {
-      // 同步回调里只做解析与排队，绝不 await（理由见 createEventRelay）
-      relay.forward(relay.parser.push(chunk));
+      // 同步回调里只做解析与排队，绝不 await（理由见 createAgentEventRelay）
+      forward(parser.push(chunk));
     },
   );
 
   // 收尾：冲掉缓冲区里不完整的行，再把排队的事件全部落盘。
   // 必须放在失败判定之前——超时或非零退出时，Agent 最后说的话往往正是线索。
-  relay.forward(relay.parser.finish());
+  forward(parser.finish());
   await relay.flush();
 
+  if (!result.cancelled &&
+      deps.getRun(runId)?.nodes[node.id]?.startedAt !== startedAt) {
+    if (node.type === 'review') {
+      await workspace.release(runId, node.id).catch(() => {});
+    }
+    return;
+  }
   if (!result.ok) {
     // 被用户停下 ≠ 执行失败，两者必须落成不同的事件。
     //
@@ -692,7 +719,9 @@ async function executeNode(
           reason: '运行被用户停止',
         });
       }
-      await workspace.release(runId, node.id).catch(() => {});
+      if (node.type !== 'implement' || !workspace.publish) {
+        await workspace.release(runId, node.id).catch(() => {});
+      }
       return 'interrupted';
     }
 
@@ -707,56 +736,60 @@ async function executeNode(
         ? `Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
         : result.error ?? `退出码 ${result.exitCode ?? '未知'}`,
     });
-    await workspace.release(runId, node.id).catch(() => {});
-    return;
-  }
-
-  if (node.type === 'review') {
-    const verdict = parseVerdict(result.output);
-    await deps.emit({ type: 'review.verdict', at: deps.now(), runId, nodeId: node.id, verdict });
-
-    // 先给审查节点本身落完成事实，再决定要不要回退。
-    // 顺序反过来的话，回退传播时它还没完成，不会被一并作废，
-    // 结果就是上游重跑完了却再也不会重审。
-    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
-    await workspace.release(runId, node.id).catch(() => {});
-
-    if (verdict === 'changes_requested') {
-      const attempt = node.attempts + 1;
-      if (attempt > node.maxAttempts) {
-        // 回退次数用尽，交给人决定继续回修还是接受现状
-        await deps.emit({
-          type: 'review.escalated',
-          at: deps.now(),
-          runId,
-          nodeId: node.id,
-        });
-        return;
-      }
-      const target = node.dependsOn[0];
-      if (target) {
-        await deps.emit({
-          type: 'node.reset',
-          at: deps.now(),
-          runId,
-          nodeId: target,
-          reason: `审查驳回（第 ${attempt} 次）`,
-        });
-      }
+    if (node.type !== 'implement' || !workspace.publish) {
+      await workspace.release(runId, node.id).catch(() => {});
     }
     return;
   }
 
-  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+  if (node.type === 'review') {
+    const verdict = parseVerdict(reviewOutput.trim() ? reviewOutput : result.output);
+    await workspace.release(runId, node.id).catch(() => {});
+    if (!verdict) {
+      await deps.emit({
+        type: 'node.failed', at: deps.now(), runId, nodeId: node.id,
+        reason: '审查缺少有效的最终裁决（APPROVED 或 CHANGES_REQUESTED）',
+      });
+      return;
+    }
+    if (verdict === 'approved') {
+      await deps.emit({ type: 'review.verdict', at: deps.now(), runId, nodeId: node.id, verdict });
+      await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+      return;
+    }
 
-  // 实现节点的产物要在 release 之前采集——工作区一释放，
-  // 那条分支和目录就没了，diff 再也拿不回来。
-  // 采集/存盘失败只意味着下游看不到 diff，不影响本次执行的成功判定。
-  if (node.type === 'implement') {
-    await captureArtifact(runId, node.id, workspace, deps);
+    const target = reworkTarget(run, node);
+    const attempt = node.attempts + 1;
+    const at = deps.now();
+    await deps.emit({
+      type: 'review.verdict', at, runId, nodeId: node.id, verdict,
+      rework: target && attempt <= node.maxAttempts ? { nodeId: target.id } : {},
+    });
+    if (!target || attempt > node.maxAttempts) {
+      await deps.emit({
+        type: 'review.escalated', at, runId, nodeId: node.id,
+        record: { id: `ap-${node.id}-${Date.parse(at)}`, runId, nodeId: node.id, status: 'pending', requestedAt: at },
+      });
+    }
+    return;
   }
 
-  await workspace.release(runId, node.id).catch(() => {});
+  if (node.type === 'implement') {
+    try {
+      await workspace.publish?.(runId, node.id);
+      await captureArtifact(runId, node.id, workspace, deps);
+    } catch (error) {
+      await deps.emit({
+        type: 'node.failed', at: deps.now(), runId, nodeId: node.id,
+        reason: `节点产物保存失败：${(error as Error).message}`,
+      });
+      return;
+    }
+  }
+  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+  if (node.type !== 'implement' || !workspace.publish) {
+    await workspace.release(runId, node.id).catch(() => {});
+  }
 }
 
 /**
@@ -939,9 +972,15 @@ export async function advanceRun(
       return { executed, stopped: 'idle' };
     }
 
-    const outcomes = await Promise.all(
-      batch.map((node) => executeNode(runId, node, deps)),
-    );
+    const outcomes = await Promise.all(batch.map(async (node) => {
+      const key = nodeInFlightKey(runId, node.id);
+      deps.nodeInFlight?.add(key);
+      try {
+        return await executeNode(runId, node, deps);
+      } finally {
+        deps.nodeInFlight?.delete(key);
+      }
+    }));
     executed.push(...batch.map((node) => node.id));
 
     // 这一批里有节点是被外部终止的：停在这里。

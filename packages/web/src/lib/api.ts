@@ -245,15 +245,29 @@ export interface ApprovalDecisionInput {
   handoffTo?: string;
 }
 
-export function decideApproval(
+export async function decideApproval(
   runId: string,
   nodeId: string,
   input: ApprovalDecisionInput,
-): Promise<WorkflowRunDetail | null> {
-  return requestJson<WorkflowRunDetail>(
-    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/approval`,
-    { method: 'POST', body: JSON.stringify(input) },
-  );
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const fallback = '审批没有提交，请检查后端连接。';
+  try {
+    const response = await fetch(
+      `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/approval`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    );
+    if (response.ok) {
+      return { ok: true };
+    }
+    const body = await response.json() as { message?: string };
+    return { ok: false, message: body.message ?? fallback };
+  } catch {
+    return { ok: false, message: fallback };
+  }
 }
 
 /* ------------------------------------------------------------------ *

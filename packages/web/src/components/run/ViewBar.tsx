@@ -15,6 +15,7 @@ interface ViewBarProps {
   onChange: (value: RunView) => void;
   nodeCount: number;
   eventCount: number;
+  planning?: boolean;
 }
 
 export function ViewBar({
@@ -22,12 +23,15 @@ export function ViewBar({
   onChange,
   nodeCount,
   eventCount,
+  planning = false,
 }: ViewBarProps) {
   return (
     <div className="flex h-10 shrink-0 items-center justify-between gap-4 border-b border-line bg-canvas px-6 max-[900px]:px-4">
       <div className="flex min-w-0 items-center gap-3">
         <Segmented
-          options={viewOptions}
+          options={planning
+            ? viewOptions.map((option) => ({ ...option, disabled: option.value !== 'events' }))
+            : viewOptions}
           value={value}
           onChange={onChange}
           ariaLabel="运行视图"

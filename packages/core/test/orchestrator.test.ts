@@ -69,9 +69,6 @@ function harness(
     emit: async (event) => {
       events.push(event);
       state = reduce(state, event);
-      if (event.type === 'approval.requested') {
-        state = { ...state, approvals: [...state.approvals, event.record] };
-      }
     },
     runner: {
       run: async (request, onChunk) => {
@@ -122,7 +119,9 @@ describe('编排循环', () => {
     expect(final?.nodes['review-a']?.verdict).toBe('approved');
 
     const kinds = h.events.map((event) => event.type);
-    expect(kinds).toContain('node.reset');
+    expect(h.events).toContainEqual(expect.objectContaining({
+      type: 'review.verdict', rework: { nodeId: 'impl-a' },
+    }));
     expect(kinds.at(-1)).toBe('run.completed');
   });
 
@@ -171,10 +170,24 @@ describe('编排循环', () => {
 
     const escalated = h.events.filter((event) => event.type === 'review.escalated');
     expect(escalated).toHaveLength(1);
+    expect(h.state().approvals).toEqual([expect.objectContaining({ nodeId: 'review-a', status: 'pending' })]);
+    expect(h.state().runs['run-t']?.nodes['review-a']?.finishedAt).toBeUndefined();
 
     // 只回退一次（maxAttempts=1），第二次直接升级
-    const resets = h.events.filter((event) => event.type === 'node.reset');
+    const resets = h.events.filter((event) => event.type === 'review.verdict' && event.rework?.nodeId);
     expect(resets).toHaveLength(1);
+  });
+
+  it('审查缺少明确的最终裁决，阻止后续节点', async () => {
+    const run = buildRun([
+      node({ id: 'impl', type: 'implement', agentId: 'claude' }),
+      node({ id: 'review', type: 'review', agentId: 'opencode', dependsOn: ['impl'] }),
+      node({ id: 'gate', type: 'approval', dependsOn: ['review'] }),
+    ]);
+    const h = harness(run, () => '输出里有 VERDICT: APPROVED 字样，但末尾没有正式裁决。');
+    await advanceRun('run-t', h.deps);
+    expect(h.state().runs['run-t']?.nodes.review?.failureReason).toMatch(/缺少有效的最终裁决/);
+    expect(h.state().approvals).toHaveLength(0);
   });
 
   it('审批节点只落等待记录就退出，不阻塞进程', async () => {

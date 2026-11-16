@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   AgentCancelRequest,
@@ -12,6 +12,7 @@ import {
   PLANNER_PROMPT_MARKER,
   PLAN_FILENAME,
   extractCurrentDagFromPrompt,
+  type Dag,
 } from '@orchestrator/planner';
 import { resolveExecutable } from './probe.js';
 import { isPidAlive, killProcessTree } from './process-tree.js';
@@ -207,6 +208,9 @@ export class SpawnAgentRunner implements AgentRunner {
     onChunk: (chunk: string) => void,
   ): Promise<AgentRunResult> {
     const resolved = await resolveExecutable(request.bin);
+    if (request.signal?.aborted) {
+      return { ok: false, exitCode: null, output: '', cancelled: true };
+    }
     if (!resolved) {
       return {
         ok: false,
@@ -362,7 +366,7 @@ const delay = (ms: number): Promise<void> =>
  * 从 prompt 里的 agentId 白名单取真实可用的 Agent，保证产出的 DAG 能过校验——
  * 回放器如果给出一张不合法的图，演示就会卡在「规划失败」而不是展示编排本身。
  */
-function buildMockPlan(prompt: string): string {
+function buildMockPlan(prompt: string, includeDelivery: boolean): string {
   const match = /白名单：([^\n]*)/.exec(prompt);
   const ids = (match?.[1] ?? '')
     .split(/[,，、\s]+/)
@@ -380,7 +384,7 @@ function buildMockPlan(prompt: string): string {
   const goalText = (/^GOAL: (.+)$/m.exec(prompt)?.[1] ?? '').trim();
   const goalHead = goalText.split('补充要求')[0]?.trim() ?? '';
   const isDoc = /文案|文档|撰写|写作/.test(goalHead);
-  const nodes = isDoc
+  const nodes: Dag['nodes'] = isDoc
     ? [
         {
           id: 'impl-doc',
@@ -400,7 +404,7 @@ function buildMockPlan(prompt: string): string {
           title: '实现核心流程',
           description: '按目标实现主路径并自测',
           dependsOn: [],
-          files: ['src/core/**'],
+          files: ['src/impl-core.md'],
           agentId: primary,
           maxAttempts: 3,
         },
@@ -415,6 +419,29 @@ function buildMockPlan(prompt: string): string {
           maxAttempts: 3,
         },
       ];
+
+  if (includeDelivery && !isDoc) {
+    nodes.splice(1, 0, {
+      id: 'impl-integration',
+      type: 'implement',
+      title: '接入核心流程',
+      description: '读取核心节点的产物并生成集成说明',
+      dependsOn: ['impl-core'],
+      files: ['src/impl-integration.md'],
+      agentId: primary,
+      maxAttempts: 3,
+    });
+    nodes[2]!.dependsOn = ['impl-integration'];
+  }
+  if (includeDelivery) {
+    const finalTask = nodes.at(-1)!;
+    nodes.push(
+      { id: 'approval', type: 'approval', title: '人工验收', description: '确认审查和交付结果',
+        dependsOn: [finalTask.id], files: [], maxAttempts: 3 },
+      { id: 'merge', type: 'route', title: '合并交付', description: '将节点产物汇入集成分支',
+        dependsOn: ['approval'], files: [], action: 'merge', maxAttempts: 3 },
+    );
+  }
 
   return JSON.stringify(
     {
@@ -501,6 +528,8 @@ interface ReplaySlot {
 const CANCELLED_NOTE = '（回放已取消）\n';
 
 export class MockAgentRunner implements AgentRunner {
+  constructor(private readonly includeDelivery = false) {}
+
   private readonly reviewAttempts = new Map<string, number>();
 
   /**
@@ -532,6 +561,9 @@ export class MockAgentRunner implements AgentRunner {
     request: AgentRunRequest,
     onChunk: (chunk: string) => void,
   ): Promise<AgentRunResult> {
+    if (request.signal?.aborted) {
+      return this.cancelledResult('');
+    }
     const key = activeKey(request.runId, request.nodeId);
     const slot: ReplaySlot = { nodeId: request.nodeId, cancelled: false };
     this.replaying.set(key, slot);
@@ -600,7 +632,7 @@ export class MockAgentRunner implements AgentRunner {
       if (slot.cancelled) {
         return this.cancelledResult('');
       }
-      const json = buildMockPlan(haystack);
+      const json = buildMockPlan(haystack, this.includeDelivery);
       const output = `\`\`\`json\n${json}\n\`\`\``;
       onChunk(output);
       return { ok: true, exitCode: 0, output };
@@ -622,15 +654,18 @@ export class MockAgentRunner implements AgentRunner {
     // 「被审变更」在演示与 CI 里都有真实内容，而不是一条空链路。
     if (!isReview) {
       try {
-        const dir = join(request.cwd, 'src');
+        const dir = join(request.cwd, request.nodeId === 'impl-doc' ? 'docs' : 'src');
         await mkdir(dir, { recursive: true });
+        const upstream = this.includeDelivery && request.nodeId === 'impl-integration'
+          ? await readFile(join(dir, 'impl-core.md'), 'utf8')
+          : '';
         await writeFile(
           join(dir, `${request.nodeId}.md`),
-          `# ${request.nodeId}\n\n由回放执行器生成，用于演示产物采集与审查上下文。\n`,
+          `# ${request.nodeId}\n\n由回放执行器生成，用于演示产物采集与审查上下文。\n${upstream}`,
           'utf8',
         );
-      } catch {
-        // 工作区不可写时不影响回放本身
+      } catch (error) {
+        return { ok: false, exitCode: 1, output: '', error: (error as Error).message };
       }
     }
 

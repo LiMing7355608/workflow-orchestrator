@@ -11,8 +11,8 @@ export default defineConfig({
       ignored: ['**/.*.tmpdir/**', '**/*.tmp'],
     },
     proxy: {
-      '/api': { target: 'http://localhost:3000', changeOrigin: true },
-      '/events': { target: 'http://localhost:3000', changeOrigin: true },
+      '/api': { target: 'http://127.0.0.1:3000', changeOrigin: true },
+      '/events': { target: 'http://127.0.0.1:3000', changeOrigin: true },
     },
   },
 });
