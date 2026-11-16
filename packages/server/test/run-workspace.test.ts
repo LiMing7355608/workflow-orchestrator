@@ -146,6 +146,34 @@ async function settle(ms = 250): Promise<void> {
   await new Promise((resolveTimer) => setTimeout(resolveTimer, ms));
 }
 
+/**
+ * 轮询到节点进入终态。
+ *
+ * 别用固定睡眠断言「已经跑完」：那条断言写的是时间，不是行为。执行链路一变长
+ * （哪怕只是多了一次 git 调用），固定睡眠就先到点、断言先失败，而功能其实是
+ * 好的。轮询到终态才是在断言真正在意的东西。
+ */
+async function waitForStatus(
+  app: FastifyInstance,
+  runId: string,
+  nodeId: string,
+  done: (status: string | undefined) => boolean,
+  timeoutMs = 10_000,
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  let status: string | undefined;
+  while (Date.now() < deadline) {
+    const response = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
+    const body = response.json() as { nodes: Array<{ id: string; status: string }> };
+    status = body.nodes.find((item) => item.id === nodeId)?.status;
+    if (done(status)) {
+      return status;
+    }
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 50));
+  }
+  return status;
+}
+
 /** 现有运行的条数：用来证明被拒的请求一条事实都没留下。 */
 function runCount(store: RunStore): number {
   return Object.keys(store.snapshot.runs).length;
@@ -279,13 +307,16 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
      * `git worktree add` 是从**目标仓库**里建出来的，一旦它失败，节点会落成
      * `工作区准备失败`。所以「completed」这一条同时证明了三件事：目标目录被
      * 用上了、仓库确实是 git 仓库、worktree 建在了编排器自己的 data 下。
+     *
+     * 轮询到终态而不是睡固定时长：这条断言在意的是结果，不是耗时。
      */
-    await settle(600);
-    const after = await app.inject({ method: 'GET', url: `/api/runs/${created.id}` });
-    const node = (after.json() as { nodes: Array<{ id: string; status: string }> }).nodes.find(
-      (item) => item.id === 'impl-a',
+    const status = await waitForStatus(
+      app,
+      created.id,
+      'impl-a',
+      (value) => value === 'completed' || value === 'failed',
     );
-    expect(node?.status).toBe('completed');
+    expect(status).toBe('completed');
 
     // 用户仓库里不该留下任何编排器的东西
     expect(existsSync(join(target, '.worktrees'))).toBe(false);
