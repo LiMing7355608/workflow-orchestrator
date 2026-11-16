@@ -1,7 +1,7 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { cn } from '../../lib/cn';
 import { formatDuration } from '../../lib/format';
-import { nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
+import { displayNodeStatus, nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
 import type { WorkflowNode } from '../../types/workflow';
 import { AgentChip } from '../agents/AgentChip';
 
@@ -17,7 +17,9 @@ export function WorkflowNodeCard({
 }: NodeProps<WorkflowFlowNode>) {
   const node = data.node;
   const typeMeta = nodeTypeMeta[node.type];
-  const statusMeta = nodeStatusMeta[node.status];
+  // displayNodeStatus：被用户停止的节点后端仍给 ready（它随时可被重跑），
+  // 但卡片上要说「已停止」而不是「就绪」——见 lib/workflow-meta.ts
+  const statusMeta = nodeStatusMeta[displayNodeStatus(node)];
   const Icon = typeMeta.icon;
 
   return (

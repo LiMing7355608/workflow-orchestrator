@@ -1,7 +1,9 @@
 import {
   ArrowRight,
+  Bot,
   ChevronRight,
   FileText,
+  FolderOpen,
   ImagePlus,
   Info,
   Paperclip,
@@ -11,18 +13,23 @@ import {
 } from 'lucide-react';
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
 } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Field } from '../components/ui/Field';
 import { Segmented } from '../components/ui/Segmented';
+import { seedAgents } from '../data/agents';
+import { createRun, fetchAgents, fetchRuntime, pickDirectory } from '../lib/api';
 import { cn } from '../lib/cn';
 import { formatFileSize } from '../lib/format';
+import { useApiResource } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
+import type { AgentProfile } from '../types/agent';
 
 type Granularity = 'coarse' | 'medium' | 'fine';
 type Parallelism = '2' | '4' | '6';
@@ -60,6 +67,20 @@ function createId() {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
+}
+
+/**
+ * 判一个路径是不是绝对路径。
+ *
+ * 三种写法都要认：Windows 盘符（`C:\` 或 `C:/`）、UNC（`\\server\share`）、
+ * POSIX 的 `/`。这里只是提交前的基本校验——真正的判据在后端（目录存在吗、
+ * 是 git 仓库吗），前端拦的是明显填错的那种：相对路径、空格、空串。
+ * 之所以要拦，是因为「目录不对」在后端是 400，等提交完再报太晚了。
+ */
+function isAbsolutePath(value: string): boolean {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/')
+  );
 }
 
 function AttachmentCard({
@@ -104,17 +125,98 @@ function AttachmentCard({
   );
 }
 
+function AgentSelect({
+  label,
+  hint,
+  value,
+  onChange,
+  agents,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  agents: AgentProfile[];
+}) {
+  return (
+    <Field label={label} hint={hint}>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={label}
+        className="h-8 w-full rounded-lg border border-line bg-surface px-2.5 text-[11px] text-ink transition-colors focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
+      >
+        {agents.length === 0 ? <option value="">没有可用的 Agent</option> : null}
+        {agents.map((agent) => (
+          <option key={agent.id} value={agent.id}>
+            {agent.label}
+            {agent.availability === 'ready' ? '' : '（未实测）'}
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
 export function NewRunPage() {
   usePageTitle('新建运行');
-
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const navigate = useNavigate();
   const [granularity, setGranularity] = useState<Granularity>('medium');
   const [parallelism, setParallelism] = useState<Parallelism>('4');
   const [reviewRounds, setReviewRounds] = useState<ReviewRounds>('2');
+
+  // 三个角色的 Agent 在这里就定下来，而不是等 Planner 自己挑
+  const [plannerAgentId, setPlannerAgentId] = useState('');
+  const [implementAgentId, setImplementAgentId] = useState('');
+  const [reviewAgentId, setReviewAgentId] = useState('');
+  /**
+   * 目标目录：Agent 干活的地方，成果会落在这里。
+   *
+   * 初始为空，等 /api/runtime 给了默认值再填。不在前端猜默认值——它取决于
+   * 服务进程的启动目录与 AGENT_TARGET_DIR，前端一概不知道。
+   */
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
+  /** 原生目录选择框正在弹（它会阻塞到用户点确定或取消） */
+  const [picking, setPicking] = useState(false);
+
+  const { data: agents } = useApiResource(fetchAgents, seedAgents);
+  const { data: runtime } = useApiResource(fetchRuntime, null);
+
+  useEffect(() => {
+    // 只在用户还没输入过时填默认值：已经手填的内容不能被后台返回盖掉
+    if (runtime?.defaultWorkspaceRoot) {
+      setWorkspaceRoot((prev) => prev || runtime.defaultWorkspaceRoot);
+    }
+  }, [runtime]);
+
+  const usableAgents = useMemo(() => {
+    const rank = (agent: AgentProfile): number =>
+      agent.availability === 'ready' ? 2 : 1;
+    return agents
+      .filter((agent) => agent.enabled && agent.availability !== 'missing')
+      .slice()
+      .sort((left, right) => rank(right) - rank(left));
+  }, [agents]);
+
+  // 默认值：拆图优先给能结构化输出的，审查尽量与实现不同人
+  useEffect(() => {
+    if (usableAgents.length === 0) {
+      return;
+    }
+    const structured = usableAgents.find((agent) => agent.capabilities.structured);
+    const primary = structured?.id ?? usableAgents[0]!.id;
+    const secondary = usableAgents.find((agent) => agent.id !== primary)?.id ?? primary;
+
+    setPlannerAgentId((prev) => prev || primary);
+    setImplementAgentId((prev) => prev || primary);
+    setReviewAgentId((prev) => prev || secondary);
+  }, [usableAgents]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<Attachment[]>([]);
@@ -136,7 +238,7 @@ export function NewRunPage() {
       return;
     }
 
-    setSubmitted(false);
+    setSubmitError(null);
 
     const incoming = Array.from(fileList);
     const accepted: Attachment[] = [];
@@ -168,7 +270,7 @@ export function NewRunPage() {
   }
 
   function removeAttachment(id: string) {
-    setSubmitted(false);
+    setSubmitError(null);
     setAttachments((prev) => {
       const target = prev.find((item) => item.id === id);
       if (target?.previewUrl) {
@@ -184,7 +286,78 @@ export function NewRunPage() {
     addFiles(event.dataTransfer.files);
   }
 
-  const canSubmit = text.trim().length > 0 || attachments.length > 0;
+  const canSubmit = text.trim().length > 0;
+
+  /**
+   * 目标目录的就地校验结果。
+   *
+   * 空串单独说一句：默认值没取到时留空提交，等于让后端用它的默认目录跑，
+   * 而用户以为自己指定了地方——这正是这次要修的那个缺陷。
+   */
+  const trimmedWorkspaceRoot = workspaceRoot.trim();
+  const workspaceRootError =
+    trimmedWorkspaceRoot.length === 0
+      ? '请填一个目标目录：Agent 的成果会落在这里'
+      : !isAbsolutePath(trimmedWorkspaceRoot)
+        ? '需要绝对路径，例如 D:\\projects\\calculator'
+        : null;
+
+  async function handleSubmit() {
+    if (!canSubmit || submitting || workspaceRootError) {
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+
+    // 这三个设置目前没有对应的后端参数，拼进目标文本交给 Planner 参考，
+    // 好过做一个看起来生效、实际被丢弃的开关
+    const granularityLabel =
+      granularityOptions.find((option) => option.value === granularity)?.label ??
+      granularity;
+    const settings = [
+      `分解粒度：${granularityLabel}`,
+      `并行度：${parallelism}`,
+      `审查轮次：${reviewRounds} 轮`,
+    ].join('；');
+
+    const goal = `${text.trim()}\n\n补充要求：${settings}`;
+    const title = text.trim().split('\n')[0]?.slice(0, 24) || '未命名运行';
+
+    const outcome = await createRun({
+      title,
+      goal,
+      // 目录必须随创建请求带走：运行一旦建好，目标仓库就是它的事实了
+      workspaceRoot: trimmedWorkspaceRoot,
+      plannerAgentId: plannerAgentId || undefined,
+      implementAgentId: implementAgentId || undefined,
+      reviewAgentId: reviewAgentId || undefined,
+    });
+    setSubmitting(false);
+
+    if (!outcome.ok) {
+      const { failure } = outcome;
+      // plan_rejected / planner_failed 只可能来自旧后端：拆解挪到后台之后，
+      // 创建请求本身只会因为 body 不合法（400）失败，那两种情况的下场是
+      // 详情页里的 failed 状态，不是这里的一句话。
+      //
+      // workspace_not_found / workspace_not_git 是这次新增的两个 400：后端把
+      // 具体路径与原因写在 message 里，原样显示即可，不要在界面上改成一句
+      // 笼统的「创建失败」——用户需要知道自己填的哪个路径不能用。
+      const detail =
+        failure.error === 'plan_rejected'
+          ? `规划没通过校验：${failure.message ?? '未知原因'}`
+          : failure.error === 'planner_failed'
+            ? `规划 Agent 执行失败：${failure.message ?? '未知原因'}`
+            : (failure.message ?? failure.error);
+      setSubmitError(detail);
+      return;
+    }
+
+    // 拿到 id 就跳转，不等拆解完成：后端已经把「这次创建」落成事实，
+    // 任务图由它在后台生成，详情页通过事件流收到后自己长出来。留在这里等
+    // 的唯一结果是用户对着按钮转圈几十秒——之前那版正是这么做的。
+    navigate(`/runs/${outcome.run.id}`);
+  }
 
   return (
     <div className="mx-auto max-w-[1180px] px-6 py-7 max-[900px]:px-4">
@@ -222,7 +395,7 @@ export function NewRunPage() {
               value={text}
               onChange={(event) => {
                 setText(event.target.value);
-                setSubmitted(false);
+                setSubmitError(null);
               }}
               placeholder="例如：做一个面向大学生的二手交易平台，本期需要商品发布、搜索、站内沟通和举报处理；支持微信登录，先覆盖校内交易。"
               aria-label="产品设计规格"
@@ -271,15 +444,13 @@ export function NewRunPage() {
               <p className="mt-2 text-[11px] text-danger">{error}</p>
             ) : null}
 
-            {submitted ? (
-              <div className="mt-3 flex items-start gap-2 rounded-lg border border-accent/20 bg-accent-soft px-3 py-2 text-[11px] leading-5 text-accent">
+            {submitError ? (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-danger/20 bg-danger-soft px-3 py-2 text-[11px] leading-5 text-danger">
                 <Info
                   className="mt-0.5 h-3.5 w-3.5 shrink-0"
                   strokeWidth={1.8}
                 />
-                <span>
-                  输入已就绪。PM Agent 的任务分解与编排生成将在下一步接入。
-                </span>
+                <span>{submitError}</span>
               </div>
             ) : null}
           </div>
@@ -316,6 +487,107 @@ export function NewRunPage() {
         </Card>
 
         <div className="space-y-3">
+          <Card className="p-4">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+              <FolderOpen className="h-4 w-4 text-muted" strokeWidth={1.8} />
+              目标目录
+            </div>
+            <p className="mt-1 text-[10px] leading-4 text-passive">
+              这是 Agent 干活的地方，成果会落在这里——不是编排器自己的仓库。
+              目录还不存在时会自动创建并 git init；已存在但不是 git 仓库的目录会被
+              拒绝（不会擅自往你的目录里塞 .git）。
+            </p>
+
+            <div className="mt-3">
+              <Field label="执行目录" hint="绝对路径">
+                <div className="flex gap-1.5">
+                  <input
+                    value={workspaceRoot}
+                    onChange={(event) => {
+                      setWorkspaceRoot(event.target.value);
+                      setSubmitError(null);
+                    }}
+                    placeholder="D:\projects\calculator"
+                    aria-label="目标目录"
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-surface px-2.5 font-mono text-[11px] text-ink transition-colors placeholder:text-passive focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
+                  />
+                  {/*
+                    原生选择框只能由后端弹：浏览器的 showDirectoryPicker()
+                    拿不到绝对路径，而编排器要的正是能交给 git 的路径。
+                  */}
+                  {runtime?.canPickDirectory ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={picking}
+                      onClick={() => {
+                        setPicking(true);
+                        void pickDirectory()
+                          .then((result) => {
+                            if (result?.picked && result.path) {
+                              setWorkspaceRoot(result.path);
+                              setSubmitError(null);
+                            }
+                          })
+                          .finally(() => setPicking(false));
+                      }}
+                    >
+                      {picking ? '选择中…' : '浏览…'}
+                    </Button>
+                  ) : null}
+                </div>
+              </Field>
+              {workspaceRootError ? (
+                <p className="mt-1.5 text-[10px] leading-4 text-danger">
+                  {workspaceRootError}
+                </p>
+              ) : (
+                <p className="mt-1.5 text-[10px] leading-4 text-passive">
+                  worktree 落在编排器的 data/worktrees 下，不会写进你的仓库。
+                </p>
+              )}
+            </div>
+          </Card>
+
+          <Card className="p-4">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+              <Bot className="h-4 w-4 text-muted" strokeWidth={1.8} />
+              执行 Agent
+            </div>
+            <p className="mt-1 text-[10px] leading-4 text-passive">
+              {runtime?.runner === 'mock'
+                ? '当前是回放模式，不会真的调用 Agent。'
+                : '编排器负责拆图，实现与审查分别由选中的 Agent 执行。'}
+            </p>
+
+            <div className="mt-3 space-y-3">
+              <AgentSelect
+                label="编排器"
+                hint="拆解任务图"
+                value={plannerAgentId}
+                onChange={setPlannerAgentId}
+                agents={usableAgents}
+              />
+              <AgentSelect
+                label="实现"
+                hint="写代码"
+                value={implementAgentId}
+                onChange={setImplementAgentId}
+                agents={usableAgents}
+              />
+              <AgentSelect
+                label="审查"
+                hint="独立核对"
+                value={reviewAgentId}
+                onChange={setReviewAgentId}
+                agents={usableAgents}
+              />
+            </div>
+          </Card>
+
           <Card className="p-4">
             <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
               <SlidersHorizontal
@@ -359,15 +631,16 @@ export function NewRunPage() {
 
             <Button
               className="mt-4 w-full"
-              disabled={!canSubmit}
-              onClick={() => setSubmitted(true)}
+              disabled={!canSubmit || submitting || Boolean(workspaceRootError)}
+              onClick={() => void handleSubmit()}
             >
-              开始分解
+              {submitting ? '正在创建…' : '开始拆解'}
               <ArrowRight className="h-4 w-4" strokeWidth={1.8} />
             </Button>
 
             <p className="mt-2 text-[10px] leading-4 text-passive">
-              PM Agent 会先复述目标与约束，再生成任务和依赖关系。
+              点下就跳到运行详情：编排器在后台挑一个已安装的 CLI Agent 拆任务图，
+              拆完自动进入执行。拆图本身要几十秒，进度在详情页里看。
             </p>
           </Card>
 

@@ -7,6 +7,9 @@ const statusMap: Record<RunStatus, { label: string; tone: BadgeTone }> = {
   completed: { label: '已完成', tone: 'green' },
   paused: { label: '已暂停', tone: 'neutral' },
   draft: { label: '草稿', tone: 'neutral' },
+  // 说「拆解失败」而不是「失败」：这个状态只可能是任务图没拆出来，
+  // 一个字的差别决定用户下一步是「重新拆解」还是「去看哪个节点挂了」
+  failed: { label: '拆解失败', tone: 'red' },
 };
 
 interface RunStatusBadgeProps {

@@ -1,6 +1,7 @@
 import { ChevronRight, Database } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useDataSource } from '../../lib/data-source';
+import { useIdentity } from '../../lib/identity-store';
 import { Avatar } from '../ui/Avatar';
 import { Badge } from '../ui/Badge';
 
@@ -27,6 +28,7 @@ export function Topbar() {
   const location = useLocation();
   const title = getPageTitle(location.pathname);
   const live = useDataSource((state) => state.live);
+  const actor = useIdentity((state) => state.actor);
 
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-line bg-canvas px-6 max-[900px]:px-4">
@@ -45,7 +47,14 @@ export function Topbar() {
           <Database className="h-3 w-3" strokeWidth={1.8} />
           {live ? '实时数据' : '演示数据'}
         </Badge>
-        <Avatar label="2" size="sm" />
+        {/* 当前审批人：审批记录里的 actor 就是这个名字，界面上得看得见 */}
+        <span
+          title="当前审批人（在审批卡片里可改）"
+          className="max-w-[10rem] truncate text-[11px] text-muted max-[700px]:hidden"
+        >
+          {actor}
+        </span>
+        <Avatar label={actor.slice(0, 1)} size="sm" />
       </div>
     </header>
   );

@@ -6,7 +6,7 @@ import {
 import { cn } from '../../lib/cn';
 import type { BoardCard as BoardCardModel } from '../../lib/board';
 import { formatDuration } from '../../lib/format';
-import { nodeStatusMeta } from '../../lib/workflow-meta';
+import { displayNodeStatus, nodeStatusMeta } from '../../lib/workflow-meta';
 import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
 
@@ -17,7 +17,8 @@ interface BoardCardProps {
 }
 
 export function BoardCard({ card, selected, onSelect }: BoardCardProps) {
-  const statusMeta = nodeStatusMeta[card.focusNode.status];
+  // 卡片上的「已停止」来自 displayNodeStatus，泳道归属仍按调度状态算
+  const statusMeta = nodeStatusMeta[displayNodeStatus(card.focusNode)];
 
   return (
     <button
@@ -71,7 +72,7 @@ export function BoardCard({ card, selected, onSelect }: BoardCardProps) {
         <div className="mt-2 flex items-center gap-1.5 rounded-md border border-line bg-subtle/50 px-2 py-1 text-[10px] text-muted">
           <ShieldCheck className="h-3 w-3 shrink-0" strokeWidth={1.8} />
           <span className="truncate">
-            {card.review.title} · {nodeStatusMeta[card.review.status].label}
+            {card.review.title} · {nodeStatusMeta[displayNodeStatus(card.review)].label}
           </span>
         </div>
       ) : null}
