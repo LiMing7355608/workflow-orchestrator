@@ -6,6 +6,8 @@ import {
   ShieldAlert,
   X,
 } from 'lucide-react';
+import { useState } from 'react';
+import { decideApproval } from '../../lib/api';
 import { cn } from '../../lib/cn';
 import { formatDuration } from '../../lib/format';
 import { nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
@@ -16,12 +18,15 @@ import type {
 } from '../../types/workflow';
 import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
+import { Button } from '../ui/Button';
 import { Progress } from '../ui/Progress';
 
 interface NodeInspectorProps {
   run: WorkflowRunDetail;
   node: WorkflowNode | null;
   onSelectNode: (nodeId: string | null) => void;
+  /** 审批落盘后刷新运行详情 */
+  onApprovalDecided?: () => void;
   className?: string;
 }
 
@@ -189,14 +194,106 @@ function RunOverview({
   );
 }
 
+/** 审批人。演示阶段固定为当前审批小组，接入身份后由会话决定。 */
+const ACTOR = '第二组';
+
+function ApprovalActions({
+  runId,
+  node,
+  onDone,
+}: {
+  runId: string;
+  node: WorkflowNode;
+  onDone?: () => void;
+}) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState<'approve' | 'reject' | 'handoff' | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(decision: 'approve' | 'reject' | 'handoff') {
+    setBusy(decision);
+    setError(null);
+    const result = await decideApproval(runId, node.id, {
+      decision,
+      actor: ACTOR,
+      reason: reason.trim() || undefined,
+    });
+    setBusy(null);
+    if (!result) {
+      // 后端没接上时不谎报成功
+      setError('后端未响应，审批没有提交。');
+      return;
+    }
+    setReason('');
+    onDone?.();
+  }
+
+  return (
+    <div className="px-4 py-3">
+      <div className="rounded-lg border border-warning/20 bg-warning-soft/70 p-3">
+        <div className="flex items-center gap-2 text-[11px] font-medium text-warning">
+          <ShieldAlert className="h-3.5 w-3.5" strokeWidth={1.8} />
+          等待人工审批
+        </div>
+        <p className="mt-1.5 text-[10px] leading-4 text-muted">
+          批准推进下游；驳回把上游「{node.dependsOn[0] ?? '无依赖'}」退回重做，
+          已跑完的下游一并作废；转交追加一条新的审批记录。
+        </p>
+
+        <input
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="审批理由（可选）"
+          aria-label="审批理由"
+          className="mt-2.5 h-7 w-full rounded-md border border-line bg-surface px-2 text-[11px] text-ink placeholder:text-passive transition-colors focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
+        />
+
+        <div className="mt-2 flex items-center gap-1.5">
+          <Button
+            size="sm"
+            onClick={() => void submit('approve')}
+            disabled={busy !== null}
+          >
+            {busy === 'approve' ? '提交中' : '批准'}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void submit('reject')}
+            disabled={busy !== null}
+          >
+            驳回
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void submit('handoff')}
+            disabled={busy !== null}
+          >
+            转交
+          </Button>
+        </div>
+
+        {error ? (
+          <p className="mt-2 text-[10px] leading-4 text-danger">{error}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function NodeDetail({
   run,
   node,
   onSelectNode,
+  onApprovalDecided,
 }: {
   run: WorkflowRunDetail;
   node: WorkflowNode;
   onSelectNode: (nodeId: string | null) => void;
+  onApprovalDecided?: () => void;
 }) {
   const typeMeta = nodeTypeMeta[node.type];
   const statusMeta = nodeStatusMeta[node.status];
@@ -346,17 +443,11 @@ function NodeDetail({
         </div>
 
         {node.status === 'waiting_approval' ? (
-          <div className="px-4 py-3">
-            <div className="rounded-lg border border-warning/20 bg-warning-soft/70 p-3">
-              <div className="flex items-center gap-2 text-[11px] font-medium text-warning">
-                <ShieldAlert className="h-3.5 w-3.5" strokeWidth={1.8} />
-                等待人工审批
-              </div>
-              <p className="mt-1.5 text-[10px] leading-4 text-muted">
-                审批操作与驳回后的回退路由将在下一块接入。
-              </p>
-            </div>
-          </div>
+          <ApprovalActions
+            runId={run.id}
+            node={node}
+            onDone={onApprovalDecided}
+          />
         ) : null}
       </div>
     </>
@@ -367,6 +458,7 @@ export function NodeInspector({
   run,
   node,
   onSelectNode,
+  onApprovalDecided,
   className,
 }: NodeInspectorProps) {
   return (
@@ -377,7 +469,12 @@ export function NodeInspector({
       )}
     >
       {node ? (
-        <NodeDetail run={run} node={node} onSelectNode={onSelectNode} />
+        <NodeDetail
+          run={run}
+          node={node}
+          onSelectNode={onSelectNode}
+          onApprovalDecided={onApprovalDecided}
+        />
       ) : (
         <RunOverview run={run} onSelectNode={onSelectNode} />
       )}

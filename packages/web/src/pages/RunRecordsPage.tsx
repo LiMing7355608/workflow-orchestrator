@@ -7,6 +7,8 @@ import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Segmented } from '../components/ui/Segmented';
 import { seedRuns } from '../data/seed';
+import { fetchRuns } from '../lib/api';
+import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
 import type { RunStatus } from '../types/workflow';
 
@@ -46,16 +48,18 @@ export function RunRecordsPage() {
   const [status, setStatus] = useState<StatusFilter>('all');
   const [sort, setSort] = useState<SortKey>('updated');
 
+  const { data: runs, source, reload } = useApiResource(fetchRuns, seedRuns);
+  useLiveRefresh(source === 'live', reload);
+
   const counts = useMemo(
     () => ({
-      all: seedRuns.length,
-      running: seedRuns.filter((run) => run.status === 'running').length,
-      waiting: seedRuns.filter((run) => run.status === 'waiting_for_boss')
-        .length,
-      completed: seedRuns.filter((run) => run.status === 'completed').length,
-      paused: seedRuns.filter((run) => run.status === 'paused').length,
+      all: runs.length,
+      running: runs.filter((run) => run.status === 'running').length,
+      waiting: runs.filter((run) => run.status === 'waiting_for_boss').length,
+      completed: runs.filter((run) => run.status === 'completed').length,
+      paused: runs.filter((run) => run.status === 'paused').length,
     }),
-    [],
+    [runs],
   );
 
   const statusOptions: Array<{ value: StatusFilter; label: string }> = [
@@ -68,7 +72,7 @@ export function RunRecordsPage() {
 
   const filteredRuns = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    const matched = seedRuns.filter((run) => {
+    const matched = runs.filter((run) => {
       const matchesStatus = status === 'all' || run.status === status;
       const matchesQuery =
         !keyword ||
@@ -87,7 +91,7 @@ export function RunRecordsPage() {
         new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
       );
     });
-  }, [query, status, sort]);
+  }, [runs, query, status, sort]);
 
   const groups = useMemo(() => {
     const order: DateGroup[] = ['今天', '昨天', '更早'];
@@ -178,7 +182,7 @@ export function RunRecordsPage() {
       <div className="mt-3 flex items-center justify-between text-[11px] text-muted">
         <span>共 {filteredRuns.length} 个运行</span>
         <span className="text-passive">
-          {filteredRuns.length === seedRuns.length ? '全部记录' : '已筛选'}
+          {filteredRuns.length === runs.length ? '全部记录' : '已筛选'}
         </span>
       </div>
 

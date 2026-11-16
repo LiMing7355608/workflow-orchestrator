@@ -14,8 +14,11 @@ import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Segmented } from '../components/ui/Segmented';
 import { seedAgents } from '../data/agents';
+import { fetchAgents, probeAgents } from '../lib/api';
+import { cn } from '../lib/cn';
+import { useApiResource } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
-import type { AgentAvailability, AgentProfile } from '../types/agent';
+import type { AgentAvailability } from '../types/agent';
 
 type AvailabilityFilter = 'all' | AgentAvailability;
 
@@ -28,10 +31,26 @@ const availabilityRank: Record<AgentAvailability, number> = {
 export function AgentsPage() {
   usePageTitle('Agent 管理');
 
-  const [agents, setAgents] = useState<AgentProfile[]>(seedAgents);
+  const {
+    data: remoteAgents,
+    source,
+    reload,
+  } = useApiResource(fetchAgents, seedAgents);
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AvailabilityFilter>('all');
   const [probedAt, setProbedAt] = useState('');
+  const [probing, setProbing] = useState(false);
+
+  const agents = useMemo(
+    () =>
+      remoteAgents.map((agent) =>
+        agent.id in overrides
+          ? { ...agent, enabled: overrides[agent.id] ?? agent.enabled }
+          : agent,
+      ),
+    [remoteAgents, overrides],
+  );
 
   const counts = useMemo(
     () => ({
@@ -90,20 +109,25 @@ export function AgentsPage() {
   }, [agents, filter, query]);
 
   function handleToggle(id: string, enabled: boolean) {
-    setAgents((previous) =>
-      previous.map((agent) =>
-        agent.id === id ? { ...agent, enabled } : agent,
-      ),
-    );
+    setOverrides((previous) => ({ ...previous, [id]: enabled }));
   }
 
-  function handleProbe() {
+  async function handleProbe() {
+    setProbing(true);
+    if (source === 'live') {
+      // 后端按基线重新探测，再整体刷新目录
+      const probed = await probeAgents();
+      if (probed) {
+        reload();
+      }
+    }
     setProbedAt(
       new Date().toLocaleTimeString('zh-CN', {
         hour: '2-digit',
         minute: '2-digit',
       }),
     );
+    setProbing(false);
   }
 
   function resetFilters() {
@@ -132,14 +156,22 @@ export function AgentsPage() {
           <Button
             variant="secondary"
             size="sm"
-            onClick={handleProbe}
+            onClick={() => void handleProbe()}
+            disabled={probing}
             className="max-[700px]:hidden"
           >
-            <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.9} />
-            重新探测
+            <RefreshCw
+              className={cn('h-3.5 w-3.5', probing && 'animate-spin')}
+              strokeWidth={1.9}
+            />
+            {probing ? '探测中' : '重新探测'}
           </Button>
           <span className="text-[10px] text-passive max-[700px]:hidden">
-            {probedAt ? `探测于 ${probedAt} · 静态快照` : '静态快照'}
+            {probedAt
+              ? `探测于 ${probedAt}`
+              : source === 'live'
+                ? '探测结果来自本机'
+                : '静态快照'}
           </span>
         </div>
       </div>

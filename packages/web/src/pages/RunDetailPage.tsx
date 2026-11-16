@@ -11,11 +11,20 @@ import { buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { getRunDetail } from '../data/run-detail';
+import { fetchRunDetail } from '../lib/api';
+import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
 
 export function RunDetailPage() {
   const { runId } = useParams();
-  const run = useMemo(() => getRunDetail(runId ?? ''), [runId]);
+  const fallback = useMemo(() => getRunDetail(runId ?? '') ?? null, [runId]);
+  const {
+    data: run,
+    source,
+    reload,
+  } = useApiResource(() => fetchRunDetail(runId ?? ''), fallback);
+  useLiveRefresh(source === 'live', reload, { runId });
+
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<RunView>('graph');
 
@@ -92,6 +101,7 @@ export function RunDetailPage() {
           run={run}
           node={selectedNode}
           onSelectNode={setSelectedNodeId}
+          onApprovalDecided={reload}
           className="w-[320px] shrink-0 border-l border-line max-[1100px]:h-auto max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t"
         />
       </div>

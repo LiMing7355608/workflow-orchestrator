@@ -1,5 +1,6 @@
 import { ChevronRight, Database } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
+import { useDataSource } from '../../lib/data-source';
 import { Avatar } from '../ui/Avatar';
 import { Badge } from '../ui/Badge';
 
@@ -25,6 +26,7 @@ function getPageTitle(pathname: string): string {
 export function Topbar() {
   const location = useLocation();
   const title = getPageTitle(location.pathname);
+  const live = useDataSource((state) => state.live);
 
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-line bg-canvas px-6 max-[900px]:px-4">
@@ -35,9 +37,13 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-3">
-        <Badge tone="neutral" className="max-[700px]:hidden">
+        <Badge
+          tone={live ? 'green' : 'neutral'}
+          dot
+          className="max-[700px]:hidden"
+        >
           <Database className="h-3 w-3" strokeWidth={1.8} />
-          演示数据
+          {live ? '实时数据' : '演示数据'}
         </Badge>
         <Avatar label="2" size="sm" />
       </div>

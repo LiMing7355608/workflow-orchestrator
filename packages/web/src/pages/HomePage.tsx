@@ -13,6 +13,8 @@ import { StatCard } from '../components/home/StatCard';
 import { buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { seedRuns } from '../data/seed';
+import { fetchRuns } from '../lib/api';
+import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
 
 function SectionHeading({
@@ -35,17 +37,18 @@ function SectionHeading({
 export function HomePage() {
   usePageTitle('工作台');
 
-  const runningCount = seedRuns.filter(
-    (run) => run.status === 'running',
-  ).length;
-  const waitingCount = seedRuns.filter(
+  const { data: runs, source, reload } = useApiResource(fetchRuns, seedRuns);
+  useLiveRefresh(source === 'live', reload);
+
+  const runningCount = runs.filter((run) => run.status === 'running').length;
+  const waitingCount = runs.filter(
     (run) => run.status === 'waiting_for_boss',
   ).length;
-  const completedCount = seedRuns.filter(
+  const completedCount = runs.filter(
     (run) => run.status === 'completed',
   ).length;
 
-  const recentRuns = [...seedRuns]
+  const recentRuns = [...runs]
     .sort(
       (a, b) =>
         new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
@@ -134,7 +137,7 @@ export function HomePage() {
             title="运行概览"
             description="按状态统计当前运行。"
           />
-          <RunOverview runs={seedRuns} className="mt-3" />
+          <RunOverview runs={runs} className="mt-3" />
         </div>
       </section>
     </div>
