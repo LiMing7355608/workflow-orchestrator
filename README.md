@@ -23,7 +23,7 @@
 │   └── reports/       # 阶段报告、周报
 ├── scripts/           # 演示、数据初始化等辅助脚本
 ├── data/              # 运行时 SQLite / JSONL（不入库）
-├── .worktrees/        # 每个实现节点的 Git worktree（不入库）
+│   └── worktrees/     # 每个运行的节点 worktree（不入库；目标仓库由运行自己指定）
 └── .github/workflows/ # CI
 ```
 
@@ -65,7 +65,7 @@ pnpm dev                 # 同时启动 server(3000) 与 web(5173)
 
 - 分支：`feat/<主题>`、`fix/<主题>`、`docs/<主题>`，不直接改 `main`。
 - 提交信息建议使用 Conventional Commits：`feat(core): 调度就绪集合`。
-- 运行期产物一律不提交：`node_modules/`、`dist/`、`data/`、`.worktrees/`、`.env`。
+- 运行期产物一律不提交：`node_modules/`、`dist/`、`data/`、`.worktrees/`（历史遗留）、`.env`。
 - 新增设计决策写入 `docs/design/`，新增需求材料写入 `docs/requirements/`。
 
 ## 当前进度
