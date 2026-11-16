@@ -104,6 +104,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     args: string[],
     cwd: string,
     timeout = 120_000,
+    env?: NodeJS.ProcessEnv,
   ): Promise<GitResult> {
     try {
       const { stdout, stderr } = await execFileAsync('git', [
@@ -114,6 +115,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
         windowsHide: true,
         timeout,
         maxBuffer: CAPTURE_MAX_BUFFER,
+        ...(env ? { env: { ...process.env, ...env } } : {}),
       });
       return { ok: true, stdout, stderr };
     } catch (error) {
@@ -123,6 +125,59 @@ export class GitWorktreeWorkspace implements WorkspacePort {
         stdout: failure.stdout ?? '',
         stderr: failure.stderr ?? failure.message ?? '',
       };
+    }
+  }
+
+  /**
+   * 把 base 与 upstream 的改动汇成一棵树，返回树对象 id。
+   *
+   * `git merge-tree --write-tree` 是最省事的做法，但它要求 **Git 2.38+**，
+   * 而机器上的 git 可能更老（实测 2.28 会把 `--write-tree` 当成 revision 解析，
+   * 报 `unknown rev --write-tree`，整个节点直接「工作区准备失败」）。
+   *
+   * 老版本降级到三路 `read-tree`：这是 `git merge` 内部干的事，plumbing 层
+   * 早就有，不需要任何新特性。代价是要自己管一个临时索引文件。
+   */
+  private async mergedTree(base: string, upstream: string): Promise<string> {
+    const modern = await this.gitRun(
+      ['merge-tree', '--write-tree', base, upstream],
+      this.repoRoot,
+    );
+    if (modern.ok) {
+      return modern.stdout.trim();
+    }
+
+    // 两边的共同祖先：`read-tree -m` 的第一个参数是合并基，不是任意基线
+    const ancestor = await this.gitValue(['merge-base', base, upstream], this.repoRoot);
+    const indexFile = resolve(
+      this.worktreeRoot,
+      `.merge-index-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    await mkdir(this.worktreeRoot, { recursive: true });
+    const env = { GIT_INDEX_FILE: indexFile };
+
+    try {
+      const read = await this.gitRun(
+        ['read-tree', '-m', '--aggressive', ancestor, base, upstream],
+        this.repoRoot,
+        120_000,
+        env,
+      );
+      if (!read.ok) {
+        // 真冲突：交给上层去记合并冲突，别在这里吞掉
+        throw new Error(
+          `汇集上游产物时发生冲突：${read.stderr.trim() || read.stdout.trim() || 'read-tree 失败'}`,
+        );
+      }
+      const written = await this.gitRun(['write-tree'], this.repoRoot, 120_000, env);
+      if (!written.ok) {
+        throw new Error(
+          `写出合并后的树失败：${written.stderr.trim() || 'write-tree 失败'}`,
+        );
+      }
+      return written.stdout.trim();
+    } finally {
+      await rm(indexFile, { force: true }).catch(() => {});
     }
   }
 
@@ -183,7 +238,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
         base = upstream;
         continue;
       }
-      const tree = await this.gitValue(['merge-tree', '--write-tree', base, upstream]);
+      const tree = await this.mergedTree(base, upstream);
       base = await this.gitValue([
         'commit-tree', tree, '-p', base, '-p', upstream, '-m', `汇集节点 ${id} 的上游产物`,
       ]);
