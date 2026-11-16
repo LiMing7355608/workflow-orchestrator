@@ -1,0 +1,154 @@
+import { describe, expect, it } from 'vitest';
+import type { AgentProfile } from '@orchestrator/core';
+import { parseDag } from '../src/schema';
+import { validateDag } from '../src/validate';
+
+function agent(partial: Partial<AgentProfile> & Pick<AgentProfile, 'id'>): AgentProfile {
+  return {
+    label: partial.id,
+    vendor: 'test',
+    logo: `/logos/${partial.id}.svg`,
+    launch: { bin: partial.id, args: [], stdin: false, parser: 'plain' },
+    capabilities: { streaming: true, structured: true, resume: false, tools: true },
+    availability: 'ready',
+    enabled: true,
+    permissionArgs: {
+      default: [],
+      'accept-edits': [],
+      auto: [],
+      'bypass-permissions': [],
+    },
+    session: { derive: 'none', resumeArgs: [] },
+    timeoutMs: 60_000,
+    ...partial,
+  };
+}
+
+const catalog: AgentProfile[] = [
+  agent({ id: 'claude' }),
+  agent({ id: 'opencode' }),
+  agent({ id: 'trae', enabled: false }),
+  agent({ id: 'gone', availability: 'missing' }),
+];
+
+function dag(nodes: unknown[]) {
+  return parseDag({ title: '测试', nodes });
+}
+
+describe('DAG 冻结校验', () => {
+  it('合法图通过', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: '实现', agentId: 'claude', files: ['src/a/**'] },
+        { id: 'review-a', type: 'review', title: '审查', dependsOn: ['impl-a'], agentId: 'opencode' },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.issues).toHaveLength(0);
+  });
+
+  it('依赖指向不存在的节点会被拒绝', () => {
+    const result = validateDag(
+      dag([{ id: 'impl-a', type: 'implement', title: '实现', agentId: 'claude', dependsOn: ['nope'] }]),
+      catalog,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.kind)).toContain('missing-dependency');
+  });
+
+  it('有环会被拒绝', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude', dependsOn: ['impl-b'] },
+        { id: 'impl-b', type: 'implement', title: 'B', agentId: 'claude', dependsOn: ['impl-a'] },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.kind)).toContain('cycle');
+  });
+
+  it('并行节点的文件范围相交会被拒绝', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude', files: ['src/auth/**'] },
+        { id: 'impl-b', type: 'implement', title: 'B', agentId: 'claude', files: ['src/auth/login.ts'] },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.kind)).toContain('file-conflict');
+  });
+
+  it('有先后关系的节点允许范围重叠', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude', files: ['src/auth/**'] },
+        {
+          id: 'impl-b',
+          type: 'implement',
+          title: 'B',
+          agentId: 'claude',
+          dependsOn: ['impl-a'],
+          files: ['src/auth/**'],
+        },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('未知 Agent、未启用 Agent、实现节点缺 Agent 都会被拒绝', () => {
+    const unknown = validateDag(
+      dag([{ id: 'impl-a', type: 'implement', title: 'A', agentId: 'ghost' }]),
+      catalog,
+    );
+    expect(unknown.issues.map((issue) => issue.kind)).toContain('unknown-agent');
+
+    const disabled = validateDag(
+      dag([{ id: 'impl-a', type: 'implement', title: 'A', agentId: 'trae' }]),
+      catalog,
+    );
+    expect(disabled.issues.map((issue) => issue.kind)).toContain('disabled-agent');
+
+    const missing = validateDag(
+      dag([{ id: 'impl-a', type: 'implement', title: 'A' }]),
+      catalog,
+    );
+    expect(missing.issues.map((issue) => issue.kind)).toContain('missing-agent');
+  });
+
+  it('开启 requireInstalled 后未安装的 Agent 会被拦下', () => {
+    const result = validateDag(
+      dag([{ id: 'impl-a', type: 'implement', title: 'A', agentId: 'gone' }]),
+      catalog,
+      { requireInstalled: true },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.kind)).toContain('agent-not-installed');
+  });
+
+  it('审批与路由节点不需要 Agent', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude' },
+        { id: 'gate', type: 'route', title: '门禁', dependsOn: ['impl-a'], executor: '编排器' },
+        { id: 'ok', type: 'approval', title: '审批', dependsOn: ['impl-a'], executor: '老板' },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('重复 id 会被拒绝', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude' },
+        { id: 'impl-a', type: 'implement', title: 'A2', agentId: 'claude' },
+      ]),
+      catalog,
+    );
+    expect(result.issues.map((issue) => issue.kind)).toContain('duplicate-id');
+  });
+});

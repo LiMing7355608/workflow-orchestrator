@@ -23,11 +23,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck web
-        run: pnpm --filter @orchestrator/web typecheck
+      - name: Typecheck
+        run: pnpm -r typecheck
 
-      - name: Test web
-        run: pnpm --filter @orchestrator/web test
+      - name: Test
+        run: pnpm -r test
 
-      - name: Build web
-        run: pnpm --filter @orchestrator/web build
+      - name: Build
+        run: pnpm -r build

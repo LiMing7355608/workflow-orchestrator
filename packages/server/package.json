@@ -9,9 +9,11 @@
     "start": "node dist/main.js",
     "build": "tsup src/main.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@orchestrator/core": "workspace:*",
+    "@orchestrator/planner": "workspace:*",
     "fastify": "^5.2.0",
     "zod": "^3.24.1"
   },
