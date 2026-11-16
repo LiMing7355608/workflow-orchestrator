@@ -77,6 +77,47 @@ async function readVersion(
   }
 }
 
+export interface ResolvedExecutable {
+  /** 实际要 spawn 的命令 */
+  command: string;
+  /** 在用户参数之前追加的启动参数 */
+  prefixArgs: string[];
+  /** 解析到的文件路径 */
+  path: string;
+}
+
+/**
+ * 把 CLI 名字解析成真正可以 spawn 的命令。
+ *
+ * Windows 上 npm 装出来的 `.ps1` / `.cmd` 不能被 spawn 直接执行，
+ * 必须借各自的宿主去跑。返回值统一了这种差异，调用方只管拼业务参数。
+ */
+export async function resolveExecutable(
+  bin: string,
+): Promise<ResolvedExecutable | undefined> {
+  const located = await locateBinary(bin);
+  if (!located) {
+    return undefined;
+  }
+
+  const ext = extensionOf(located);
+  if (ext === '.ps1') {
+    return {
+      command: 'powershell.exe',
+      prefixArgs: ['-NoProfile', '-NonInteractive', '-File', located],
+      path: located,
+    };
+  }
+  if (ext === '.cmd' || ext === '.bat') {
+    return {
+      command: process.env.ComSpec ?? 'cmd.exe',
+      prefixArgs: ['/c', located],
+      path: located,
+    };
+  }
+  return { command: located, prefixArgs: [], path: located };
+}
+
 export async function probeBinary(bin: string): Promise<ProbeResult> {
   const resolved = await locateBinary(bin);
 

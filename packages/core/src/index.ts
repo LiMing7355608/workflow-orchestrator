@@ -83,3 +83,14 @@ export type {
 export { EventBus, emptyState, reduce, replay } from './journal.js';
 
 export type { EventListener } from './journal.js';
+
+export { advanceRun, parseVerdict } from './orchestrator.js';
+
+export type { AdvanceDeps, AdvanceResult, AdvanceStopReason } from './orchestrator.js';
+
+export type {
+  AgentRunRequest,
+  AgentRunResult,
+  AgentRunner,
+  WorkspacePort,
+} from './execution.js';

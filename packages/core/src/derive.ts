@@ -37,9 +37,8 @@ export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
   if (node.finishedAt) {
     return 'completed';
   }
-  if (node.attempts > 1) {
-    return 'retry';
-  }
+  // 被退回过不等于不可调度：attempts 只用于展示「重试第几次」和判定升级，
+  // 绝不能拿它挡住就绪集合，否则节点退回一次就永远跑不动了。
   const dependencies = node.dependsOn.map((id) => run.nodes[id]);
   const depsSettled = dependencies.every(
     (dependency) =>

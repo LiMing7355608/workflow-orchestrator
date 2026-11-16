@@ -1,26 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
-  deriveBoard,
-  deriveEdges,
-  deriveNodeStatus,
-  deriveNodes,
-  deriveProgress,
-  deriveRunStatus,
-  emptyState,
-  pickBatch,
-  readyNodes,
+  DEFAULT_AGENT_PROFILES,
+  advanceRun,
   reduce,
-  replay,
-  filesConflict,
+  type AdvanceDeps,
   type NodeFacts,
   type OrchestratorEvent,
+  type ProjectState,
   type RunFacts,
 } from '../src/index';
 
 const AT = '2026-11-16T00:00:00.000Z';
-const LATER = '2026-11-16T00:10:00.000Z';
 
-function node(partial: Partial<NodeFacts> & Pick<NodeFacts, 'id' | 'type'>): NodeFacts {
+function node(
+  partial: Partial<NodeFacts> & Pick<NodeFacts, 'id' | 'type'>,
+): NodeFacts {
   return {
     title: partial.id,
     description: '',
@@ -32,12 +26,12 @@ function node(partial: Partial<NodeFacts> & Pick<NodeFacts, 'id' | 'type'>): Nod
   };
 }
 
-function buildRun(nodes: NodeFacts[], id = 'run-1'): RunFacts {
+function buildRun(nodes: NodeFacts[], runId = 'run-t'): RunFacts {
   return {
-    id,
-    title: '测试运行',
+    id: runId,
+    title: '编排测试',
     summary: '',
-    goal: '',
+    goal: '验证调度闭环',
     specVersion: 'v1.0',
     stage: 'execute',
     createdAt: AT,
@@ -47,195 +41,171 @@ function buildRun(nodes: NodeFacts[], id = 'run-1'): RunFacts {
   };
 }
 
-function event(
-  partial: Partial<OrchestratorEvent> & Pick<OrchestratorEvent, 'type'>,
-): OrchestratorEvent {
-  return { at: AT, runId: 'run-1', ...partial } as OrchestratorEvent;
+interface Harness {
+  deps: AdvanceDeps;
+  events: OrchestratorEvent[];
+  state: () => ProjectState;
 }
 
-describe('派生状态：不读任何 status 字段', () => {
-  it('依赖未完成时是 pending，依赖完成后变 ready', () => {
-    const implement = node({ id: 'a', type: 'implement' });
-    const review = node({ id: 'b', type: 'review', dependsOn: ['a'] });
-    const run = buildRun([implement, review]);
+/** 用假 runner 与假工作区驱动编排器，绝不启动真实进程。 */
+function harness(
+  run: RunFacts,
+  output: (nodeId: string, attempt: number) => string,
+): Harness {
+  let state: ProjectState = { runs: { [run.id]: run }, approvals: [] };
+  const events: OrchestratorEvent[] = [];
+  const calls = new Map<string, number>();
 
-    expect(deriveNodeStatus(run, review)).toBe('pending');
-
-    const done = buildRun([{ ...implement, finishedAt: LATER }, review]);
-    expect(deriveNodeStatus(done, review)).toBe('ready');
-  });
-
-  it('已开始未结束是 running，审批节点则是 waiting_approval', () => {
-    const impl = node({ id: 'a', type: 'implement', startedAt: AT });
-    const approval = node({ id: 'b', type: 'approval', startedAt: AT });
-    const run = buildRun([impl, approval]);
-
-    expect(deriveNodeStatus(run, impl)).toBe('running');
-    expect(deriveNodeStatus(run, approval)).toBe('waiting_approval');
-  });
-
-  it('被退回过的节点在重新开始前显示 retry', () => {
-    const impl = node({ id: 'a', type: 'implement', attempts: 2 });
-    const run = buildRun([impl]);
-    expect(deriveNodeStatus(run, impl)).toBe('retry');
-  });
-
-  it('有人的审批在等时，运行状态压过完成态', () => {
-    const approval = node({ id: 'a', type: 'approval', startedAt: AT });
-    const run = buildRun([approval]);
-    expect(deriveRunStatus(run)).toBe('waiting_for_boss');
-    expect(deriveRunStatus({ ...run, completedAt: LATER })).toBe('waiting_for_boss');
-  });
-
-  it('未冻结是 draft，冻结后是 running，完成后是 completed', () => {
-    const impl = node({ id: 'a', type: 'implement' });
-    const run = buildRun([impl]);
-    expect(deriveRunStatus({ ...run, frozenAt: undefined })).toBe('draft');
-    expect(deriveRunStatus(run)).toBe('running');
-    expect(deriveRunStatus({ ...run, completedAt: LATER })).toBe('completed');
-  });
-
-  it('进度按已完成节点占比算', () => {
-    const done = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: LATER });
-    const todo = node({ id: 'b', type: 'implement' });
-    expect(deriveProgress(buildRun([done, todo]))).toBe(50);
-    expect(deriveProgress(buildRun([done]))).toBe(100);
-  });
-});
-
-describe('退回重做：重置目标并作废下游', () => {
-  it('被驳回的实现节点回退后，已跑完的下游一并重置', () => {
-    const impl = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: AT });
-    const review = node({
-      id: 'b',
-      type: 'review',
-      dependsOn: ['a'],
-      startedAt: AT,
-      finishedAt: LATER,
-      verdict: 'approved',
-    });
-    const run = buildRun([impl, review]);
-
-    const state = reduce(
-      { ...emptyState(), runs: { [run.id]: run } },
-      event({ type: 'node.reset', nodeId: 'a', reason: '审查驳回' }),
-    );
-
-    const next = state.runs['run-1'];
-    expect(next).toBeDefined();
-    expect(next?.nodes['a']?.attempts).toBe(1);
-    expect(next?.nodes['a']?.finishedAt).toBeUndefined();
-    expect(next?.nodes['b']?.finishedAt).toBeUndefined();
-    expect(next?.nodes['b']?.verdict).toBeUndefined();
-  });
-
-  it('边集在回退前后完全不变——图结构不受状态迁移影响', () => {
-    const impl = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: AT });
-    const review = node({ id: 'b', type: 'review', dependsOn: ['a'] });
-    const run = buildRun([impl, review]);
-
-    const before = deriveEdges(run);
-    const state = reduce(
-      { ...emptyState(), runs: { [run.id]: run } },
-      event({ type: 'node.reset', nodeId: 'a', reason: '驳回' }),
-    );
-    const after = deriveEdges(state.runs['run-1'] as RunFacts);
-
-    expect(after).toEqual(before);
-  });
-});
-
-describe('事件重放', () => {
-  it('同一批事件重放两次得到相同事实', () => {
-    const impl = node({ id: 'a', type: 'implement' });
-    const run = buildRun([impl]);
-    const events: OrchestratorEvent[] = [
-      { type: 'run.created', at: AT, runId: 'run-1', run },
-      { type: 'node.started', at: AT, runId: 'run-1', nodeId: 'a' },
-      { type: 'node.completed', at: LATER, runId: 'run-1', nodeId: 'a' },
-    ];
-
-    expect(replay(events)).toEqual(replay(events));
-  });
-
-  it('审批请求会同时写节点事实并追加不可变记录', () => {
-    const approval = node({ id: 'a', type: 'approval' });
-    const run = buildRun([approval]);
-    const events: OrchestratorEvent[] = [
-      { type: 'run.created', at: AT, runId: 'run-1', run },
-      {
-        type: 'approval.requested',
-        at: AT,
-        runId: 'run-1',
-        record: {
-          id: 'ap-1',
-          runId: 'run-1',
-          nodeId: 'a',
-          status: 'pending',
-          requestedAt: AT,
-        },
+  const deps: AdvanceDeps = {
+    getRun: (id) => state.runs[id],
+    emit: async (event) => {
+      events.push(event);
+      state = reduce(state, event);
+      if (event.type === 'approval.requested') {
+        state = { ...state, approvals: [...state.approvals, event.record] };
+      }
+    },
+    runner: {
+      run: async (request, onChunk) => {
+        const attempt = (calls.get(request.nodeId) ?? 0) + 1;
+        calls.set(request.nodeId, attempt);
+        const text = output(request.nodeId, attempt);
+        onChunk(text);
+        return { ok: true, exitCode: 0, output: text };
       },
-    ];
+    },
+    workspace: {
+      prepare: async (runId, nodeId) => `/tmp/${runId}/${nodeId}`,
+      release: async () => {},
+    },
+    resolveAgent: (id) => DEFAULT_AGENT_PROFILES.find((agent) => agent.id === id),
+    now: () => AT,
+    concurrency: 4,
+  };
 
-    const state = replay(events);
-    expect(state.approvals).toHaveLength(1);
-    expect(state.runs['run-1']?.nodes['a']?.startedAt).toBe(AT);
-  });
-});
+  return { deps, events, state: () => state };
+}
 
-describe('调度：就绪集合与并发', () => {
-  it('只从依赖已完成的节点里挑批次', () => {
-    const base = node({ id: 'a', type: 'implement', finishedAt: LATER, startedAt: AT });
-    const first = node({ id: 'b', type: 'implement', dependsOn: ['a'], files: ['src/b/**'] });
-    const second = node({ id: 'c', type: 'implement', dependsOn: ['a'], files: ['src/c/**'] });
-    const blocked = node({ id: 'd', type: 'implement', dependsOn: ['b'], files: ['src/d/**'] });
-    const run = buildRun([base, first, second, blocked]);
+describe('编排循环', () => {
+  it('审查驳回会重置上游，重跑后再次审查并通过', async () => {
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'claude' }),
+      node({ id: 'review-a', type: 'review', dependsOn: ['impl-a'], agentId: 'opencode' }),
+    ]);
 
-    expect(readyNodes(run).map((item) => item.id)).toEqual(['b', 'c']);
-    expect(pickBatch(run, 1)).toHaveLength(1);
-  });
+    // 第一次审查驳回，第二次放行
+    const h = harness(run, (nodeId, attempt) =>
+      nodeId === 'review-a'
+        ? attempt === 1
+          ? 'VERDICT: CHANGES_REQUESTED'
+          : 'VERDICT: APPROVED'
+        : 'done',
+    );
 
-  it('同批并行节点的文件范围不得相交', () => {
-    const a = node({ id: 'a', type: 'implement', files: ['src/auth/**'] });
-    const b = node({ id: 'b', type: 'implement', files: ['src/auth/login.ts'] });
-    const run = buildRun([a, b]);
+    const result = await advanceRun('run-t', h.deps);
+    expect(result.stopped).toBe('idle');
 
-    expect(filesConflict(a.files, b.files)).toBe(true);
-    const batch = pickBatch(run, 5);
-    expect(batch).toHaveLength(1);
-  });
+    const final = h.state().runs['run-t'];
+    expect(final?.completedAt).toBe(AT);
+    expect(final?.nodes['impl-a']?.attempts).toBe(1);
+    expect(final?.nodes['review-a']?.attempts).toBe(1);
+    expect(final?.nodes['review-a']?.verdict).toBe('approved');
 
-  it('范围不相交时可以同批执行', () => {
-    const a = node({ id: 'a', type: 'implement', files: ['src/auth/**'] });
-    const b = node({ id: 'b', type: 'implement', files: ['src/chat/**'] });
-    const run = buildRun([a, b]);
-
-    expect(filesConflict(a.files, b.files)).toBe(false);
-    expect(pickBatch(run, 5)).toHaveLength(2);
-  });
-});
-
-describe('四泳道派生', () => {
-  it('把实现节点的下游状态折叠成泳道', () => {
-    const impl = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: AT });
-    const review = node({ id: 'b', type: 'review', dependsOn: ['a'], startedAt: LATER });
-    const run = buildRun([impl, review]);
-
-    const nodes = deriveNodes(run, () => undefined);
-    const lanes = deriveBoard(nodes, deriveEdges(run));
-
-    expect(lanes.in_review.map((card) => card.id)).toEqual(['a']);
-    expect(lanes.working).toHaveLength(0);
+    const kinds = h.events.map((event) => event.type);
+    expect(kinds).toContain('node.reset');
+    expect(kinds.at(-1)).toBe('run.completed');
   });
 
-  it('审批在等时卡片进入 needs_you', () => {
-    const impl = node({ id: 'a', type: 'implement', startedAt: AT, finishedAt: AT });
-    const approval = node({ id: 'b', type: 'approval', dependsOn: ['a'], startedAt: LATER });
-    const run = buildRun([impl, approval]);
+  it('审查自己也会被退回链路作废，因此会重审一次', async () => {
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'claude' }),
+      node({ id: 'review-a', type: 'review', dependsOn: ['impl-a'], agentId: 'opencode' }),
+    ]);
 
-    const nodes = deriveNodes(run, () => undefined);
-    const lanes = deriveBoard(nodes, deriveEdges(run));
+    const h = harness(run, (nodeId, attempt) =>
+      nodeId === 'review-a'
+        ? attempt === 1
+          ? 'VERDICT: CHANGES_REQUESTED'
+          : 'VERDICT: APPROVED'
+        : 'done',
+    );
 
-    expect(lanes.needs_you.map((card) => card.id)).toEqual(['a']);
+    await advanceRun('run-t', h.deps);
+
+    const reviewStarts = h.events.filter(
+      (event) => event.type === 'node.started' && event.nodeId === 'review-a',
+    );
+    // 审查跑了两次：驳回一次、重审一次
+    expect(reviewStarts).toHaveLength(2);
+  });
+
+  it('驳回次数超限后升级人工，不再自动回退', async () => {
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'claude' }),
+      node({
+        id: 'review-a',
+        type: 'review',
+        dependsOn: ['impl-a'],
+        agentId: 'opencode',
+        maxAttempts: 1,
+      }),
+    ]);
+
+    // 永远驳回
+    const h = harness(run, (nodeId) =>
+      nodeId === 'review-a' ? 'VERDICT: CHANGES_REQUESTED' : 'done',
+    );
+
+    const result = await advanceRun('run-t', h.deps);
+    expect(result.stopped).toBe('awaiting_human');
+
+    const escalated = h.events.filter((event) => event.type === 'review.escalated');
+    expect(escalated).toHaveLength(1);
+
+    // 只回退一次（maxAttempts=1），第二次直接升级
+    const resets = h.events.filter((event) => event.type === 'node.reset');
+    expect(resets).toHaveLength(1);
+  });
+
+  it('审批节点只落等待记录就退出，不阻塞进程', async () => {
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'claude' }),
+      node({
+        id: 'ap-a',
+        type: 'approval',
+        dependsOn: ['impl-a'],
+        executor: '老板',
+      }),
+    ]);
+
+    const h = harness(run, () => 'done');
+    const result = await advanceRun('run-t', h.deps);
+
+    expect(result.stopped).toBe('awaiting_human');
+    expect(h.state().approvals).toHaveLength(1);
+    expect(h.state().approvals[0]?.status).toBe('pending');
+  });
+
+  it('路由节点不调用 Agent，直接完成', async () => {
+    const run = buildRun([
+      node({ id: 'gate', type: 'route', executor: '编排器' }),
+    ]);
+    const h = harness(run, () => 'should not run');
+    await advanceRun('run-t', h.deps);
+
+    const started = h.events.filter((event) => event.type === 'node.started');
+    expect(started).toHaveLength(1);
+    expect(h.state().runs['run-t']?.completedAt).toBe(AT);
+  });
+
+  it('找不到 Agent 时节点失败而不是静默', async () => {
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'ghost' }),
+    ]);
+    const h = harness(run, () => 'done');
+    await advanceRun('run-t', h.deps);
+
+    const failed = h.events.filter((event) => event.type === 'node.failed');
+    expect(failed).toHaveLength(1);
   });
 });

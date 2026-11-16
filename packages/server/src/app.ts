@@ -1,7 +1,9 @@
+import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   DEFAULT_AGENT_PROFILES,
+  advanceRun,
   deriveBoard,
   deriveEdges,
   deriveEvents,
@@ -9,14 +11,18 @@ import {
   deriveRunView,
   findAgent,
   type AgentProfile,
+  type AgentRunner,
   type NodeFacts,
   type OrchestratorEvent,
   type RunFacts,
+  type WorkspacePort,
 } from '@orchestrator/core';
 import { parseDag, safeParseDag, validateDag } from '@orchestrator/planner';
 import { probeCatalog } from './probe.js';
+import { MockAgentRunner, SpawnAgentRunner } from './runners.js';
 import { buildSeedEvents } from './seed.js';
 import { RunStore } from './store.js';
+import { GitWorktreeWorkspace, TempDirWorkspace } from './workspace.js';
 
 export interface AppOptions {
   /** 事件日志路径，JSONL 追加写 */
@@ -63,6 +69,54 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     findAgent(agentId, catalog)?.label;
 
   const now = (): string => new Date().toISOString();
+
+  /* ---------------------------------------------------------------- *
+   * 执行层：Agent 执行器与工作区
+   * ---------------------------------------------------------------- */
+
+  const runnerMode = process.env.AGENT_RUNNER ?? 'mock';
+  const runner: AgentRunner =
+    runnerMode === 'real' ? new SpawnAgentRunner() : new MockAgentRunner();
+
+  const workspaceMode = process.env.AGENT_WORKSPACE ?? 'temp';
+  const repoRoot = process.cwd();
+  const workspace: WorkspacePort =
+    workspaceMode === 'git'
+      ? new GitWorktreeWorkspace(repoRoot)
+      : new TempDirWorkspace(resolve(repoRoot, '.worktrees'));
+
+  // 同一个运行不允许两条推进链路并行，否则会重复派发同一批节点
+  const advancing = new Set<string>();
+
+  async function advance(runId: string): Promise<void> {
+    if (advancing.has(runId)) {
+      return;
+    }
+    advancing.add(runId);
+    try {
+      await advanceRun(runId, {
+        getRun: (id) => store.snapshot.runs[id],
+        emit: (event) => store.emit(event),
+        runner,
+        workspace,
+        resolveAgent: (agentId) => findAgent(agentId, catalog),
+        now,
+        concurrency: Number(process.env.AGENT_CONCURRENCY ?? 2),
+      });
+    } catch (error) {
+      // 推进失败不能吞掉：写成一条事实，让看板能看见
+      await store
+        .emit({
+          type: 'run.paused',
+          at: now(),
+          runId,
+        })
+        .catch(() => {});
+      console.error(`advance failed for ${runId}`, error);
+    } finally {
+      advancing.delete(runId);
+    }
+  }
 
   /* ---------------------------------------------------------------- *
    * Agent 目录
@@ -174,6 +228,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     await store.emit({ type: 'run.created', at, runId, run });
     await store.emit({ type: 'run.frozen', at: now(), runId });
 
+    // 冻结即可开跑，不必等客户端再踢一脚
+    void advance(runId);
+
     return reply
       .code(201)
       .send(deriveRunDetail(store.snapshot.runs[runId]!, [...store.history], resolveAgent));
@@ -197,7 +254,24 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         return reply.code(404).send({ error: 'run_not_found' });
       }
       await store.emit({ type: 'run.resumed', at: now(), runId: request.params.id });
+      void advance(request.params.id);
       return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/api/runs/:id/advance',
+    async (request, reply) => {
+      const run = store.snapshot.runs[request.params.id];
+      if (!run) {
+        return reply.code(404).send({ error: 'run_not_found' });
+      }
+      await advance(request.params.id);
+      return deriveRunDetail(
+        store.snapshot.runs[request.params.id]!,
+        [...store.history],
+        resolveAgent,
+      );
     },
   );
 
@@ -285,6 +359,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           },
         });
       }
+
+      // 审批落盘后接着往下跑：批准放行下游，驳回则重跑被退回的节点
+      void advance(runId);
 
       return deriveRunDetail(store.snapshot.runs[runId]!, [...store.history], resolveAgent);
     },

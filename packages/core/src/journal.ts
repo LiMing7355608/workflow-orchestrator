@@ -153,6 +153,10 @@ export function reduce(
       return withNode(state, event.runId, event.nodeId, (node) => {
         node.verdict = event.verdict;
         node.finishedAt = node.finishedAt ?? event.at;
+        // 审查节点的 attempts 记的是「驳回过几次」，用于回退次数上限
+        if (event.verdict === 'changes_requested') {
+          node.attempts += 1;
+        }
       });
 
     case 'review.escalated':

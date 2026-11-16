@@ -84,7 +84,7 @@ export function WorkflowNodeCard({
         </div>
       </div>
 
-      {node.attempts > 1 ? (
+      {node.attempts > 0 ? (
         <span className="absolute bottom-1.5 right-2 rounded bg-coral-soft px-1 py-0.5 text-[9px] text-coral">
           重试 {node.attempts}
         </span>
