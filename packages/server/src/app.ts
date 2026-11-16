@@ -463,6 +463,45 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     return workspaceAt(run.workspaceRoot ? resolve(run.workspaceRoot) : defaultWorkspaceRoot);
   }
 
+  /**
+   * 保证仓库有一个 HEAD 提交。
+   *
+   * 新建/就地初始化的仓库是空的，没有 HEAD，而 `git worktree add ... HEAD`
+   * 必须有一个有效的起始对象——否则报 `Not a valid object name: 'HEAD'`，
+   * 整个拆解阶段直接失败。刚 init 出来的仓库本来就该有个起点，补一个空提交
+   * 是最小代价的做法。
+   *
+   * 身份用 `-c` 临时指定：用户的全局 git 配置可能根本没有 user.name，
+   * 那样 commit 会以「Please tell me who you are」失败，把一个内部步骤
+   * 变成用户看不懂的错误。
+   */
+  async function ensureHeadCommit(root: string): Promise<void> {
+    try {
+      await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], {
+        cwd: root,
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // 没有 HEAD：继续往下补一个
+    }
+
+    await execFileAsync(
+      'git',
+      [
+        '-c',
+        'user.name=orchestrator',
+        '-c',
+        'user.email=orchestrator@localhost',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'chore: 初始化仓库基线',
+      ],
+      { cwd: root, windowsHide: true },
+    );
+  }
+
   /** 目标目录校验的两种结局：可用，或者一句能直接展示给用户的原因。 */
   type WorkspaceCheck =
     | { ok: true; root: string }
@@ -545,17 +584,15 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       //
       // 用户填一个还不存在的路径，意思就是「在这里开个新项目」。让他先去
       // 手动 mkdir 再 git init 只是仪式——而且他多半会漏掉 git init，然后
-      // 被下面那条「不是 git 仓库」打回来。
-      //
-      // 只对**不存在**的路径这么做：已存在但不是 git 的目录属于用户的资产，
-      // 擅自 git init 会在他的目录里留下一个 .git，那个后果不该由一次新建
-      // 运行来承担。
+      // 被拒绝打回来。
       try {
         await mkdir(root, { recursive: true });
         await execFileAsync('git', ['init', '-q'], {
           cwd: root,
           windowsHide: true,
         });
+        // 空的 git 仓库没有 HEAD，worktree add 会直接失败
+        await ensureHeadCommit(root);
       } catch (error) {
         return {
           ok: false,
@@ -581,6 +618,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           cwd: root,
           windowsHide: true,
         });
+        await ensureHeadCommit(root);
       } catch (error) {
         return {
           ok: false,

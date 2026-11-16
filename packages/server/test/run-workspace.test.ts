@@ -193,6 +193,17 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
     expect(existsSync(missing)).toBe(true);
     expect(existsSync(join(missing, '.git'))).toBe(true);
 
+    // 空仓库没有 HEAD，`git worktree add ... HEAD` 会直接失败
+    // （Not a valid object name），整个拆解阶段就卡在这。必须补一个基线提交。
+    const head = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: missing,
+      windowsHide: true,
+    }).then(
+      () => true,
+      () => false,
+    );
+    expect(head).toBe(true);
+
     const runId = (response.json() as { id: string }).id;
     expect(store.snapshot.runs[runId]?.workspaceRoot).toBe(missing);
 
