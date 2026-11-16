@@ -494,8 +494,8 @@ export function NewRunPage() {
             </div>
             <p className="mt-1 text-[10px] leading-4 text-passive">
               这是 Agent 干活的地方，成果会落在这里——不是编排器自己的仓库。
-              目录还不存在时会自动创建并 git init；已存在但不是 git 仓库的目录会被
-              拒绝（不会擅自往你的目录里塞 .git）。
+              目录还不存在会自动创建并 git init；已存在但不是 git 仓库的也会就地
+              初始化（删掉 .git 即可回到原样）。
             </p>
 
             <div className="mt-3">

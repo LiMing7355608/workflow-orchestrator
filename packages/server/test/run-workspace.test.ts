@@ -199,48 +199,46 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
     await app.close();
   });
 
-  it('已存在但不是 git 的目录：拒绝，不擅自往用户目录里塞 .git', async () => {
+  it('已存在但不是 git 的目录：就地初始化，不卡住用户', async () => {
     const { app, store, root } = await createFixture('git');
     const plain = join(root, 'user-existing-dir');
     await mkdir(plain, { recursive: true });
-    const before = runCount(store);
+    expect(existsSync(join(plain, '.git'))).toBe(false);
 
     const response = await createRun(app, {
       title: '已有目录',
-      goal: '不应当被 init',
+      goal: '应当被就地初始化',
       dag: HANDWRITTEN_DAG,
       workspaceRoot: plain,
     });
 
-    expect(response.statusCode).toBe(400);
-    const body = response.json() as { error: string };
-    expect(body.error).toBe('workspace_not_git');
-    // 那个目录是用户的资产，一次新建运行不该在里面留下 .git
-    expect(existsSync(join(plain, '.git'))).toBe(false);
-    expect(runCount(store)).toBe(before);
+    // 让用户退出编排器、去开一个终端敲 git init、再回来，纯属摩擦。
+    // git init 可逆（删掉 .git 就回到原样），卡住流程不可逆。
+    expect(response.statusCode).toBe(201);
+    expect(existsSync(join(plain, '.git'))).toBe(true);
+
+    const runId = (response.json() as { id: string }).id;
+    expect(store.snapshot.runs[runId]?.workspaceRoot).toBe(plain);
 
     await app.close();
   });
 
-  it('目录存在但不是 git 仓库：400，并说明为什么需要 git', async () => {
+  it('已存在的普通目录：就地 git init，run 记下这个目录', async () => {
     const { app, store, root } = await createFixture('git');
     const plain = join(root, 'plain-dir');
     await mkdir(plain, { recursive: true });
-    const before = runCount(store);
 
     const response = await createRun(app, {
       title: '不是仓库',
-      goal: '应当被拒绝',
+      goal: '应当被就地初始化',
       dag: HANDWRITTEN_DAG,
       workspaceRoot: plain,
     });
 
-    expect(response.statusCode).toBe(400);
-    const body = response.json() as { error: string; message: string };
-    expect(body.error).toBe('workspace_not_git');
-    expect(body.message).toContain('不是 git 仓库');
-    expect(body.message).toContain(plain);
-    expect(runCount(store)).toBe(before);
+    expect(response.statusCode).toBe(201);
+    expect(existsSync(join(plain, '.git'))).toBe(true);
+    const runId = (response.json() as { id: string }).id;
+    expect(store.snapshot.runs[runId]?.workspaceRoot).toBe(plain);
 
     await app.close();
   });

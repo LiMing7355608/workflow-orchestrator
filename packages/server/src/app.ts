@@ -566,12 +566,28 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return { ok: true, root };
     }
 
+    // 已经存在但不是 git 仓库：同样就地初始化。
+    //
+    // 早先这里是拒绝，理由是「那是用户的资产，不该擅自塞 .git」。但实际使用
+    // 下来这道拦阻只制造摩擦——用户填一个目录就是要在那儿干活，被一句
+    // 「请先 git init」挡回来，等于让他退出编排器、去开个终端、再回来。
+    // git init 是可逆的（删掉 .git 就回到原样），而卡住流程是不可逆的体验损失。
+    //
+    // 真要拒绝的只有一种：初始化失败（权限不足、目录只读）。那时候必须把
+    // 原因说清，而不是笼统地说「不可用」。
     if (workspaceMode === 'git' && !(await isGitWorkTree(root))) {
-      return {
-        ok: false,
-        code: 'workspace_not_git',
-        message: `目标目录不是 git 仓库：${root}。编排器要为每个节点建 git worktree 才能隔离改动，请选一个 git 仓库（或先 git init）。`,
-      };
+      try {
+        await execFileAsync('git', ['init', '-q'], {
+          cwd: root,
+          windowsHide: true,
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          code: 'workspace_not_git',
+          message: `目标目录不是 git 仓库，自动初始化也失败了：${root}（${(error as Error).message}）`,
+        };
+      }
     }
 
     return { ok: true, root };
