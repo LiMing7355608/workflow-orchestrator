@@ -12,6 +12,7 @@ import {
   type AgentUsage,
 } from './parsers.js';
 import { DEFAULT_CONCURRENCY, isRunSettled, pendingHumanWork, pickBatch } from './scheduler.js';
+import { resolveSession } from './session.js';
 import type {
   NodeFacts,
   OrchestratorEvent,
@@ -23,12 +24,33 @@ export interface AdvanceDeps {
   getRun(runId: string): RunFacts | undefined;
   emit(event: OrchestratorEvent): Promise<void>;
   runner: AgentRunner;
-  workspace: WorkspacePort;
+  /**
+   * 按运行取工作区：每个运行可能指向不同仓库，不能再是一个全局实例。
+   *
+   * 之前这里是 `workspace: WorkspacePort`，于是所有运行的成果都堆在启动
+   * server 的那个仓库里——「先确定在哪儿干活，再开工」这个顺序被跳过了。
+   *
+   * 实现方应当按 `run.workspaceRoot` 缓存实例（同一个根目录复用一份），
+   * 因为审批、普通路由节点这些零执行节点也会走到这条取值路径上。
+   */
+  workspaceFor: (run: RunFacts) => WorkspacePort;
   resolveAgent(agentId: string): AgentProfile | undefined;
   now(): string;
   concurrency?: number;
   /** 单次推进的最大轮次，防止调度循环失控 */
   maxRounds?: number;
+  /**
+   * 确定性会话 id 派生器，供 `session.derive: 'uuidv5'` 的平台续跑。
+   *
+   * 必须由宿主注入：派生要用 node:crypto，而内核要能被前端打包。
+   * 不注入时 uuidv5 类平台一律降级为新跑——比让它们带着空 session 启动安全。
+   */
+  deriveSessionId?: (runId: string, nodeId: string) => string;
+  /**
+   * 排障日志。续跑判定里的「为什么没续上」不写成事件（正常降级不该刷屏），
+   * 但也不该消失，因此只走这条可选通道。
+   */
+  log?: (msg: string, detail?: unknown) => void;
   /**
    * 把节点产物落盘，返回文件路径。
    *
@@ -40,14 +62,46 @@ export interface AdvanceDeps {
     nodeId: string,
     artifact: NodeArtifact,
   ) => Promise<string | undefined>;
-  /** 读回某节点上次落盘的 diff 文本，供审查提示词使用 */
+  /**
+   * 读回某节点上次落盘的 diff 文本，供审查提示词使用
+   */
   loadArtifact?: (runId: string, nodeId: string) => Promise<string | undefined>;
+  /**
+   * 中止信号。
+   *
+   * 只控制「还要不要派发下一批」：`abort` 之后已经在跑的节点不会被强行
+   * 打断，也不会被这里判成失败——它们的结局由 runner 的 `cancelled` 决定。
+   * 编排器不越过执行层去替进程下结论，这是本层唯一的正确姿势。
+   */
+  signal?: AbortSignal;
+  /**
+   * 节点级「进行中」标记，键由 `nodeInFlightKey` 生成。
+   *
+   * 存在的唯一理由是：同一个节点不能有两个 Agent 进程。整轮推进与单节点运行
+   * 是两条独立的调用路径，光靠节点事实挡不住——事实是在 `node.started` 落盘
+   * 之后才变成 running 的，而两条路径可能在同一拍里各自读到了「还没开始」。
+   *
+   * 由宿主注入并持有，内核只负责在里面登记与撤销：表必须是全进程唯一的一份，
+   * 内核自己 `new Set()` 出来的东西对下一次调用毫无约束力。
+   */
+  nodeInFlight?: Set<string>;
+}
+
+/**
+ * 节点级进行中标记的键。
+ *
+ * 用 `runId/nodeId` 而不是只有 nodeId：不同运行里的同名节点是完全不相干的两件事，
+ * 撞键会把另一个运行里正常执行的节点判成「正在跑」。
+ */
+export function nodeInFlightKey(runId: string, nodeId: string): string {
+  return `${runId}/${nodeId}`;
 }
 
 export type AdvanceStopReason =
   | 'idle'
   | 'awaiting_human'
   | 'paused'
+  | 'cancelled'
   | 'max_rounds'
   | 'missing_run';
 
@@ -258,6 +312,27 @@ function createEventRelay(
         continue;
       }
 
+      if (item.kind === 'status') {
+        // 进度信号不落 agent.output：它是「进行到第几步」，不是 Agent 说的内容。
+        // 只有结算那一拍带上用量时才值得记一条事实——用量是成本，不是进度。
+        const usage = formatUsage(item.usage);
+        if (!usage) {
+          continue;
+        }
+        dispatch({
+          type: 'agent.output',
+          at,
+          runId,
+          nodeId,
+          agentId,
+          chunk: usage,
+          kind: 'usage',
+        });
+        continue;
+      }
+
+      // 空正文不发：`{"type":"thinking","text":""}` 这类空思考块一个字都没说，
+      // 落进事实就是凭空占掉时间线的一条
       const chunk = (item.text ?? item.toolName ?? formatUsage(item.usage) ?? '').trim();
       if (!chunk) {
         continue;
@@ -331,10 +406,11 @@ async function executeMerge(
   node: NodeFacts,
   run: RunFacts,
   deps: AdvanceDeps,
+  workspace: WorkspacePort,
 ): Promise<void> {
   const targetBranch = integrationBranchOf(runId);
 
-  const merge = deps.workspace.merge?.bind(deps.workspace);
+  const merge = workspace.merge?.bind(workspace);
   if (!merge) {
     await deps.emit({
       type: 'node.failed',
@@ -416,15 +492,43 @@ async function executeMerge(
   });
 }
 
+/**
+ * 一个节点的执行结局，从调度角度唯一有意义的那一维。
+ *
+ * 只区分「这一轮是不是被外部终止了」：失败不需要回报给调度器（失败事实
+ * 已经落在事件里，节点自然不会被再次挑中），而被终止的节点会回到就绪集合，
+ * 调度器必须知道「不要再往下派了」。
+ */
+type NodeOutcome = 'interrupted' | undefined;
+
 async function executeNode(
   runId: string,
   node: NodeFacts,
   deps: AdvanceDeps,
-): Promise<void> {
+): Promise<NodeOutcome> {
+  // 中止后不再开始任何新节点：连审批记录都不补。
+  //
+  // 为什么静默返回而不是发一条 node.failed：这个节点根本没执行过，把它
+  // 记成失败是在伪造事实。真正的终止事实由宿主写成 run.paused，已经在跑的
+  // 那几个节点各自按 runner 的结局收尾。
+  if (deps.signal?.aborted) {
+    return;
+  }
+
   const run = deps.getRun(runId);
   if (!run) {
     return;
   }
+
+  /**
+   * 工作区在这一刻按运行取定。
+   *
+   * 目标仓库在 `run.created` 时就写进事实了，同一个运行里的所有节点共用它；
+   * 不同运行之间绝不能共用——共用等于让 A 的产物落进 B 的仓库。
+   * 取一次而不是每次调用都取：这一轮执行里 prepare / capture / release
+   * 必须是同一个实例，否则产物会被采集到另一个目录上。
+   */
+  const workspace = deps.workspaceFor(run);
 
   // 审批节点：写一条待审批记录就退出，绝不阻塞进程
   if (node.type === 'approval') {
@@ -448,7 +552,7 @@ async function executeNode(
   if (node.type === 'route') {
     await deps.emit({ type: 'node.started', at: deps.now(), runId, nodeId: node.id });
     if (node.action === 'merge') {
-      await executeMerge(runId, node, run, deps);
+      await executeMerge(runId, node, run, deps, workspace);
       return;
     }
     // 普通路由节点：纯逻辑、零副作用，直接完成
@@ -477,9 +581,37 @@ async function executeNode(
   const policy = node.type === 'review' ? 'default' : 'accept-edits';
   const prompt = await buildPrompt(run, node, upstreamOf(run, node), deps);
 
+  // 续跑判定只能在这里做：此刻 node 是「这一轮」的事实快照，
+  // attempts 已经反映了被退回的次数，nativeSessionId 也已经是上一轮捕获到的值。
+  const deriveId = deps.deriveSessionId;
+  const session = resolveSession(agent, node, deriveId, runId);
+
+  if (session.resumable && session.sessionId) {
+    // 先落一条「复用会话」事实再启动：CLI 一旦起来，看板就该能解释
+    // 这一轮的上下文是接来的还是新开的
+    await deps.emit({
+      type: 'node.resumed_session',
+      at: deps.now(),
+      runId,
+      nodeId: node.id,
+      agentId: agent.id,
+      sessionId: session.sessionId,
+      reason: agent.session.derive === 'uuidv5' ? '确定性派生' : '沿用捕获的原生会话',
+    });
+  } else if (session.reason) {
+    // 不续跑是常态（首次执行、回放无 hook 拿不到 id），写成事件只会刷屏，
+    // 但排障时又必须能回答「这次为什么没接上」，所以只进日志。
+    deps.log?.(`节点 ${node.id} 不续跑：${session.reason}`, {
+      runId,
+      nodeId: node.id,
+      agentId: agent.id,
+      reason: session.reason,
+    });
+  }
+
   let cwd: string;
   try {
-    cwd = await deps.workspace.prepare(runId, node.id);
+    cwd = await workspace.prepare(runId, node.id);
   } catch (error) {
     await deps.emit({
       type: 'node.failed',
@@ -493,7 +625,13 @@ async function executeNode(
 
   await deps.emit({ type: 'node.started', at: deps.now(), runId, nodeId: node.id });
 
-  const argv = buildAgentArgv(agent, { prompt, workdir: cwd, policy });
+  const argv = buildAgentArgv(agent, {
+    prompt,
+    workdir: cwd,
+    policy,
+    session: session.resumable ? session.sessionId : session.plannedSessionId,
+    resume: session.resumable,
+  });
 
   // profile 里声明的 parser 就是「这台 CLI 的输出怎么读」的唯一事实源。
   // 解析器与事件转发在启动前后建好，Agent 一开口就能按结构入流。
@@ -528,16 +666,48 @@ async function executeNode(
   await relay.flush();
 
   if (!result.ok) {
+    // 被用户停下 ≠ 执行失败，两者必须落成不同的事件。
+    //
+    // 执行层给出的 `cancelled` 说的是「这个进程是人让我停的」，不是「这件事做砸了」。
+    // 把它记成 node.failed 的后果是实证过的：节点停在失败状态，就绪集合永远
+    // 挑不到它，用户点「继续」也续不上，只能新建一个运行——一条本该可恢复的
+    // 中断，被写成了一次需要人介入的失败。
+    //
+    // 所以这里只问一件事：是人让它停的，还是它自己没跑成。
+    if (result.cancelled) {
+      // 幂等：节点级停止接口会抢先把这条事实落下去（否则界面在进程退出前
+      // 一直显示运行中）。这里据当前事实判断，已经记过就不再记第二遍。
+      const current = deps.getRun(runId)?.nodes[node.id];
+      const alreadyInterrupted =
+        current !== undefined &&
+        current.interruptedAt !== undefined &&
+        current.startedAt === undefined;
+
+      if (!alreadyInterrupted) {
+        await deps.emit({
+          type: 'node.interrupted',
+          at: deps.now(),
+          runId,
+          nodeId: node.id,
+          reason: '运行被用户停止',
+        });
+      }
+      await workspace.release(runId, node.id).catch(() => {});
+      return 'interrupted';
+    }
+
     await deps.emit({
       type: 'node.failed',
       at: deps.now(),
       runId,
       nodeId: node.id,
+      // 超时与普通非零退出必须分开措辞：前者是 Agent 自己没跑完，
+      // 后者是它跑完了但报错，用户看到的下一步动作完全不同。
       reason: result.timedOut
         ? `Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
         : result.error ?? `退出码 ${result.exitCode ?? '未知'}`,
     });
-    await deps.workspace.release(runId, node.id).catch(() => {});
+    await workspace.release(runId, node.id).catch(() => {});
     return;
   }
 
@@ -549,7 +719,7 @@ async function executeNode(
     // 顺序反过来的话，回退传播时它还没完成，不会被一并作废，
     // 结果就是上游重跑完了却再也不会重审。
     await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
-    await deps.workspace.release(runId, node.id).catch(() => {});
+    await workspace.release(runId, node.id).catch(() => {});
 
     if (verdict === 'changes_requested') {
       const attempt = node.attempts + 1;
@@ -583,10 +753,85 @@ async function executeNode(
   // 那条分支和目录就没了，diff 再也拿不回来。
   // 采集/存盘失败只意味着下游看不到 diff，不影响本次执行的成功判定。
   if (node.type === 'implement') {
-    await captureArtifact(runId, node.id, deps);
+    await captureArtifact(runId, node.id, workspace, deps);
   }
 
-  await deps.workspace.release(runId, node.id).catch(() => {});
+  await workspace.release(runId, node.id).catch(() => {});
+}
+
+/**
+ * 单节点执行，把调度器才需要的那一维结局丢掉。
+ *
+ * 对外暴露的是这个薄壳而不是 `executeNode` 本身：`NodeOutcome` 回答的是
+ * 「这一批里有没有节点被打断、还要不要往下派」，单跑路径没有下一批可派，
+ * 把那个维度透出去只会诱使调用方去猜调度语义。
+ */
+export async function runSingleNode(
+  runId: string,
+  node: NodeFacts,
+  deps: AdvanceDeps,
+): Promise<void> {
+  await executeNode(runId, node, deps);
+}
+
+/** 单节点运行的结果。失败时 `reason` 是给人看的一句解释，不是错误码。 */
+export interface RunNodeResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * 跑一个节点，不等整轮编排。
+ *
+ * 三条语义，都是刻意的：
+ *
+ * 1. **不检查依赖**。用户显式点「运行此节点」就是要求覆盖调度顺序；依赖检查
+ *    是调度器（`pickBatch`）的职责，不是执行器的。在这里补一道依赖闸门，
+ *    等于让「上游还卡着但我就要先跑这一个」这件事永远做不到。
+ * 2. **拒绝的判据是「这一轮还没结算完」，不是「跑过」**。已经开始且有
+ *    `finishedAt` 的节点（失败或完成）允许再跑一次——重跑一个失败节点正是
+ *    这个入口存在的理由。而 `node.failed` 也会写 `startedAt`，所以按
+ *    「有 startedAt 就拒绝」写，会把最常见的重跑场景一起挡死。
+ * 3. **互斥落在 `nodeInFlight` 上**。检查和登记之间没有任何 await，
+ *    因此同一拍里的两个请求必然一胜一负；命中即返回失败，由调用方翻成 409。
+ *    这张表由宿主注入，整轮推进共用同一份，见 `AdvanceDeps.nodeInFlight`。
+ */
+export async function runNode(
+  runId: string,
+  nodeId: string,
+  deps: AdvanceDeps,
+): Promise<RunNodeResult> {
+  const run = deps.getRun(runId);
+  if (!run) {
+    return { ok: false, reason: `运行不存在：${runId}` };
+  }
+
+  const node = run.nodes[nodeId];
+  if (!node) {
+    return { ok: false, reason: `节点不存在：${nodeId}` };
+  }
+
+  if (node.startedAt !== undefined && node.finishedAt === undefined) {
+    return { ok: false, reason: '该节点正在执行，等这一次结束再来' };
+  }
+
+  const key = nodeInFlightKey(runId, nodeId);
+  if (deps.nodeInFlight?.has(key)) {
+    return { ok: false, reason: '该节点正在执行（已有一条派发在跑）' };
+  }
+
+  deps.nodeInFlight?.add(key);
+  try {
+    // node 是调用时刻的事实快照，与整轮推进里派发出去的那份同源：
+    // 会话续跑与提示词都读它，单跑不该看到另一套上下文。
+    await executeNode(runId, node, deps);
+  } finally {
+    // 必须放 finally：执行层抛错时若不撤销标记，这个节点会永远被判成
+    // 「正在执行」，从此既跑不了也重置不了。
+    deps.nodeInFlight?.delete(key);
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -599,15 +844,16 @@ async function executeNode(
 async function captureArtifact(
   runId: string,
   nodeId: string,
+  workspace: WorkspacePort,
   deps: AdvanceDeps,
 ): Promise<void> {
-  if (!deps.workspace.capture) {
+  if (!workspace.capture) {
     return;
   }
 
   let artifact: NodeArtifact;
   try {
-    artifact = await deps.workspace.capture(runId, nodeId);
+    artifact = await workspace.capture(runId, nodeId);
   } catch {
     return;
   }
@@ -635,6 +881,10 @@ async function captureArtifact(
 /**
  * 推进一次运行：反复取就绪批次执行，直到没有可跑的节点、
  * 或者停下来等人（审批 / 审查升级）。
+ *
+ * 工作区不在这里选：每个节点执行时按它所属的运行取（`deps.workspaceFor`）。
+ * 同一批里可能混着不同运行的节点，任何「整轮共用一个工作区」的写法都会
+ * 把别人的产物写进另一个仓库。
  */
 export async function advanceRun(
   runId: string,
@@ -647,6 +897,17 @@ export async function advanceRun(
   while (round < maxRounds) {
     round += 1;
 
+    // 中止优先于一切：连状态判断都不做，直接退出。
+    // 放在循环顶部是必须的——批次执行完才 abort 的情况下，如果不在这里
+    // 检查，下一轮会照样把新一批节点派发出去，等于「停止」慢一拍。
+    //
+    // 这里只拦「还要不要派发」：上一批已经发出去的 executeNode 仍会跑到结算，
+    // 并按 runner 的结局各自落 node.interrupted（而不是 node.failed）。那些
+    // 事件会把节点重新交回就绪集合，这正是「继续」能接着跑的前提。
+    if (deps.signal?.aborted) {
+      return { executed, stopped: 'cancelled' };
+    }
+
     const run = deps.getRun(runId);
     if (!run) {
       return { executed, stopped: 'missing_run' };
@@ -658,7 +919,14 @@ export async function advanceRun(
       return { executed, stopped: 'paused' };
     }
 
-    const batch = pickBatch(run, deps.concurrency ?? DEFAULT_CONCURRENCY);
+    // 已经被单节点运行占住的节点不进这一批。
+    //
+    // 单跑登记的标记早于它那一条 `node.started` 落盘，而这一轮读到的 run
+    // 是新事实之前的那份快照，因此「就绪」里可能还留着它。不在这里筛掉，
+    // 同一节点就会各起一个进程，两边的结局互相覆盖。
+    const batch = pickBatch(run, deps.concurrency ?? DEFAULT_CONCURRENCY).filter(
+      (node) => !deps.nodeInFlight?.has(nodeInFlightKey(runId, node.id)),
+    );
     if (batch.length === 0) {
       const waiting = pendingHumanWork(run);
       if (waiting.length > 0) {
@@ -671,8 +939,21 @@ export async function advanceRun(
       return { executed, stopped: 'idle' };
     }
 
-    await Promise.all(batch.map((node) => executeNode(runId, node, deps)));
+    const outcomes = await Promise.all(
+      batch.map((node) => executeNode(runId, node, deps)),
+    );
     executed.push(...batch.map((node) => node.id));
+
+    // 这一批里有节点是被外部终止的：停在这里。
+    //
+    // 不能直接进下一轮。被打断的节点落的是 node.interrupted，它在投影层已经
+    // 回到 ready（否则「继续」调度不到它），因此下一轮立刻又会把它挑出来，
+    // 而执行层的终止意图还在——那会变成一路重跑到 maxRounds 的空转。
+    // 「停」的意图可能来自 abort 信号，也可能直接来自执行层（进程被外部杀掉），
+    // 两种在调度上都是同一件事：这一轮不再往下派。
+    if (outcomes.includes('interrupted')) {
+      return { executed, stopped: 'cancelled' };
+    }
   }
 
   return { executed, stopped: 'max_rounds' };

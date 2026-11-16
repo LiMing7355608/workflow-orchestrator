@@ -42,6 +42,7 @@ function buildRun(nodes: NodeFacts[]): RunFacts {
     title: '合并测试',
     summary: '',
     goal: '验证节点分支能合进集成分支',
+    workspaceRoot: '/tmp/target-repo',
     specVersion: 'v1.0',
     stage: 'execute',
     createdAt: AT,
@@ -98,7 +99,7 @@ function harness(run: RunFacts, options: HarnessOptions = {}): Harness {
         return { ok: true, exitCode: 0, output: 'done' };
       },
     },
-    workspace,
+    workspaceFor: () => workspace,
     resolveAgent: (id) => DEFAULT_AGENT_PROFILES.find((agent) => agent.id === id),
     now: () => AT,
     concurrency: 4,

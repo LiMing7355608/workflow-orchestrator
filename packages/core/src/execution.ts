@@ -33,6 +33,25 @@ export interface AgentRunResult {
   error?: string;
   /** 是否因为超时被终止 */
   timedOut?: boolean;
+  /**
+   * 是否因为外部终止（用户点了「停止」）而结束。
+   *
+   * 与 `timedOut` 分开：超时是 Agent 自己的问题，取消是人的决定。
+   * 两者都 `ok: false`，但「谁让它停的」决定了看板上该说哪句话，
+   * 所以不能合并成一个布尔。
+   */
+  cancelled?: boolean;
+}
+
+/**
+ * 终止请求。
+ *
+ * `nodeId` 可选：给节点是「只停这一个」，不给就是「这个运行里的全停」。
+ * 语义上没有第三个维度——终止永远按运行隔离，绝不跨 run 误杀。
+ */
+export interface AgentCancelRequest {
+  runId: string;
+  nodeId?: string;
 }
 
 export interface AgentRunner {
@@ -41,6 +60,17 @@ export interface AgentRunner {
     request: AgentRunRequest,
     onChunk: (chunk: string) => void,
   ): Promise<AgentRunResult>;
+  /**
+   * 终止某个运行（或某个节点）正在执行的 Agent。
+   *
+   * 做成可选方法：回放器、HTTP 执行器之类的实现未必有「进程」可停，
+   * 调用方必须容忍它不存在，并且不能因此假装终止成功。
+   *
+   * 返回值是**实际**终止的数量，不是「发出了多少次终止请求」——护栏在
+   * 实现方：只有确认目标已经不再执行，才允许把它算进去。宣称停掉了但
+   * 进程还在跑，是终止路径上最坏的一种谎。
+   */
+  cancel?(request: AgentCancelRequest): Promise<number>;
 }
 
 /**
@@ -84,6 +114,13 @@ export type MergeResult =
   | { ok: true; branch: string; merged: string[]; commit?: string }
   | { ok: false; branch: string; conflicts: string[]; merged: string[]; reason: string };
 
+/**
+ * 工作区端口：为节点准备独立工作目录。
+ *
+ * 一个实例只服务一个目标仓库——不同运行可能指向完全不同的仓库，所以编排器
+ * 拿到的不是「全局唯一的工作区」，而是「按运行取工作区」的工厂，
+ * 见 `AdvanceDeps.workspaceFor`。
+ */
 export interface WorkspacePort {
   /** 为节点准备独立工作目录，返回绝对路径。必须在 Agent 启动之前完成。 */
   prepare(runId: string, nodeId: string): Promise<string>;

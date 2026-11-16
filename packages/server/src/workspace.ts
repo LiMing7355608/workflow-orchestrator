@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -15,7 +15,12 @@ const execFileAsync = promisify(execFile);
 /** 采集 diff 的输出上限。超大改动宁可在这里截断，也不要把进程缓冲区撑爆。 */
 const CAPTURE_MAX_BUFFER = 8 * 1024 * 1024;
 
-/** 集成工作区在 `.worktrees/<runId>/` 下占用的目录名，与节点目录同级。 */
+/**
+ * 集成工作区在 `<worktreeRoot>/<runId>/` 下占用的目录名，与节点目录同级。
+ *
+ * 取一个不可能与节点 id 撞车的名字：它在同一个父目录里与所有节点 worktree
+ * 并列，用 `integration` 之类的名字迟早会和一个真实的节点 id 重叠。
+ */
 const INTEGRATION_DIR = '_integration';
 
 /**
@@ -57,15 +62,50 @@ function parsePorcelain(stdout: string): string[] {
 }
 
 /**
+ * 目标目录是不是一个可用的 git 工作树。
+ *
+ * 为什么要单独问一句：`git worktree add` 在非 git 目录里会失败，但那是一句
+ * 混合着用法提示的 git 报错，用户看到的是「这个 Agent 跑挂了」，而真实原因
+ * 是「你选的目录不是仓库」。校验必须发生在建运行之前，并且能翻译成人话。
+ *
+ * 判据是 `--is-inside-work-tree` 而不是「有没有 .git 目录」：前者由 git 自己
+ * 回答（子目录、worktree、软链接都算对），后者会在 submodule、worktree 里的
+ * `.git` 文件、以及任意子目录上给出错误结论。裸仓库同样返回 false——它没有
+ * 可交付的工作区。
+ */
+export async function isGitWorkTree(dir: string): Promise<boolean> {
+  const result = await new Promise<GitResult>((resolvePromise) => {
+    execFile(
+      'git',
+      ['rev-parse', '--is-inside-work-tree'],
+      { cwd: dir, windowsHide: true, timeout: 15_000 },
+      (error, stdout, stderr) => {
+        resolvePromise({
+          ok: error === null,
+          stdout: typeof stdout === 'string' ? stdout : '',
+          stderr: typeof stderr === 'string' ? stderr : '',
+        });
+      },
+    );
+  });
+  return result.ok && result.stdout.trim() === 'true';
+}
+
+/**
  * 每个实现节点独占一个 git worktree 与一条分支。
  *
  * 文件系统级隔离是并行安全的最终保障——调度器的文件范围检查只是静态近似，
  * 真正让两个 Agent 不会互相踩的是各写各的目录。
+ *
+ * 「仓库在哪」与「worktree 落在哪」是两个独立的位置，构造函数逼调用方把它们
+ * 分开传：仓库根是用户选的目标目录（他要求成果出现的地方），而 worktree 必须
+ * 落在编排器自己的 data 目录下——写进用户仓库的 `.worktrees/` 等于往他的
+ * 工程里塞一堆还要他自己清理的垃圾，`git status` 也会被污染。
  */
 export class GitWorktreeWorkspace implements WorkspacePort {
   constructor(
     private readonly repoRoot: string,
-    private readonly baseDir = '.worktrees',
+    private readonly worktreeRoot: string,
   ) {}
 
   private branchOf(runId: string, nodeId: string): string {
@@ -73,7 +113,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   }
 
   private dirOf(runId: string, nodeId: string): string {
-    return resolve(this.repoRoot, this.baseDir, runId, nodeId);
+    return resolve(this.worktreeRoot, runId, nodeId);
   }
 
   private async git(args: string[]): Promise<void> {
@@ -109,7 +149,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   }
 
   private integrationDirOf(runId: string): string {
-    return resolve(this.repoRoot, this.baseDir, runId, INTEGRATION_DIR);
+    return resolve(this.worktreeRoot, runId, INTEGRATION_DIR);
   }
 
   async prepare(runId: string, nodeId: string): Promise<string> {
@@ -392,7 +432,12 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   }
 }
 
-/** 不落 git 的临时目录实现，用于测试与无仓库场景。 */
+/**
+ * 不落 git 的临时目录实现，用于测试与无仓库场景。
+ *
+ * `root` 由调用方给（服务端统一给 `data/worktrees`，与目标仓库无关）：
+ * 目标目录只决定「在哪个仓库里干活」，节点目录永远由编排器自己管。
+ */
 export class TempDirWorkspace implements WorkspacePort {
   constructor(private readonly root: string) {}
 
@@ -402,8 +447,18 @@ export class TempDirWorkspace implements WorkspacePort {
     return dir;
   }
 
-  async release(): Promise<void> {
-    // 临时目录不主动清理，便于事后排查
+  /**
+   * 释放临时目录：真的删掉。
+   *
+   * 早先这里刻意不清理「便于事后排查」，代价是目录无限累积，而规划与改图
+   * 一度复用固定目录，上一轮的交付文件会被下一轮读回来。产物 diff 在 release
+   * 之前就已采集落盘，删目录不会丢东西。
+   */
+  async release(runId: string, nodeId: string): Promise<void> {
+    await rm(resolve(this.root, runId, nodeId), {
+      recursive: true,
+      force: true,
+    }).catch(() => {});
   }
 
   /**

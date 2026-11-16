@@ -35,6 +35,7 @@ function buildRun(nodes: NodeFacts[], runId = 'run-t'): RunFacts {
     title: '产物测试',
     summary: '',
     goal: '验证审查能看到真实改动',
+    workspaceRoot: '/tmp/target-repo',
     specVersion: 'v1.0',
     stage: 'execute',
     createdAt: AT,
@@ -94,11 +95,13 @@ function harness(
         return { ok: true, exitCode: 0, output: text };
       },
     },
-    workspace: {
+    // 工作区按运行取。这里只验「采集 → 落盘 → 读回」那条链，
+    // 目标仓库具体是什么与结论无关，所以假实现固定返回同一套目录。
+    workspaceFor: () => ({
       prepare: async (runId, nodeId) => `/tmp/${runId}/${nodeId}`,
       release: async () => {},
       ...(options.capture ? { capture: async (runId, nodeId) => options.capture!(runId, nodeId) } : {}),
-    },
+    }),
     resolveAgent: (id) => DEFAULT_AGENT_PROFILES.find((agent) => agent.id === id),
     now: () => AT,
     concurrency: 4,

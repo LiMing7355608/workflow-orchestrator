@@ -16,6 +16,7 @@ export type {
   ApprovalView,
   BaseEvent,
   BoardLane,
+  DagAmendment,
   EdgeView,
   EventType,
   EventView,
@@ -24,6 +25,8 @@ export type {
   NodeType,
   NodeView,
   OrchestratorEvent,
+  PlanFailure,
+  PlanIssue,
   ProjectState,
   ReviewVerdict,
   RunDetailView,
@@ -93,11 +96,27 @@ export type {
   AgentUsage,
 } from './parsers.js';
 
-export { advanceRun, parseVerdict } from './orchestrator.js';
+export { resolveSession } from './session.js';
 
-export type { AdvanceDeps, AdvanceResult, AdvanceStopReason } from './orchestrator.js';
+export type { SessionResolution } from './session.js';
+
+export {
+  advanceRun,
+  nodeInFlightKey,
+  parseVerdict,
+  runNode,
+  runSingleNode,
+} from './orchestrator.js';
 
 export type {
+  AdvanceDeps,
+  AdvanceResult,
+  AdvanceStopReason,
+  RunNodeResult,
+} from './orchestrator.js';
+
+export type {
+  AgentCancelRequest,
   AgentRunRequest,
   AgentRunResult,
   AgentRunner,
