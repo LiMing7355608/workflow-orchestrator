@@ -18,3 +18,17 @@ export type { Dag, DagNode } from './schema.js';
 export { availabilityOrder, validateDag } from './validate.js';
 
 export type { DagIssue, DagIssueKind, ValidationResult } from './validate.js';
+
+export {
+  DagGenerationError,
+  PLANNER_PROMPT_MARKER,
+  generateDag,
+  pickPlannerAgent,
+  usablePlannerAgents,
+} from './generate.js';
+
+export type {
+  GeneratedPlan,
+  PlannerExecution,
+  PlannerOptions,
+} from './generate.js';

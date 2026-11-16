@@ -352,13 +352,19 @@ export function findAgentByLabel(
   return catalog.find((agent) => agent.label === label);
 }
 
+const PLACEHOLDER_TOKENS = ['prompt', 'model', 'session', 'workdir'] as const;
+
+/** 是否残留未被替换的已知占位符。 */
+function hasUnresolvedPlaceholder(value: string): boolean {
+  return PLACEHOLDER_TOKENS.some((token) => value.includes(`{${token}}`));
+}
+
 /**
  * 拼出实际要执行的 argv。
  *
  * 占位符替换只做字面量替换，不做 shell 转义——参数从不经过 shell，
  * 提示词一律走 stdin，这是 Windows 上 `.cmd` 包装唯一安全的用法。
- */
-export function buildAgentArgv(
+ */export function buildAgentArgv(
   profile: AgentProfile,
   options: {
     prompt?: string;
@@ -393,8 +399,9 @@ export function buildAgentArgv(
       continue;
     }
     const expanded = expand(arg);
-    if (expanded.includes('{')) {
-      // 占位符没有值可用时整条跳过，避免把字面量 {model} 传给 CLI
+    // 只看已知占位符是否残留。不能判断「是否含 {」——提示词正文里就可能有
+    // 花括号（比如要求 Agent 输出 JSON），那会把整条参数误判成未替换。
+    if (hasUnresolvedPlaceholder(expanded)) {
       continue;
     }
     argv.push(expanded);

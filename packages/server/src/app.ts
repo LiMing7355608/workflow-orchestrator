@@ -17,7 +17,15 @@ import {
   type RunFacts,
   type WorkspacePort,
 } from '@orchestrator/core';
-import { parseDag, safeParseDag, validateDag } from '@orchestrator/planner';
+import {
+  DagGenerationError,
+  generateDag,
+  parseDag,
+  safeParseDag,
+  validateDag,
+  type Dag,
+  type DagIssue,
+} from '@orchestrator/planner';
 import { probeCatalog } from './probe.js';
 import { MockAgentRunner, SpawnAgentRunner } from './runners.js';
 import { buildSeedEvents } from './seed.js';
@@ -49,8 +57,18 @@ const approvalBodySchema = z.object({
 const createRunBodySchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
-  dag: z.unknown(),
+  /** 省略时由 Planner 依据 goal 现生成；显式给出则走客户端手写的老路 */
+  dag: z.unknown().optional(),
 });
+
+/** 生成来源摘要，随 201 响应回给客户端；客户端自带 DAG 时为 null。 */
+interface PlanSummary {
+  attempts: number;
+  issues: DagIssue[];
+  /** 是哪一路 Agent 规划的 */
+  agentId: string;
+  agentLabel: string;
+}
 
 /**
  * Fastify 应用工厂。
@@ -184,13 +202,56 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     }
 
-    const dag = safeParseDag(body.data.dag);
-    if (!dag.success) {
-      return reply.code(400).send({ error: 'invalid_dag', issues: dag.error.issues });
+    let dag: Dag;
+    let plan: PlanSummary | null = null;
+
+    if (body.data.dag !== undefined) {
+      const parsed = safeParseDag(body.data.dag);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_dag', issues: parsed.error.issues });
+      }
+      dag = parsed.data;
+    } else {
+      // 规划不另开通道：走与节点相同的执行器与工作区
+      try {
+        const generated = await generateDag(
+          body.data.goal,
+          catalog,
+          {
+            runner,
+            workspace,
+            onOutput: (chunk) => {
+              // 规划过程也进事件流，出问题时能看到 Agent 说了什么
+              console.log('[planner]', chunk.trim().slice(0, 200));
+            },
+          },
+          { agentId: process.env.PLANNER_AGENT_ID || undefined },
+        );
+        dag = generated.dag;
+        plan = {
+          attempts: generated.attempts,
+          issues: generated.issues,
+          agentId: generated.agentId,
+          agentLabel: generated.agentLabel,
+        };
+      } catch (error) {
+        if (error instanceof DagGenerationError) {
+          // 图不合格是「内容问题」，用 422 把 issues 原样交给调用方去展示
+          return reply.code(422).send({
+            error: 'plan_rejected',
+            message: error.message,
+            issues: error.issues,
+            attempts: error.attempts,
+          });
+        }
+        // Agent 跑不起来属于编排器自身问题，与用户目标无关
+        const message = error instanceof Error ? error.message : String(error);
+        return reply.code(502).send({ error: 'planner_failed', message, issues: [] });
+      }
     }
 
     // 冻结前的最后一道闸：不合法就不许进执行阶段
-    const validation = validateDag(dag.data, catalog);
+    const validation = validateDag(dag, catalog);
     if (!validation.ok) {
       return reply.code(422).send({ error: 'dag_rejected', issues: validation.issues });
     }
@@ -198,7 +259,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const at = now();
     const runId = `run-${Date.now().toString(36)}`;
     const nodes: Record<string, NodeFacts> = {};
-    for (const node of dag.data.nodes) {
+    for (const node of dag.nodes) {
       nodes[node.id] = {
         id: node.id,
         type: node.type,
@@ -215,13 +276,13 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
     const run: RunFacts = {
       id: runId,
-      title: dag.data.title,
-      summary: dag.data.summary,
+      title: dag.title,
+      summary: dag.summary,
       goal: body.data.goal,
-      specVersion: dag.data.specVersion,
+      specVersion: dag.specVersion,
       stage: 'decompose',
       createdAt: at,
-      nodeOrder: dag.data.nodes.map((node) => node.id),
+      nodeOrder: dag.nodes.map((node) => node.id),
       nodes,
     };
 
@@ -231,9 +292,11 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     // 冻结即可开跑，不必等客户端再踢一脚
     void advance(runId);
 
-    return reply
-      .code(201)
-      .send(deriveRunDetail(store.snapshot.runs[runId]!, [...store.history], resolveAgent));
+    // plan 恒存在：客户端自带 DAG 时为 null，前端不必区分两种响应形状
+    return reply.code(201).send({
+      ...deriveRunDetail(store.snapshot.runs[runId]!, [...store.history], resolveAgent),
+      plan,
+    });
   });
 
   app.post<{ Params: { id: string } }>(

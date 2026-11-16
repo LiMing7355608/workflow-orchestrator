@@ -1,7 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    // 只依赖 Node 全局（fetch / AbortController / setTimeout），显式声明避免靠传递依赖碰运气
+    "types": ["node"]
   },
   "include": ["src", "test"]
 }
