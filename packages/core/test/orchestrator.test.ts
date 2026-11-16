@@ -208,4 +208,37 @@ describe('编排循环', () => {
     const failed = h.events.filter((event) => event.type === 'node.failed');
     expect(failed).toHaveLength(1);
   });
+
+  it('Agent 输出按 profile 声明的解析器结构化入流，会话 id 落进节点事实', async () => {
+    // claude 的 profile 声明的就是 claude-stream-json，这里喂它真实形状的 NDJSON
+    const run = buildRun([
+      node({ id: 'impl-a', type: 'implement', agentId: 'claude' }),
+    ]);
+    const ndjson = [
+      '{"type":"system","subtype":"init","session_id":"sess-42"}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"开始改"},{"type":"tool_use","id":"t1","name":"Edit"}]},"session_id":"sess-42"}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"改完了"}]},"session_id":"sess-42"}',
+    ].join('\n');
+
+    const h = harness(run, () => ndjson);
+    await advanceRun('run-t', h.deps);
+
+    const outputs = h.events.filter(
+      (event): event is Extract<OrchestratorEvent, { type: 'agent.output' }> =>
+        event.type === 'agent.output',
+    );
+    // stdout 不再是一整坨文本：正文与工具调用各自成条
+    expect(outputs.map((event) => event.kind)).toEqual(['text', 'tool', 'text']);
+    expect(outputs[1]?.toolName).toBe('Edit');
+
+    const sessions = h.events.filter(
+      (event): event is Extract<OrchestratorEvent, { type: 'agent.session' }> =>
+        event.type === 'agent.session',
+    );
+    // 三条消息都带同一个 session id，编排器去重后只落一条
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.sessionId).toBe('sess-42');
+
+    expect(h.state().runs['run-t']?.nodes['impl-a']?.nativeSessionId).toBe('sess-42');
+  });
 });

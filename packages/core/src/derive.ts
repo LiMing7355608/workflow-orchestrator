@@ -120,6 +120,7 @@ export function deriveNodeView(
     escalated: node.escalated,
     artifactBytes: node.artifactBytes,
     artifactFiles: node.artifactFiles,
+    nativeSessionId: node.nativeSessionId,
   };
 }
 
@@ -189,6 +190,7 @@ function eventKind(event: OrchestratorEvent): EventKind {
     case 'node.reset':
     case 'node.artifact':
     case 'agent.output':
+    case 'agent.session':
       return 'agent';
     default:
       return 'system';
@@ -239,7 +241,13 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
     case 'node.artifact':
       return `${nodeTitleOf(run, event.nodeId)} 产出 ${event.files.length} 个文件的变更（${event.bytes} 字节）`;
     case 'agent.output':
-      return event.chunk.trim();
+      // 工具调用单独说清楚：把「干了什么」和「说了什么」混成一行，
+      // 事件流读起来就只剩一堵文本墙
+      return event.kind === 'tool'
+        ? `调用工具 ${event.toolName ?? '未知工具'}`
+        : event.chunk.trim();
+    case 'agent.session':
+      return `原生会话已建立：${event.sessionId}`;
     default:
       return '';
   }
@@ -257,6 +265,7 @@ export function deriveEvents(run: RunFacts, events: OrchestratorEvent[]): EventV
           ? event.record.nodeId
           : undefined;
     const node = nodeId ? run.nodes[nodeId] : undefined;
+    const output = event.type === 'agent.output' ? event : undefined;
 
     return {
       id: `ev-${index}`,
@@ -265,6 +274,8 @@ export function deriveEvents(run: RunFacts, events: OrchestratorEvent[]): EventV
       message: eventMessage(run, event),
       nodeId,
       agent: node ? nodeAgentLabel(node, resolve) : undefined,
+      kind: output?.kind,
+      toolName: output?.toolName,
     };
   });
 }

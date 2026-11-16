@@ -84,6 +84,15 @@ export { EventBus, emptyState, reduce, replay } from './journal.js';
 
 export type { EventListener } from './journal.js';
 
+export { createParser } from './parsers.js';
+
+export type {
+  AgentEvent,
+  AgentEventKind,
+  AgentOutputParser,
+  AgentUsage,
+} from './parsers.js';
+
 export { advanceRun, parseVerdict } from './orchestrator.js';
 
 export type { AdvanceDeps, AdvanceResult, AdvanceStopReason } from './orchestrator.js';

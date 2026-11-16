@@ -200,6 +200,13 @@ export function reduce(
       // 输出走事件流，不改变任何事实。
       return state;
 
+    case 'agent.session':
+      // 会话 id 是唯一需要落事实的 Agent 输出：它是后续续跑唯一的锚点，
+      // 只活在事件流里的话，重启重放后就会永远拿不到。
+      return withNode(state, event.runId, event.nodeId, (node) => {
+        node.nativeSessionId = event.sessionId;
+      });
+
     case 'node.artifact':
       // 产物只统计量入事实，不改变节点状态机：采集成功与否
       // 都不该影响「这个节点是否完成」，否则一次 git 抖动就能

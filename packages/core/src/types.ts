@@ -9,6 +9,8 @@
  * 「状态字段和真实执行情况一致」这条永远会漂移的约束。
  */
 
+import type { AgentEventKind } from './parsers.js';
+
 export type RunStage = 'spec' | 'decompose' | 'orchestrate' | 'execute';
 
 export type RunStatus = 'draft' | 'running' | 'waiting_for_boss' | 'completed' | 'paused';
@@ -80,6 +82,14 @@ export interface NodeFacts {
   artifactBytes?: number;
   /** 产物命中的路径，用于看板显示「改了哪些文件」 */
   artifactFiles?: string[];
+  /**
+   * Agent 自己报出来的原生会话 id（Claude 的 session_id、Codex 的 thread_id 等）。
+   *
+   * 存进事实是因为会话续跑（`session.derive: 'hooked'` 那类平台）只能靠它：
+   * 进程退出后唯一还能接上上一轮上下文的东西就是这个 id，而它只出现在
+   * 流式输出里，晚一步不落账就永久丢了。
+   */
+  nativeSessionId?: string;
 }
 
 /** 审批记录：不可变追加，每次请求与决策各一条。 */
@@ -135,6 +145,20 @@ export type OrchestratorEvent =
       nodeId: string;
       agentId: string;
       chunk: string;
+      /**
+       * 解析器给出的细分类型。老日志没有这个字段，读时按 text 处理，
+       * 因此它只能是可选的——加必填字段等于让历史事件全部变成非法数据。
+       */
+      kind?: AgentEventKind;
+      /** kind 为 tool 时的工具名，事件流要显示成「调用工具 X」 */
+      toolName?: string;
+    })
+  | (BaseEvent & {
+      /** 采集到 Agent 的原生会话 id。续跑要用，因此必须进事实而不是只走事件流。 */
+      type: 'agent.session';
+      nodeId: string;
+      agentId: string;
+      sessionId: string;
     })
   | (BaseEvent & {
       /** 产物采集完成。只带统计量与落盘位置，diff 原文在文件里。 */
@@ -182,6 +206,8 @@ export interface NodeView {
   /** 上游产物的统计量；没有产物采集时缺省 */
   artifactBytes?: number;
   artifactFiles?: string[];
+  /** 原生会话 id，透出给前端展示与「从这一轮续跑」的入口 */
+  nativeSessionId?: string;
 }
 
 export interface EdgeView {
@@ -198,6 +224,14 @@ export interface EventView {
   message: string;
   nodeId?: string;
   agent?: string;
+  /**
+   * agent 类事件的细分（text / tool / result / usage / session / error）。
+   *
+   * 与 `type` 正交：`type` 决定这一行归到哪个筛选页签，`kind` 只用于给同一
+   * 页签里的条目加个更细的小标记，前端不该拿它做控制流。
+   */
+  kind?: AgentEventKind;
+  toolName?: string;
 }
 
 export interface RunDetailView extends RunView {

@@ -11,7 +11,7 @@ import {
 import { useMemo, useState } from 'react';
 import { cn } from '../../lib/cn';
 import { formatDateTime } from '../../lib/format';
-import type { WorkflowEvent } from '../../types/workflow';
+import type { AgentEventKind, WorkflowEvent } from '../../types/workflow';
 import { Badge, type BadgeTone } from '../ui/Badge';
 import { EmptyState } from '../ui/EmptyState';
 import { Segmented } from '../ui/Segmented';
@@ -72,6 +72,20 @@ const filterOptions: Array<{ value: EventFilter; label: string }> = [
   { value: 'system', label: '系统' },
 ];
 
+/**
+ * agent.output 的细分标记。
+ *
+ * text 故意不给标记：绝大多数行都是正文，逐行挂个「回复」只会制造噪声。
+ * 这里只标注真正需要一眼分辨的几类。
+ */
+const kindMeta: Partial<Record<AgentEventKind, { label: string; className: string }>> = {
+  tool: { label: '工具', className: 'text-accent' },
+  result: { label: '结果', className: 'text-success' },
+  usage: { label: '用量', className: 'text-passive' },
+  error: { label: '错误', className: 'text-danger' },
+  session: { label: '会话', className: 'text-review' },
+};
+
 interface EventStreamProps {
   events: WorkflowEvent[];
   onSelectNode: (nodeId: string | null) => void;
@@ -115,6 +129,10 @@ export function EventStream({ events, onSelectNode }: EventStreamProps) {
             {filtered.map((event) => {
               const meta = eventMeta[event.type];
               const Icon = meta.icon;
+              const kind = event.kind ? kindMeta[event.kind] : undefined;
+              // 工具标记直接显示工具名，比一个笼统的「工具」信息量大得多
+              const kindLabel =
+                event.kind === 'tool' ? event.toolName ?? kind?.label : kind?.label;
               const content = (
                 <>
                   <span
@@ -156,8 +174,18 @@ export function EventStream({ events, onSelectNode }: EventStreamProps) {
                       ) : null}
                     </div>
 
-                    <p className="mt-2 text-[12px] leading-5 text-ink">
-                      {event.message}
+                    <p className="mt-2 flex items-start gap-2 text-[12px] leading-5 text-ink">
+                      {kind && kindLabel ? (
+                        <span
+                          className={cn(
+                            'mt-1 shrink-0 rounded border border-current/25 px-1 text-[10px] font-medium leading-4',
+                            kind.className,
+                          )}
+                        >
+                          {kindLabel}
+                        </span>
+                      ) : null}
+                      <span className="min-w-0 break-words">{event.message}</span>
                     </p>
                   </div>
                 </>

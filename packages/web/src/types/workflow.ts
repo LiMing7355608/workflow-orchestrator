@@ -53,6 +53,14 @@ export interface WorkflowEdge {
   label?: string;
 }
 
+/**
+ * Agent 输出的细分类型，与后端 `AgentEventKind` 一一对应。
+ *
+ * 前端刻意不引 `@orchestrator/core` 的类型：两边各留一份声明，后端加字段时
+ * 这里只是少一个标记，不会让整页编译不过。
+ */
+export type AgentEventKind = 'text' | 'tool' | 'result' | 'usage' | 'session' | 'error';
+
 export interface WorkflowEvent {
   id: string;
   at: string;
@@ -60,6 +68,10 @@ export interface WorkflowEvent {
   message: string;
   nodeId?: string;
   agent?: string;
+  /** agent 类事件的细分标记；老事件没有这个字段 */
+  kind?: AgentEventKind;
+  /** kind 为 tool 时的工具名 */
+  toolName?: string;
 }
 
 export interface WorkflowRunDetail extends WorkflowRunSummary {

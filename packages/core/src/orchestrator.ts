@@ -1,5 +1,11 @@
 import { buildAgentArgv, type AgentProfile } from './agents.js';
 import type { NodeArtifact, AgentRunner, WorkspacePort } from './execution.js';
+import {
+  createParser,
+  type AgentEvent,
+  type AgentOutputParser,
+  type AgentUsage,
+} from './parsers.js';
 import { DEFAULT_CONCURRENCY, isRunSettled, pendingHumanWork, pickBatch } from './scheduler.js';
 import type {
   NodeFacts,
@@ -168,6 +174,116 @@ function upstreamOf(run: RunFacts, node: NodeFacts): NodeFacts[] {
     .filter((item): item is NodeFacts => Boolean(item));
 }
 
+/**
+ * 单条 agent.output 事件的字符上限。
+ *
+ * 解析后的文本事件可能是一整份文件内容或一整段总结；不截断的话，事件日志
+ * 会被单条输出撑爆，重放和 SSE 都要为它付内存。2000 字符足够看清「说了什么」，
+ * 完整输出仍在 AgentRunResult.output 里，裁决与失败原因读的是那一份。
+ */
+const OUTPUT_CHUNK_LIMIT = 2000;
+
+/** usage 事件没有正文，拼一句人能读的摘要当作 chunk。 */
+function formatUsage(usage: AgentUsage | undefined): string | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  if (usage.promptTokens !== undefined) {
+    parts.push(`输入 ${usage.promptTokens}`);
+  }
+  if (usage.completionTokens !== undefined) {
+    parts.push(`输出 ${usage.completionTokens}`);
+  }
+  if (usage.totalTokens !== undefined) {
+    parts.push(`合计 ${usage.totalTokens}`);
+  }
+  return parts.length > 0 ? `token 用量：${parts.join(' / ')}` : undefined;
+}
+
+/**
+ * 把解析器产出的事件接到编排器的事件流上。
+ *
+ * 为什么不能简单 `await emit`：`onChunk` 是同步回调，它由子进程 stdout 的
+ * 'data' 事件直接触发。一旦在这里 await，慢的事件日志就会反压回 Agent 进程本身，
+ * 等于用日志速度限制 Agent 产出速度。所以这里只把 emit 排进一条串行队列：
+ * onChunk 立刻返回，队列保证事件落盘顺序与产生顺序一致，错误则攒起来由
+ * `flush` 在 Agent 结束后统一抛出——既不阻塞流，也不 fire-and-forget 到无人接管。
+ */
+function createEventRelay(
+  deps: AdvanceDeps,
+  target: {
+    runId: string;
+    nodeId: string;
+    agentId: string;
+    parserId: AgentProfile['launch']['parser'];
+  },
+): {
+  parser: AgentOutputParser;
+  forward: (events: AgentEvent[]) => void;
+  flush: () => Promise<void>;
+} {
+  const { runId, nodeId, agentId } = target;
+  const parser = createParser(target.parserId);
+
+  // 串行队列：保证落盘顺序 == 产生顺序
+  let queue: Promise<void> = Promise.resolve();
+  const failures: unknown[] = [];
+  // 会话 id 会在 init 与 result 里重复出现，重复入流只是噪声
+  let lastSessionId: string | undefined;
+
+  const dispatch = (event: OrchestratorEvent): void => {
+    queue = queue
+      .then(() => deps.emit(event))
+      .catch((error: unknown) => {
+        failures.push(error);
+      });
+  };
+
+  const forward = (events: AgentEvent[]): void => {
+    for (const item of events) {
+      const at = deps.now();
+
+      if (item.kind === 'session') {
+        if (!item.sessionId || item.sessionId === lastSessionId) {
+          continue;
+        }
+        lastSessionId = item.sessionId;
+        dispatch({ type: 'agent.session', at, runId, nodeId, agentId, sessionId: item.sessionId });
+        continue;
+      }
+
+      const chunk = (item.text ?? item.toolName ?? formatUsage(item.usage) ?? '').trim();
+      if (!chunk) {
+        continue;
+      }
+      dispatch({
+        type: 'agent.output',
+        at,
+        runId,
+        nodeId,
+        agentId,
+        chunk: chunk.slice(0, OUTPUT_CHUNK_LIMIT),
+        kind: item.kind,
+        toolName: item.toolName,
+      });
+    }
+  };
+
+  const flush = async (): Promise<void> => {
+    await queue;
+    const first = failures.shift();
+    failures.length = 0;
+    if (first !== undefined) {
+      // 事件落盘失败等于事实丢失。宁可让这一轮推进失败（宿主会把它记成
+      // run.paused 并打日志），也不能当成什么都没发生。
+      throw first;
+    }
+  };
+
+  return { parser, forward, flush };
+}
+
 async function executeNode(
   runId: string,
   node: NodeFacts,
@@ -241,6 +357,16 @@ async function executeNode(
   await deps.emit({ type: 'node.started', at: deps.now(), runId, nodeId: node.id });
 
   const argv = buildAgentArgv(agent, { prompt, workdir: cwd, policy });
+
+  // profile 里声明的 parser 就是「这台 CLI 的输出怎么读」的唯一事实源。
+  // 解析器与事件转发在启动前后建好，Agent 一开口就能按结构入流。
+  const relay = createEventRelay(deps, {
+    runId,
+    nodeId: node.id,
+    agentId: agent.id,
+    parserId: agent.launch.parser,
+  });
+
   const result = await deps.runner.run(
     {
       runId,
@@ -254,19 +380,15 @@ async function executeNode(
       policy,
     },
     (chunk) => {
-      const text = chunk.trim();
-      if (text) {
-        void deps.emit({
-          type: 'agent.output',
-          at: deps.now(),
-          runId,
-          nodeId: node.id,
-          agentId: agent.id,
-          chunk: text.slice(0, 2000),
-        });
-      }
+      // 同步回调里只做解析与排队，绝不 await（理由见 createEventRelay）
+      relay.forward(relay.parser.push(chunk));
     },
   );
+
+  // 收尾：冲掉缓冲区里不完整的行，再把排队的事件全部落盘。
+  // 必须放在失败判定之前——超时或非零退出时，Agent 最后说的话往往正是线索。
+  relay.forward(relay.parser.finish());
+  await relay.flush();
 
   if (!result.ok) {
     await deps.emit({
