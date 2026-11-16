@@ -26,6 +26,13 @@ export const dagNodeSchema = z.object({
   executor: z.string().min(1).optional(),
   /** 审查驳回的最大回退次数，超限后升级人工 */
   maxAttempts: z.number().int().positive().max(10).default(3),
+  /**
+   * 编排动作。目前只有 `merge`：把各节点分支汇入集成分支。
+   *
+   * 只有 route 节点能带（由 validateDag 把关）：审批节点得等人，
+   * 实现/审查节点要跑 Agent，这两类都不该顺手改仓库历史。
+   */
+  action: z.enum(['merge']).optional(),
 });
 
 export const dagSchema = z.object({

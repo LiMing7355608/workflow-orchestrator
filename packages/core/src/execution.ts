@@ -2,7 +2,7 @@
  * 执行层端口。
  *
  * 编排器不关心 Agent 是子进程、HTTP 还是本地回放，也不关心工作区是
- * git worktree 还是临时目录——只认这三个接口。这样调度逻辑可以完全
+ * git worktree 还是临时目录——只认这里的几个端口。这样调度逻辑可以完全
  * 在没有真实进程的情况下被测试。
  */
 
@@ -59,6 +59,31 @@ export interface NodeArtifact {
   capturedAt: string;
 }
 
+/**
+ * 一次合并请求。
+ *
+ * 刻意不在这里决定「合到哪」的策略：目标分支名由调用方给，
+ * 内核只是把请求原样转交给工作区实现。这样 git 工作区能合到
+ * `run/<runId>`，将来若出现别的版本化实现，也能用它自己的命名规则。
+ */
+export interface MergeRequest {
+  runId: string;
+  /** 参与合并的节点分支，按顺序合并 */
+  nodeIds: string[];
+  /** 合并目标分支名，由调用方决定 */
+  targetBranch: string;
+}
+
+/**
+ * 合并结果。
+ *
+ * 冲突不是异常：它是「部分成功」的正常结局，必须能把已经合进去的
+ * 节点如实报出来，否则重试时调用方只能整批重来，分不清谁进了谁没进。
+ */
+export type MergeResult =
+  | { ok: true; branch: string; merged: string[]; commit?: string }
+  | { ok: false; branch: string; conflicts: string[]; merged: string[]; reason: string };
+
 export interface WorkspacePort {
   /** 为节点准备独立工作目录，返回绝对路径。必须在 Agent 启动之前完成。 */
   prepare(runId: string, nodeId: string): Promise<string>;
@@ -73,4 +98,13 @@ export interface WorkspacePort {
    * 不能因此把一次成功的执行判成失败。
    */
   capture?(runId: string, nodeId: string): Promise<NodeArtifact>;
+  /**
+   * 把若干节点分支合并到目标分支。
+   *
+   * 与 capture 同理做成可选：临时目录工作区根本没有版本历史，
+   * 「合并」对它没有意义。调用方必须显式处理「没有这个方法」的情况，
+   * 并把它当成失败上报——不能因为缺方法就假装合并成功。
+   * 实现方同样不该抛异常：git 的每一种失败都要落成结构化的 MergeResult。
+   */
+  merge?(request: MergeRequest): Promise<MergeResult>;
 }

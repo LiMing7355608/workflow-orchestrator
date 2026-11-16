@@ -282,6 +282,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         files: node.files,
         agentId: node.agentId,
         executor: node.executor,
+        // 动作必须随事实一起冻结：编排器执行 route 节点时读的是 NodeFacts，
+        // 漏掉这里，声明了 action 的合并节点会退化成一个空转的普通路由节点
+        action: node.action,
         attempts: 0,
         maxAttempts: node.maxAttempts,
       };

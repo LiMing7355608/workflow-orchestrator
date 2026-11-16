@@ -13,7 +13,8 @@ export type DagIssueKind =
   | 'unknown-agent'
   | 'disabled-agent'
   | 'agent-not-installed'
-  | 'missing-agent';
+  | 'missing-agent'
+  | 'action-not-allowed';
 
 export interface DagIssue {
   kind: DagIssueKind;
@@ -27,7 +28,7 @@ export interface ValidationResult {
 }
 
 /**
- * 四条冻结校验。
+ * 五条冻结校验。
  *
  * 校验不通过的 DAG 拒绝冻结，Planner 需要重新生成——这里不做自动修复，
  * 因为修复过的图已经不代表 Planner 的真实意图了。
@@ -98,7 +99,20 @@ export function validateDag(
     }
   }
 
-  // 4. Agent 可用性
+  // 4. action 只能挂在 route 上。
+  // 其他节点类型各自有明确职责，让它们顺手改仓库历史会把
+  // 「谁的改动进了集成分支」这条追踪线索搅乱；合并必须是显式的编排动作。
+  for (const node of dag.nodes) {
+    if (node.action && node.type !== 'route') {
+      issues.push({
+        kind: 'action-not-allowed',
+        message: `节点 ${node.id} 是 ${node.type} 节点，只有 route 节点允许声明 action`,
+        nodeIds: [node.id],
+      });
+    }
+  }
+
+  // 5. Agent 可用性
   for (const node of dag.nodes) {
     const needsAgent = node.type === 'implement' || node.type === 'review';
     if (!needsAgent) {

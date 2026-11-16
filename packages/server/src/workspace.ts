@@ -3,12 +3,33 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { NodeArtifact, WorkspacePort } from '@orchestrator/core';
+import type {
+  MergeRequest,
+  MergeResult,
+  NodeArtifact,
+  WorkspacePort,
+} from '@orchestrator/core';
 
 const execFileAsync = promisify(execFile);
 
 /** 采集 diff 的输出上限。超大改动宁可在这里截断，也不要把进程缓冲区撑爆。 */
 const CAPTURE_MAX_BUFFER = 8 * 1024 * 1024;
+
+/** 集成工作区在 `.worktrees/<runId>/` 下占用的目录名，与节点目录同级。 */
+const INTEGRATION_DIR = '_integration';
+
+/**
+ * 一次 git 调用的结构化结果。
+ *
+ * merge 路径上不能靠抛异常：一次合并里有多条 git 命令，某一条失败到底是
+ * 「冲突」「分支不存在」还是「没有提交身份」，只有把这些信息留住才能
+ * 给出可执行的结论。所以统一收敛成这个形状，失败也是返回值。
+ */
+interface GitResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
 
 /**
  * 解析 `git status --porcelain -z` 的输出。
@@ -61,6 +82,34 @@ export class GitWorktreeWorkspace implements WorkspacePort {
       windowsHide: true,
       timeout: 120_000,
     });
+  }
+
+  /** 带结果返回的 git 调用。所有失败都留在返回值里，不抛。 */
+  private async gitRun(
+    args: string[],
+    cwd: string,
+    timeout = 120_000,
+  ): Promise<GitResult> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd,
+        windowsHide: true,
+        timeout,
+        maxBuffer: CAPTURE_MAX_BUFFER,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (error) {
+      const failure = error as { stdout?: string; stderr?: string; message?: string };
+      return {
+        ok: false,
+        stdout: failure.stdout ?? '',
+        stderr: failure.stderr ?? failure.message ?? '',
+      };
+    }
+  }
+
+  private integrationDirOf(runId: string): string {
+    return resolve(this.repoRoot, this.baseDir, runId, INTEGRATION_DIR);
   }
 
   async prepare(runId: string, nodeId: string): Promise<string> {
@@ -173,6 +222,173 @@ export class GitWorktreeWorkspace implements WorkspacePort {
 
     await this.git(['worktree', 'remove', dir]).catch(() => {});
     await this.git(['branch', '-D', this.branchOf(runId, nodeId)]).catch(() => {});
+  }
+
+  /**
+   * 把节点工作区里未提交的改动落成一个提交。
+   *
+   * 为什么必须做：节点分支是在 `prepare` 时从 HEAD 拉出来的，Agent 改完
+   * 文件往往并不自己 commit（`capture` 采集的正是这些未提交改动）。
+   * 不补这一步，分支 tip 还停在创建时的 HEAD，`git merge` 会把这条分支
+   * 判定成「没有任何新提交」，等于白合——worktree 里干了活，集成分支上
+   * 一个字都没有。
+   *
+   * 工作区已被释放或读不出状态时静默放行：那只是「没有待提交的改动」，
+   * 不该把一次本来能成的合并拦下来。
+   */
+  private async commitWorktree(
+    dir: string,
+    nodeId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!existsSync(dir)) {
+      return { ok: true };
+    }
+
+    const status = await this.gitRun(['status', '--porcelain'], dir, 60_000);
+    if (!status.ok || !status.stdout.trim()) {
+      return { ok: true };
+    }
+
+    const added = await this.gitRun(['add', '--all'], dir, 60_000);
+    if (!added.ok) {
+      return { ok: false, reason: `节点 ${nodeId} 的改动暂存失败：${added.stderr.trim()}` };
+    }
+
+    // 不传 --no-verify：仓库自己的钩子不该被编排器绕过。钩子拦下时
+    // 合并会明确失败并带上钩子的输出，人能看到真正的原因。
+    const committed = await this.gitRun(
+      ['commit', '-m', `node ${nodeId}: 节点工作区改动`],
+      dir,
+      120_000,
+    );
+    if (!committed.ok) {
+      return { ok: false, reason: `节点 ${nodeId} 的改动提交失败：${committed.stderr.trim()}` };
+    }
+    return { ok: true };
+  }
+
+  /** 当前合并冲突留下的未合并路径。 */
+  private async conflictFiles(dir: string): Promise<string[]> {
+    const result = await this.gitRun(['diff', '--name-only', '--diff-filter=U'], dir);
+    return result.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+
+  /**
+   * 准备集成分支与它的独立工作区。
+   *
+   * 复用而不是每次重建，理由有三：一是合并节点重跑（审查驳回后重跑一遍）
+   * 不能把上次已经合进去的历史丢掉；二是冲突现场留在磁盘上才有人能接管；
+   * 三是 `git worktree add -b` 对已存在的分支会直接报错。
+   */
+  private async ensureIntegration(
+    runId: string,
+    branch: string,
+    dir: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (existsSync(dir)) {
+      return { ok: true };
+    }
+
+    await mkdir(dirname(dir), { recursive: true });
+
+    const existing = await this.gitRun(
+      ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
+      this.repoRoot,
+    );
+    const added =
+      existing.ok && existing.stdout.trim()
+        ? await this.gitRun(['worktree', 'add', dir, branch], this.repoRoot)
+        : await this.gitRun(['worktree', 'add', '-b', branch, dir, 'HEAD'], this.repoRoot);
+
+    if (!added.ok) {
+      return {
+        ok: false,
+        reason: `集成分支 ${branch} 的工作区准备失败：${added.stderr.trim() || 'git worktree add 失败'}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * 合并节点分支到集成分支。
+   *
+   * 全程走 `execFile` 调真实 git，不解析、不臆造：
+   *  - 逐个 `git merge --no-ff`，用合并提交把「谁合进来的」留成可读历史；
+   *  - 任何一步失败都返回结构化结果，不抛异常；
+   *  - 冲突时先 `merge --abort` 收干净现场再报告，否则集成分支会卡在
+   *    MERGING 状态，下一次合并直接报错，重试永远失败；
+   *  - 已成功的那些节点照实写进 `merged`，冲突不该抹掉既成事实。
+   *
+   * 成功后刻意不删节点 worktree 与分支：那是 `release` 的职责，而且
+   * 冲突排查要看得见现场。
+   */
+  async merge(request: MergeRequest): Promise<MergeResult> {
+    const { runId, nodeIds, targetBranch } = request;
+    const merged: string[] = [];
+    const dir = this.integrationDirOf(runId);
+
+    const prepared = await this.ensureIntegration(runId, targetBranch, dir);
+    if (!prepared.ok) {
+      return { ok: false, branch: targetBranch, conflicts: [], merged, reason: prepared.reason };
+    }
+
+    for (const nodeId of nodeIds) {
+      const nodeBranch = this.branchOf(runId, nodeId);
+
+      const committed = await this.commitWorktree(this.dirOf(runId, nodeId), nodeId);
+      if (!committed.ok) {
+        return { ok: false, branch: targetBranch, conflicts: [], merged, reason: committed.reason };
+      }
+
+      // 分支不存在时自己说清楚：git 的原始报错里混着用法提示，
+      // 直接透出去等于让人去读 git 帮助文档
+      const exists = await this.gitRun(
+        ['rev-parse', '--verify', '--quiet', `refs/heads/${nodeBranch}`],
+        this.repoRoot,
+      );
+      if (!exists.ok || !exists.stdout.trim()) {
+        return {
+          ok: false,
+          branch: targetBranch,
+          conflicts: [],
+          merged,
+          reason: `节点分支不存在：${nodeBranch}`,
+        };
+      }
+
+      const result = await this.gitRun(
+        ['merge', '--no-ff', nodeBranch, '-m', `merge ${nodeBranch}`],
+        dir,
+      );
+      if (result.ok) {
+        merged.push(nodeId);
+        continue;
+      }
+
+      const conflicts = await this.conflictFiles(dir);
+      await this.gitRun(['merge', '--abort'], dir);
+      return {
+        ok: false,
+        branch: targetBranch,
+        conflicts,
+        merged,
+        reason:
+          conflicts.length > 0
+            ? `合并 ${nodeBranch} 时冲突`
+            : `合并 ${nodeBranch} 失败：${result.stderr.trim() || result.stdout.trim() || 'git merge 未给出原因'}`,
+      };
+    }
+
+    const head = await this.gitRun(['rev-parse', 'HEAD'], dir);
+    return {
+      ok: true,
+      branch: targetBranch,
+      merged,
+      commit: head.ok ? head.stdout.trim() : undefined,
+    };
   }
 }
 

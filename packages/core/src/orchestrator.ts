@@ -1,5 +1,10 @@
 import { buildAgentArgv, type AgentProfile } from './agents.js';
-import type { NodeArtifact, AgentRunner, WorkspacePort } from './execution.js';
+import type {
+  AgentRunner,
+  MergeResult,
+  NodeArtifact,
+  WorkspacePort,
+} from './execution.js';
 import {
   createParser,
   type AgentEvent,
@@ -284,6 +289,133 @@ function createEventRelay(
   return { parser, forward, flush };
 }
 
+/**
+ * 合并节点的目标分支。
+ *
+ * 按 run 隔离：两次不同的运行绝不能往同一个分支上堆，
+ * 否则前一次运行的历史会混进后一次的集成结果里，无从区分。
+ */
+function integrationBranchOf(runId: string): string {
+  return `run/${runId}`;
+}
+
+/**
+ * 本次运行里可以参与合并的实现节点。
+ *
+ * 判据是「已完成且没有失败原因」而不是「跑过」：失败节点的分支上可能是
+ * 半成品，合进去会把别人的正确改动连带污染。顺序取 nodeOrder，
+ * 保证同一张图重放多次得到相同的合并顺序。
+ */
+function mergeCandidates(run: RunFacts): string[] {
+  return run.nodeOrder.filter((id) => {
+    const item = run.nodes[id];
+    return (
+      item !== undefined &&
+      item.type === 'implement' &&
+      Boolean(item.finishedAt) &&
+      !item.failureReason
+    );
+  });
+}
+
+/**
+ * 执行一次合并动作。
+ *
+ * 所有出口都是显式事件，没有「静默成功」这条路：
+ * 没有 merge 能力、没有可合并节点、合并冲突、git 报错，四种情况
+ * 各自落到 node.failed 上并写清原因。工作区缺 merge 方法时尤其不能
+ * 假装成功——那会让运行看起来合完了，而集成分支其实根本不存在。
+ */
+async function executeMerge(
+  runId: string,
+  node: NodeFacts,
+  run: RunFacts,
+  deps: AdvanceDeps,
+): Promise<void> {
+  const targetBranch = integrationBranchOf(runId);
+
+  const merge = deps.workspace.merge?.bind(deps.workspace);
+  if (!merge) {
+    await deps.emit({
+      type: 'node.failed',
+      at: deps.now(),
+      runId,
+      nodeId: node.id,
+      reason: '当前工作区不支持合并：临时目录工作区没有版本历史，节点改动无法汇入集成分支',
+    });
+    return;
+  }
+
+  const nodeIds = mergeCandidates(run);
+  if (nodeIds.length === 0) {
+    // 没有上游改动可合并不等于「合成功了」。这种情况多半是图写错了
+    // （合并节点没声明 dependsOn），必须报出来而不是悄悄放行。
+    await deps.emit({
+      type: 'node.failed',
+      at: deps.now(),
+      runId,
+      nodeId: node.id,
+      reason: '没有可合并的已完成实现节点：检查合并节点是否声明了 dependsOn',
+    });
+    return;
+  }
+
+  let result: MergeResult;
+  try {
+    result = await merge({ runId, nodeIds, targetBranch });
+  } catch (error) {
+    // 端口约定实现方不抛异常，但宿主实现可能违约。
+    // 这里兜住，让它变成一条可读的失败事实，而不是打崩整轮推进。
+    await deps.emit({
+      type: 'node.failed',
+      at: deps.now(),
+      runId,
+      nodeId: node.id,
+      reason: `合并执行失败：${(error as Error).message}`,
+    });
+    return;
+  }
+
+  if (result.ok) {
+    await deps.emit({
+      type: 'node.merged',
+      at: deps.now(),
+      runId,
+      nodeId: node.id,
+      branch: result.branch,
+      merged: result.merged,
+    });
+    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+    return;
+  }
+
+  await deps.emit({
+    type: 'node.merge_conflict',
+    at: deps.now(),
+    runId,
+    nodeId: node.id,
+    branch: result.branch,
+    conflicts: result.conflicts,
+    reason: result.reason,
+  });
+
+  // 冲突不是「什么都没发生」：已经合进去的那些节点确实进了目标分支，
+  // 必须和冲突一起报，否则重试时无法判断该重合哪些。
+  const detail =
+    result.conflicts.length > 0
+      ? `冲突文件：${result.conflicts.join('、')}`
+      : result.reason;
+  const done =
+    result.merged.length > 0 ? `；已合并 ${result.merged.length} 个节点：${result.merged.join('、')}` : '';
+  await deps.emit({
+    type: 'node.failed',
+    at: deps.now(),
+    runId,
+    nodeId: node.id,
+    reason: `${result.conflicts.length > 0 ? '合并冲突' : '合并失败'}（${result.branch}），${detail}${done}`,
+  });
+}
+
 async function executeNode(
   runId: string,
   node: NodeFacts,
@@ -312,9 +444,14 @@ async function executeNode(
     return;
   }
 
-  // 路由节点：纯逻辑，无副作用
+  // 路由节点本身没有 Agent，只有声明了 action 的才真干活
   if (node.type === 'route') {
     await deps.emit({ type: 'node.started', at: deps.now(), runId, nodeId: node.id });
+    if (node.action === 'merge') {
+      await executeMerge(runId, node, run, deps);
+      return;
+    }
+    // 普通路由节点：纯逻辑、零副作用，直接完成
     await deps.emit({
       type: 'node.completed',
       at: deps.now(),

@@ -151,4 +151,43 @@ describe('DAG 冻结校验', () => {
     );
     expect(result.issues.map((issue) => issue.kind)).toContain('duplicate-id');
   });
+
+  it('route 节点可以声明 merge 动作', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude' },
+        {
+          id: 'gate',
+          type: 'route',
+          title: '合并',
+          dependsOn: ['impl-a'],
+          executor: '编排器',
+          action: 'merge',
+        },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.issues).toHaveLength(0);
+  });
+
+  it('非 route 节点声明 action 会被拒绝', () => {
+    const result = validateDag(
+      dag([
+        { id: 'impl-a', type: 'implement', title: 'A', agentId: 'claude', action: 'merge' },
+      ]),
+      catalog,
+    );
+    expect(result.ok).toBe(false);
+    const issue = result.issues.find((item) => item.kind === 'action-not-allowed');
+    expect(issue?.nodeIds).toEqual(['impl-a']);
+    expect(issue?.message).toContain('只有 route 节点');
+  });
+
+  it('未知 action 在结构校验阶段就被挡下', () => {
+    // schema 层拒绝，validate 根本不会被调用
+    expect(() =>
+      dag([{ id: 'gate', type: 'route', title: '门禁', action: 'rebase' }]),
+    ).toThrow();
+  });
 });

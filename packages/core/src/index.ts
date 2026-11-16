@@ -101,6 +101,8 @@ export type {
   AgentRunRequest,
   AgentRunResult,
   AgentRunner,
+  MergeRequest,
+  MergeResult,
   NodeArtifact,
   WorkspacePort,
 } from './execution.js';

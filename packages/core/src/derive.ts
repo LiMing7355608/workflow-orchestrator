@@ -28,7 +28,14 @@ function nodeAgentLabel(node: NodeFacts, resolve: AgentLabelResolver): string {
  * 其余按上游完成情况判定就绪与否。
  */
 export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
-  if (node.failureReason && !node.startedAt) {
+  if (node.failureReason) {
+    // 失败事实压过一切时间戳。
+    //
+    // 不能只看「有没有 startedAt」：失败也发生在开始之后，而 node.failed
+    // 同时会写 finishedAt，若让下面「有 finishedAt 即完成」的规则先命中，
+    // 一个失败的节点就会在跑完之后被展示成已交付——合并冲突这类需要
+    // 立刻看见的结论会被抹掉。只有 node.started / node.completed 会清空
+    // failureReason，因此「有 failureReason」当且仅当最近一次结局是失败。
     return 'failed';
   }
   if (node.startedAt && !node.finishedAt) {
@@ -121,6 +128,7 @@ export function deriveNodeView(
     artifactBytes: node.artifactBytes,
     artifactFiles: node.artifactFiles,
     nativeSessionId: node.nativeSessionId,
+    mergedBranch: node.mergedBranch,
   };
 }
 
@@ -189,6 +197,8 @@ function eventKind(event: OrchestratorEvent): EventKind {
     case 'node.failed':
     case 'node.reset':
     case 'node.artifact':
+    case 'node.merged':
+    case 'node.merge_conflict':
     case 'agent.output':
     case 'agent.session':
       return 'agent';
@@ -240,6 +250,13 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
     }
     case 'node.artifact':
       return `${nodeTitleOf(run, event.nodeId)} 产出 ${event.files.length} 个文件的变更（${event.bytes} 字节）`;
+    case 'node.merged':
+      // 报数量而不是逐个列：这里的一句话是给人扫一眼的，
+      // 具体是谁已经在 merged 里，展开交给详情面板
+      return `已合并 ${event.merged.length} 个节点分支到 ${event.branch}`;
+    case 'node.merge_conflict':
+      // 冲突文件必须写全：这是人唯一能据以判断「要不要手工合一下」的信息
+      return `合并冲突（${event.conflicts.length} 个文件）：${event.conflicts.join('、') || '未取得文件列表'}`;
     case 'agent.output':
       // 工具调用单独说清楚：把「干了什么」和「说了什么」混成一行，
       // 事件流读起来就只剩一堵文本墙

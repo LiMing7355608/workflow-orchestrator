@@ -65,6 +65,15 @@ export interface NodeFacts {
   agentId?: string;
   /** 人类审批人与编排器节点使用的展示名 */
   executor?: string;
+  /**
+   * 路由节点的动作。
+   *
+   * 目前只有 `merge` 一种：普通 route 节点是零副作用的纯逻辑闸门，
+   * 带 action 的 route 才是「把各节点分支汇入集成分支」这类真干活的编排动作。
+   * 挂在 route 上而不是新增节点类型，是为了不改变既有 NodeType 的分类语义——
+   * 它依然没有 Agent、没有独占文件范围，仍然由编排器自己执行。
+   */
+  action?: 'merge';
   attempts: number;
   maxAttempts: number;
   startedAt?: string;
@@ -90,6 +99,13 @@ export interface NodeFacts {
    * 流式输出里，晚一步不落账就永久丢了。
    */
   nativeSessionId?: string;
+  /**
+   * 成功合并后所在的集成分支名。
+   *
+   * 只记分支不记 commit：分支是后续操作的稳定锚点，而 commit 会被
+   * 后续合并在同一分支上不断前移，写进事实里第二天就是错的。
+   */
+  mergedBranch?: string;
 }
 
 /** 审批记录：不可变追加，每次请求与决策各一条。 */
@@ -168,6 +184,29 @@ export type OrchestratorEvent =
       files: string[];
       /** diff 文件路径；工作区不可采集或存盘失败时缺省 */
       diffPath?: string;
+    })
+  | (BaseEvent & {
+      /** 节点分支已汇入集成分支。只在真的合进去之后发，不预发。 */
+      type: 'node.merged';
+      nodeId: string;
+      branch: string;
+      /** 本次真的合进去的节点 id，顺序即合并顺序 */
+      merged: string[];
+    })
+  | (BaseEvent & {
+      /**
+       * 合并冲突。
+       *
+       * 刻意不在这里写完成态：冲突的结论是「这次合并没有成功」，
+       * 由编排器随后补一条 node.failed 把它钉死。事件各管一件事，
+       * 重放时也不会出现「既冲突又完成」的矛盾事实。
+       */
+      type: 'node.merge_conflict';
+      nodeId: string;
+      branch: string;
+      /** 冲突文件列表，来自 git 的 unmerged 路径 */
+      conflicts: string[];
+      reason: string;
     });
 
 export type EventType = OrchestratorEvent['type'];
@@ -208,6 +247,8 @@ export interface NodeView {
   artifactFiles?: string[];
   /** 原生会话 id，透出给前端展示与「从这一轮续跑」的入口 */
   nativeSessionId?: string;
+  /** 已合并所在的集成分支；没合成功过或缺省 */
+  mergedBranch?: string;
 }
 
 export interface EdgeView {

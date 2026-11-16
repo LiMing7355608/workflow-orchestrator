@@ -78,6 +78,9 @@ function resetNode(run: RunFacts, nodeId: string): void {
   // 看板会显示一份已经不存在的变更。
   node.artifactBytes = undefined;
   node.artifactFiles = undefined;
+  // 合并结果随重做一并作废：留着上一次的分支名，看板会声称改动已在
+  // 集成分支上，而重跑出来的那一版其实还没合。
+  node.mergedBranch = undefined;
   node.attempts += 1;
 
   for (const id of downstreamIds(run, nodeId)) {
@@ -91,6 +94,7 @@ function resetNode(run: RunFacts, nodeId: string): void {
     downstream.failureReason = undefined;
     downstream.artifactBytes = undefined;
     downstream.artifactFiles = undefined;
+    downstream.mergedBranch = undefined;
   }
 }
 
@@ -215,6 +219,20 @@ export function reduce(
         node.artifactBytes = event.bytes;
         node.artifactFiles = event.files;
       });
+
+    case 'node.merged':
+      // 只记分支名。完成态由紧随其后的 node.completed 负责——
+      // 合并成功与节点完成是两件事，虽然正常情况下它们成对出现。
+      return withNode(state, event.runId, event.nodeId, (node) => {
+        node.mergedBranch = event.branch;
+      });
+
+    case 'node.merge_conflict':
+      // 冲突不改完成态：这条事件只负责把冲突文件摆到台面上，
+      // 真正的失败判定由编排器补发的 node.failed 决定。
+      // 在这里顺手写 failureReason 会让同一次失败被记两遍，
+      // 且与「失败一律经过 node.failed」的投影约定相冲突。
+      return state;
 
     default:
       return state;
