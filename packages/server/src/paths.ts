@@ -1,4 +1,4 @@
-import { existsSync, accessSync, constants } from 'node:fs';
+import { existsSync, accessSync, constants, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,32 +57,57 @@ export function repoRoot(): string {
   return resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 }
 
-/** 编排器的数据根目录。三种形态见文件头注释。 */
+/** 运行地址文件的路径：启动方读它拿到真实 URL，人也能直接看。 */
+export function resolveRunningFile(dataDir = resolveDataDir()): string {
+  return resolve(dataDir, 'running.json');
+}
+
+/**
+ * 读运行地址文件。
+ *
+ * 桌面版用它在启动 server 子进程之后等「地址出现了」。返回 `undefined` 表示
+ * 还没写出来或内容不可用——调用方应当继续轮询，而不是当成失败。
+ */
+export function readRunningFile(
+  dataDir = resolveDataDir(),
+): { url: string; port: number; pid: number; startedAt: string } | undefined {
+  try {
+    const raw = readFileSync(resolveRunningFile(dataDir), 'utf8');
+    const parsed = JSON.parse(raw) as {
+      url?: unknown;
+      port?: unknown;
+      pid?: unknown;
+      startedAt?: unknown;
+    };
+    if (typeof parsed.url !== 'string' || typeof parsed.port !== 'number') {
+      return undefined;
+    }
+    return {
+      url: parsed.url,
+      port: parsed.port,
+      pid: typeof parsed.pid === 'number' ? parsed.pid : 0,
+      startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : '',
+    };
+  } catch {
+    // 文件不存在、正被写、内容坏了：都是「还没准备好」，不是错误
+    return undefined;
+  }
+}
+/**
+ * 编排器的数据根目录：**`~/.workflow-orchestrator`**。
+ *
+ * 一套数据，所有形态共用。之前按运行形态分了三种（源码跑用仓库 `data/`、
+ * 打包后用 Electron 的 `userData`、还能显式覆盖），结果是同一个项目在不同
+ * 入口下看到的历史对不上——命令行跑出来的 24 个运行，桌面窗口里一个都没有，
+ * 因为它们在各看各的目录。数据属于这台机器上的编排器，不属于某一种启动方式。
+ *
+ * `AGENT_DATA_DIR` 仍可覆盖：多实例分家、测试隔离、临时看一份别处拷来的数据，
+ * 都要靠它。覆盖是唯一的分叉，其余情况只有一处。
+ */
 export function resolveDataDir(): string {
   const override = process.env.AGENT_DATA_DIR?.trim();
   if (override) {
     return resolve(override);
   }
-
-  if (isPackaged()) {
-    /**
-     * 便携式优先：exe 旁边放数据，拷走整个文件夹就是带走全部历史。
-     * 装进 `Program Files` 之类只读位置时退到用户目录——那里一定要能写，
-     * 否则第一次启动就会在创建 journal 时崩掉，而那是最难解释的一种失败。
-     */
-    const portable = resolve(dirname(process.execPath), 'data');
-    if (!existsSync(portable)) {
-      try {
-        return portable;
-      } catch {
-        // 下面还有兜底
-      }
-    }
-    if (isWritable(portable) || isWritable(dirname(portable))) {
-      return portable;
-    }
-    return resolve(homedir(), '.workflow-orchestrator', 'data');
-  }
-
-  return resolve(repoRoot(), 'data');
+  return resolve(homedir(), '.workflow-orchestrator');
 }

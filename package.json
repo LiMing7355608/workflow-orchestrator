@@ -16,6 +16,14 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "test:e2e": "pnpm --filter @orchestrator/e2e test"
+    "test:e2e": "pnpm --filter @orchestrator/e2e test",
+    "desktop": "pnpm --filter @orchestrator/desktop dev",
+    "desktop:make": "pnpm -r build && pnpm --filter @orchestrator/desktop make"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
   }
 }

@@ -594,10 +594,32 @@ export class ClaudeSdkRunner implements AgentRunner {
       // 清理会话是另一个动作（`deleteSession()` / `archiveSession()`），
       // 本执行器从不调用它们：取消与超时只停当前执行，不该顺手销毁上下文。
       //
-      // 无人值守：任何需要人回答的交互一律当场拒绝，绝不挂起等一个不会来的答复。
-      // 拒绝理由会回给模型，让它换一条能走的路，而不是卡在那里。
+      /**
+       * 权限闸门：按 policy 分档，不再一律拒绝。
+       *
+       * 上一版这里无条件 `deny`，理由是「无人值守，没人能回答询问」。那个理由
+       * 只对**询问**成立，对**工具执行**不成立：`canUseTool` 在每次工具执行前
+       * 都会被调用，一律拒绝等于把 Bash、Read、Grep 这些全封了。实测表现是
+       * Agent 想跑 `wc -m` 数一下字数都被驳回，反复换写法反复被拒，最后交一堆
+       * 「需要人工执行」的说明回来。
+       *
+       * 现在的分档与 `policy` 语义对齐：
+       * - `plan`（审查节点的默认档）：只读，任何要写或要执行的都拒——审查本来
+       *   就不该改文件，这条是对的。
+       * - 其余三档：放行。节点的整个意义就是在 worktree 里改代码、跑测试，
+       *   拦住等于什么都没干成。隔离靠的是每条 run 一个独立 worktree，不是靠
+       *   在这里逐条审批。
+       */
       canUseTool: () =>
-        Promise.resolve({ behavior: 'deny' as const, message: UNATTENDED_DENY }),
+        permissionMode === 'plan'
+          ? Promise.resolve({
+              behavior: 'deny' as const,
+              message: '只读审查：这个节点不修改文件、也不执行命令。',
+            })
+          : Promise.resolve({
+              behavior: 'allow' as const,
+              updatedInput: {},
+            }),
       onElicitation: () => Promise.resolve({ action: 'decline' as const }),
       // 对话框兜底：不声明 supportedDialogKinds，SDK 就按「本消费者渲染不了
       // 对话框」处理，自行退化成无对话框行为；这条只是万一它照样发过来时的回答。
