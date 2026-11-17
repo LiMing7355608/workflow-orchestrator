@@ -1,7 +1,7 @@
 import { packager } from '@electron/packager';
 import { execFileSync } from 'node:child_process';
-import { renameSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -18,26 +18,57 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..');
+const appName = 'WorkflowOrchestrator';
+const extraResources = ['server', 'web'].map((name) => join(desktopRoot, 'resources', name));
+
+function restoreResourceLinks(source, destination) {
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(destination, entry.name);
+    if (entry.isDirectory()) {
+      restoreResourceLinks(from, to);
+    } else if (entry.isSymbolicLink()) {
+      unlinkSync(to);
+      symlinkSync(readlinkSync(from), to);
+    }
+  }
+}
 
 const appPaths = await packager({
   dir: desktopRoot,
   out: join(desktopRoot, 'out'),
-  name: 'WorkflowOrchestrator',
+  name: appName,
   executableName: 'workflow-orchestrator',
   platform: process.platform,
   arch: process.arch,
   asar: true,
   overwrite: true,
+  // Seal the completed local bundle with an ad hoc signature before archiving.
+  ...(process.platform === 'darwin' && {
+    // Packager's copy can expand relative links to absolute build-machine paths.
+    // Restore them inside the .app before codesign seals the resources.
+    afterCopyExtraResources: [
+      ({ buildPath }) => {
+        const resources = join(buildPath, `${appName}.app`, 'Contents', 'Resources');
+        for (const source of extraResources) {
+          restoreResourceLinks(source, join(resources, basename(source)));
+        }
+      },
+    ],
+    osxSign: {
+      identity: '-',
+      identityValidation: false,
+      preAutoEntitlements: false,
+      continueOnError: false,
+    },
+  }),
   /**
    * server 与 web 必须留在 asar 外面。
    *
    * server 要作为独立 Node 进程被 spawn（`process.execPath <entry>`），asar 是
    * 只读虚拟归档，没有真实路径可指；web 由 server 用 `@fastify/static` 读，同理。
    */
-  extraResource: [
-    join(desktopRoot, 'resources/server'),
-    join(desktopRoot, 'resources/web'),
-  ],
+  extraResource: extraResources,
   /**
    * 只保留运行时需要的东西。
    *
@@ -58,7 +89,7 @@ const appPaths = await packager({
 
 if (process.platform === 'darwin') {
   for (const appPath of appPaths) {
-    const bundle = join(appPath, 'WorkflowOrchestrator.app');
+    const bundle = join(appPath, `${appName}.app`);
     const archive = join(desktopRoot, 'out', `WorkflowOrchestrator-mac-${process.arch}.zip`);
     const temporaryArchive = `${archive}.tmp`;
     try {
