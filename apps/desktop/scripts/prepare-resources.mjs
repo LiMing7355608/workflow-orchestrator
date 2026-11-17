@@ -1,8 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
 
 /**
  * 把桌面应用要带走的产物铺到 `resources/` 下。
@@ -62,7 +61,7 @@ rmSync(resources, { recursive: true, force: true });
 mkdirSync(resources, { recursive: true });
 
 /** 2. 生产依赖树。deploy 会连源码一起铺，所以先落到临时目录再挑。 */
-// 必须落在仓库内并传**相对**路径：pnpm deploy 在 --filter 下会把目标拼到包子目录后面，// 绝对路径会被当成相对段再拼一次，得到一个 packages/server\C:\... 这种畸形路径。
+// 在仓库内暂存，以便保留 pnpm deploy 生成的自包含依赖树。
 const staging = join(repoRoot, '.tmp', 'deploy');
 rmSync(staging, { recursive: true, force: true });
 mkdirSync(staging, { recursive: true });
@@ -86,7 +85,9 @@ for (const entry of ['dist', 'node_modules']) {
     fail(`deploy 结果里没有 ${entry}，打包会缺东西`);
   }
   log(`拷贝 ${entry}`);
-  cpSync(from, join(targetServer, entry), { recursive: true });
+  // pnpm 在 macOS 上用相对符号链接连接 .bin 与包目录。
+  // 原样复制链接目标，避免指向打包结束前会删除的暂存目录。
+  cpSync(from, join(targetServer, entry), { recursive: true, verbatimSymlinks: true });
 }
 
 /**
