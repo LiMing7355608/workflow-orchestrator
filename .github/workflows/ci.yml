@@ -20,7 +20,17 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      # electron 的传递依赖 `@electron/node-gyp` 在 lockfile 里写成
+      # `git+https://git@github.com:...`——那个 `git@` userinfo 让 pnpm 把它当
+      # SSH 地址去 `git clone git@github.com:...`，而 runner 没有 SSH key，
+      # 于是整条 install 直接挂在拉依赖阶段。这里把它重写成 https。
+      - name: Rewrite git protocol
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
       - name: Install dependencies
+        # CI 只跑构建/类型/测试，不需要 Electron 的可执行文件（几百 MB 下载）
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: pnpm install --frozen-lockfile
 
       # 跨包引用解析的是 dist 里的类型声明，必须先构建再做类型检查
