@@ -73,19 +73,34 @@ export function deriveNodeStatus(run: RunFacts, node: NodeFacts): NodeStatus {
  */
 export function deriveRunStatus(run: RunFacts): RunStatus {
   const nodes = Object.values(run.nodes);
-  const awaitingHuman = nodes.some(
-    (node) => deriveNodeStatus(run, node) === 'waiting_approval',
-  );
+  const statuses = nodes.map((node) => deriveNodeStatus(run, node));
+  const anyRunning = statuses.includes('running');
+
+  /**
+   * 判据的第一条：**有节点在跑，整体就是在运行。**
+   *
+   * 这条压过暂停与完成的判断——「有人在干活」是最高优先级的事实。否则会出现
+   * 「界面说已暂停、底下还有 Agent 在烧 token」这种最不该有的组合。
+   */
+  if (anyRunning) {
+    return 'running';
+  }
+
+  const awaitingHuman = statuses.includes('waiting_approval');
   // 「在等人」与「已暂停」相遇时，暂停优先。
   //
   // 两者都表示编排器没在推进，但含义不同：前者是「我等着你批」，后者是
   // 「你让我停了」。用户按过停止之后还显示「待你处理」，会让人以为它仍在
   // 等审批，而实际上这轮已经停了；点继续则回到 waiting_for_boss（审批记录
   // 从没被删掉）。
+  //
+  // 「在等人」也压过完成态：节点都跑完了、只剩一个人工审批卡着，那不算
+  // 交付完成——它还在等一个人。
   if (awaitingHuman && !run.pausedAt) {
     return 'waiting_for_boss';
   }
-  // 完成态仍压过暂停：一次已经跑完的运行，不该因为后来被点了停止就倒退成
+
+  // 完成态压过暂停：一次已经跑完的运行，不该因为后来被点了停止就倒退成
   // 「已暂停」。这个优先级是既有行为，改了会让历史运行凭空变样。
   if (run.completedAt) {
     return 'completed';
@@ -99,7 +114,7 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
      *
      * 判据必须是「有失败事实」且「图从未冻结」两个条件同时成立：
      * - 只看 `planFailure`：一次历史上的失败会把后来重新拆解成功、甚至已经
-     *   跑完的运行永远标成失败——失败事实是 append-only 的，事件删不掉。
+     *   跑完的运行永远标成失败——失败事实是 append-only 的事件，删不掉。
      * - 只看「没有 frozenAt」：每个刚创建、正在拆解几十秒的运行都会被误判
      *   成失败，用户看到的是「刚建就挂了」。
      *
@@ -108,10 +123,27 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
      */
     return run.planFailure ? 'failed' : 'draft';
   }
-  if (nodes.some((node) => node.failureReason) &&
-      !nodes.some((node) => ['ready', 'running'].includes(deriveNodeStatus(run, node)))) {
+
+  // 有失败、且没有任何节点还能被调度：卡死了。
+  // `ready` 要算进来——只要还有一个能跑的节点，就不是死局。
+  if (nodes.some((node) => node.failureReason) && !statuses.includes('ready')) {
     return 'failed';
   }
+
+  /**
+   * 到这里没有节点在跑。用户定下的规则是「所有节点都停了，就是停止」。
+   *
+   * 这一条修的是一个真实的状态失真：节点被用户打断后回到 `ready`（可重新
+   * 调度），但没有任何推进链路在动它，而旧逻辑只看到「有 ready 节点」就判
+   * 运行中——界面说在跑，实际上一个 Agent 都没起来。
+   *
+   * 有 `interruptedAt` 的节点就是「被停下过且还停着」，据此判暂停；没被打断
+   * 过、只是刚建好还没轮到，仍然算运行中（`advance` 已经排上了）。
+   */
+  if (nodes.some((node) => node.interruptedAt !== undefined)) {
+    return 'paused';
+  }
+
   return 'running';
 }
 

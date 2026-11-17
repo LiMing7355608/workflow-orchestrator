@@ -315,8 +315,15 @@ describe('POST /api/runs/:id/nodes/:nodeId/stop', () => {
     const body = response.json() as NodeControlBody;
     expect(body.ok).toBe(true);
     expect(body.cancelled).toBe(false);
-    // 节点级停止绝不改整轮状态：这轮并没有被暂停
-    expect(body.run.status).toBe('running');
+    /**
+     * 没有节点在跑 = 整体停止。
+     *
+     * 这条原来断言 `running`，理由是「节点级停止不改整轮状态」。但它们并不
+     * 矛盾：这里改的不是 `pausedAt` 那条事实，而是**派生**——没有任何节点
+     * 在跑的时候再自称运行中，就是在骗人（界面说在跑，实际一个 Agent 都
+     * 没起来）。用户定的规则是「所有节点停止，那就整体停止」。
+     */
+    expect(body.run.status).toBe('paused');
 
     await app.close();
   });

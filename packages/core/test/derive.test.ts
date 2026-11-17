@@ -86,8 +86,7 @@ describe('派生状态：不读任何 status 字段', () => {
     expect(readyNodes(run).map((item) => item.id)).toEqual(['a']);
   });
 
-  it('有人的审批在等时，运行状态压过完成态', () => {
-    const approval = node({ id: 'a', type: 'approval', startedAt: AT });
+  it('有人的审批在等时，运行状态压过完成态', () => {    const approval = node({ id: 'a', type: 'approval', startedAt: AT });
     const run = buildRun([approval]);
     expect(deriveRunStatus(run)).toBe('waiting_for_boss');
     expect(deriveRunStatus({ ...run, completedAt: LATER })).toBe('waiting_for_boss');
@@ -251,6 +250,34 @@ describe('退回重做：重置目标并作废下游', () => {
       }),
     );
     expect(state.runs['run-1']?.nodes['b']?.attempts).toBe(1);
+  });
+});
+
+describe('运行状态的第一判据：有节点在跑就是在运行', () => {
+  it('有节点 running 时，压过暂停与完成', () => {
+    const run = buildRun([
+      node({ id: 'a', type: 'implement', startedAt: AT }),
+      node({ id: 'b', type: 'implement', finishedAt: AT }),
+    ]);
+    // 即使有人按过停止、甚至标了完成，只要还有一个 Agent 在跑，界面就不能
+    // 说这轮停了——那会变成「说已暂停、底下还在烧 token」
+    run.pausedAt = LATER;
+    expect(deriveRunStatus(run)).toBe('running');
+  });
+
+  it('所有节点都停了（被打断、没人在跑）：派生 paused 而不是 running', () => {
+    const run = buildRun([
+      // 被打断过的节点：startedAt 已被清空，只剩 interruptedAt
+      node({ id: 'a', type: 'implement', interruptedAt: LATER }),
+      node({ id: 'b', type: 'implement', finishedAt: AT }),
+    ]);
+    // 旧逻辑只看到「还有 ready 节点」就判 running，但没有任何推进链路在动它
+    expect(deriveRunStatus(run)).toBe('paused');
+  });
+
+  it('刚建好、还没轮到的运行仍是 running（不该被误判成停止）', () => {
+    const run = buildRun([node({ id: 'a', type: 'implement' })]);
+    expect(deriveRunStatus(run)).toBe('running');
   });
 });
 
