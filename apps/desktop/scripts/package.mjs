@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 /**
  * 打包，但绕开 `electron-forge`。
@@ -19,6 +20,9 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..');
 const appName = 'WorkflowOrchestrator';
+const require = createRequire(import.meta.url);
+const useRemoteChecksums = process.env.electron_use_remote_checksums ||
+  process.env.npm_config_electron_use_remote_checksums;
 const extraResources = ['server', 'web'].map((name) => join(desktopRoot, 'resources', name));
 
 function restoreResourceLinks(source, destination) {
@@ -42,6 +46,8 @@ const appPaths = await packager({
   platform: process.platform,
   arch: process.arch,
   asar: true,
+  // Match Electron's installer and verify the cache with its bundled release checksums.
+  download: { checksums: useRemoteChecksums ? undefined : require('electron/checksums.json') },
   overwrite: true,
   // Seal the completed local bundle with an ad hoc signature before archiving.
   ...(process.platform === 'darwin' && {
