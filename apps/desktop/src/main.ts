@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 
@@ -50,9 +51,22 @@ function resolveWebRoot(): string | undefined {
  */
 app.setName('WorkflowOrchestrator');
 
-/** 数据根：桌面版用用户目录，免得装到只读位置（Program Files）就没法写。 */
+/**
+ * 数据根目录：**`~/.workflow-orchestrator`**，与 server 自己解析出来的那个
+ * 完全一致。
+ *
+ * 这里不再按 `app.isPackaged` 分叉。之前开发态读仓库 `data/`、打包后读
+ * `userData`，结果是同一个项目两种入口看到两套历史——命令行有 24 个运行，
+ * 桌面窗口里一个都没有。数据属于这台机器上的编排器，不属于某种启动方式。
+ *
+ * `AGENT_DATA_DIR` 仍可覆盖，且优先级最高。
+ */
 function resolveDataDir(): string {
-  return join(app.getPath('userData'), 'data');
+  const explicit = process.env.AGENT_DATA_DIR?.trim();
+  if (explicit) {
+    return resolve(explicit);
+  }
+  return join(homedir(), '.workflow-orchestrator');
 }
 
 function runningFilePath(): string {
