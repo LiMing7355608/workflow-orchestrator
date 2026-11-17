@@ -74,28 +74,22 @@ function runningFilePath(): string {
 }
 
 /** 等 `running.json` 出现且可用。返回服务 URL。 */
-async function waitForServer(timeoutMs: number): Promise<string> {
+async function waitForServer(child: ChildProcess, timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let lastError = '超时';
   while (Date.now() < deadline) {
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+      throw new Error('编排器服务已退出，请查看终端里的 [server] 日志');
+    }
     try {
       const raw = await readFile(runningFilePath(), 'utf8');
-      const parsed = JSON.parse(raw) as { url?: unknown; pid?: unknown };
-      if (typeof parsed.url === 'string') {
-        /**
-         * 顺手确认这个 pid 还活着。
-         *
-         * `running.json` 是上一轮崩溃留下的陈旧文件时，URL 看着完全正常，
-         * 但那个端口早就没人听了——直接加载会得到一个白窗口，而这比报错更难
-         * 诊断。所以先发 0 号信号探活。
-         */
-        const pid = typeof parsed.pid === 'number' ? parsed.pid : 0;
-        if (pid > 0 && !isAlive(pid)) {
-          lastError = '运行地址文件来自已退出的进程';
-        } else {
-          return parsed.url;
-        }
+      const parsed = JSON.parse(raw) as { url?: unknown; port?: unknown; pid?: unknown };
+      if (parsed.pid === child.pid && typeof parsed.port === 'number' &&
+          Number.isInteger(parsed.port) && parsed.port > 0 && parsed.port <= 65535 &&
+          parsed.url === `http://127.0.0.1:${parsed.port}`) {
+        return parsed.url;
       }
+      lastError = '正在等待桌面子进程写入本地运行地址';
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
@@ -104,18 +98,10 @@ async function waitForServer(timeoutMs: number): Promise<string> {
   throw new Error(`编排器服务没有在 ${timeoutMs}ms 内就绪：${lastError}`);
 }
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 let serverProcess: ChildProcess | undefined;
 /** 主动退出中：用来压掉子进程非零退出时的错误弹窗。 */
 let quittingOnPurpose = false;
+let serverReady = false;
 let mainWindow: BrowserWindow | undefined;
 
 /**
@@ -161,11 +147,14 @@ function startServer(): ChildProcess {
   child.stderr?.on('data', (chunk: Buffer) => {
     process.stderr.write(`[server] ${chunk.toString()}`);
   });
+  child.on('error', (error) => {
+    console.error('[server] 无法启动子进程', error);
+  });
   child.on('exit', (code, signal) => {
     process.stdout.write(`[server] 退出 code=${String(code)} signal=${String(signal)}\n`);
     serverProcess = undefined;
     // 服务没了，窗口留着也没意义：告诉用户发生了什么，而不是让他对着白屏
-    if (code !== 0 && code !== null && !quittingOnPurpose) {
+    if (serverReady && code !== 0 && code !== null && !quittingOnPurpose) {
       void dialog.showMessageBox({
         type: 'error',
         title: '编排器服务已退出',
@@ -238,8 +227,10 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     try {
-      serverProcess = startServer();
-      const url = await waitForServer(30_000);
+      const child = startServer();
+      serverProcess = child;
+      const url = await waitForServer(child, 30_000);
+      serverReady = true;
       createWindow(url);
     } catch (error) {
       await dialog.showMessageBox({
@@ -252,9 +243,12 @@ if (!app.requestSingleInstanceLock()) {
 
     app.on('activate', () => {
       // macOS：点 dock 图标且没窗口时重开一个
-      if (BrowserWindow.getAllWindows().length === 0 && mainWindow === undefined) {
-        void waitForServer(10_000)
-          .then(createWindow)
+      const child = serverProcess;
+      if (child && mainWindow === undefined) {
+        void waitForServer(child, 10_000)
+          .then((url) => {
+            if (mainWindow === undefined) createWindow(url);
+          })
           .catch(() => {});
       }
     });
