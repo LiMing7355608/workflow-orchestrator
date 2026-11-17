@@ -71,6 +71,24 @@ pnpm local
 | `pnpm test` | 运行各 package 单元测试与 `tests/` 集成测试 |
 | `pnpm test:e2e` | 只运行 `tests/` 端到端测试 |
 
+### macOS 桌面打包
+
+在目标架构的 Mac 上使用 Node.js 20 和 pnpm 10.15.0。Apple Silicon 使用 arm64 版 Node，Intel Mac 使用 x64 版。
+
+```sh
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf \
+GIT_CONFIG_VALUE_0=git@github.com: \
+pnpm install --frozen-lockfile
+
+pnpm desktop:make
+```
+
+临时 Git 配置让锁文件中的 Electron 依赖通过 HTTPS 下载。首次打包需要联网下载 Electron。产物位于 `apps/desktop/out/`，包含按架构命名的目录和 `WorkflowOrchestrator-mac-<arch>.zip`。解压 ZIP 后可在本机打开 `WorkflowOrchestrator.app`。
+
+此命令生成本地测试包。面向其他 Mac 分发时，需要另做 Developer ID 签名与 Apple 公证。应用内运行真实 Agent 还需要在本机安装并配置对应 CLI。
+
+
 ## 协作约定
 
 - 分支：`feat/<主题>`、`fix/<主题>`、`docs/<主题>`，不直接改 `main`。
