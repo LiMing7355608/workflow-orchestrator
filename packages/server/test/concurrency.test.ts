@@ -20,7 +20,7 @@ function node(id: string, files: string[] = []): NodeFacts {
     description: '',
     dependsOn: [],
     files,
-    agentId: 'dsh',
+    agentId: 'dsh-acp',
     attempts: 0,
     maxAttempts: 3,
   };

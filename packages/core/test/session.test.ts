@@ -50,12 +50,12 @@ describe('会话解析：续跑判定', () => {
 
     expect(result.resumable).toBe(false);
     expect(result.sessionId).toBeUndefined();
-    expect(result.reason).toBe('首次执行');
+    expect(result.reason).toBe('没有捕获到原生会话 id');
   });
 
   it('hooked 平台捕获到原生会话 id 时续跑', () => {
     const result = resolveSession(
-      agentOf('dsh'),
+      agentOf('dsh-acp'),
       node({ attempts: 1, nativeSessionId: 'acp-session-7' }),
     );
 
@@ -66,7 +66,7 @@ describe('会话解析：续跑判定', () => {
 
   it('hooked 平台没捕获到原生 id 时降级为新跑，并说明原因', () => {
     // 回放 / 无 hook 场景下的正常降级，不是错误
-    const result = resolveSession(agentOf('dsh'), node({ attempts: 1 }));
+    const result = resolveSession(agentOf('dsh-acp'), node({ attempts: 1 }));
 
     expect(result.resumable).toBe(false);
     expect(result.sessionId).toBeUndefined();
@@ -76,7 +76,7 @@ describe('会话解析：续跑判定', () => {
   it('uuidv5 平台用注入的派生器算出 id，runId 与 nodeId 都传进去', () => {
     const seen: Array<[string, string]> = [];
     const result = resolveSession(
-      agentOf('claude'),
+      agentOf('qoder'),
       node({ id: 'impl-b', attempts: 1 }),
       (runId, nodeId) => {
         seen.push([runId, nodeId]);
@@ -92,7 +92,7 @@ describe('会话解析：续跑判定', () => {
   });
 
   it('uuidv5 平台没有注入派生器时不续跑', () => {
-    const result = resolveSession(agentOf('claude'), node({ attempts: 1 }), undefined, 'run-9');
+    const result = resolveSession(agentOf('qoder'), node({ attempts: 1 }), undefined, 'run-9');
 
     expect(result.resumable).toBe(false);
     expect(result.sessionId).toBeUndefined();

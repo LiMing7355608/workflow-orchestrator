@@ -185,10 +185,28 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       auto: ['--permission-mode', 'auto'],
       'bypass-permissions': ['--permission-mode', 'bypassPermissions'],
     },
+    /**
+     * 会话 id 由 **claude 自己生成**，我们只负责捕获。
+     *
+     * 上一版是 `derive: 'uuidv5'`——自己按 (runId, nodeId) 算一个确定性的 id，
+     * 首轮用 `--session-id` 把它钉进去。那个设计有一个致命的语义错配：
+     * `--session-id` 的语义是「创建并占用这个 id」，**不幂等**。那个 id 一旦
+     * 被创建过（哪怕那一次执行失败了、transcript 已经落盘），再传就报
+     * `Session ID ... is already in use`。
+     *
+     * 而 `attempts` 只在审查驳回时 +1、执行失败不涨，于是重试永远被当成首轮、
+     * 永远拿同一个 id 去「创建」、永远撞同一堵墙——那个节点从此跑不起来。
+     *
+     * 改成 `hooked` 就是让 claude 自己铸 id：首轮不带任何会话参数，SDK 的
+     * `system/init` 消息带回真实 id，`claude-sdk` 执行器把它转成 `agent.session`
+     * 事件落进 `node.nativeSessionId`，下一轮用 `--resume <id>` 接上。
+     *
+     * 这条路上每一步都幂等：没 id 就是新会话，有 id 就是续跑，不存在「创建一个
+     * 已经存在的 id」这种操作。
+     */
     session: {
-      derive: 'uuidv5',
+      derive: 'hooked',
       resumeArgs: ['--resume', '{session}'],
-      newSessionArgs: ['--session-id', '{session}'],
     },
     windowsShim: 'bypass',
     version: '2.1.278',
@@ -196,44 +214,22 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
     note: '走官方 Agent SDK。不传 model，用 ~/.claude/settings.json 的默认值——模型名属于部署环境，不该写死在目录里。本机实测：DeepSeek 官方 Anthropic 兼容端点下 4.9 秒产出回答。',
     timeoutMs: 600_000,
   },
-  {
-    id: 'dsh',
-    label: 'DeepSeek Harness',
-    vendor: 'DeepSeek',
-    logo: '/logos/dsh.svg',
-    launch: {
-      bin: 'dsh',
-      args: ['--profile', 'headless', '--json'],
-      stdin: true,
-      parser: 'dsh-json',
-    },
-    capabilities: { streaming: true, structured: true, resume: true, tools: true },
-    /**
-     * 走官方 client SDK。
-     *
-     * 注意 `launch.args` 仍然写着 `--profile headless --json`——那是 **CLI 那条路**
-     * 用的，SDK 这条路完全忽略它：实测 `headless` 这个 bundle 里没有
-     * `dsh-sdk-jsonrpc-server`，用它握手 10 秒超时；SDK 固定要 `sdk` profile。
-     * 两边共用一份 profile，谁也没有权利为了自己把那串参数改掉。
-     */
-    transport: 'dsh-sdk',
-    availability: 'ready',
-    enabled: true,
-    // headless profile 没有权限开关：审批请求以事件形式到来，由编排器应答。
-    permissionArgs: {
-      default: [],
-      'accept-edits': [],
-      auto: [],
-      'bypass-permissions': [],
-    },
-    // 续跑靠 ACP 的 session/resume；headless 拿不到原生 id 时退化为新跑。
-    session: { derive: 'hooked', resumeArgs: [] },
-    windowsShim: 'bypass',
-    version: '0.2.0-rc.2',
-    source: 'apps/cli README + packages/bundle/headless（本机实测）',
-    note: '任务从 stdin 传入。无 hook 面，终端会话通常拿不到原生 id，续跑会退化为新跑。',
-    timeoutMs: 600_000,
-  },
+  /**
+   * dsh（走 dsh-sdk）**不在默认目录里了**，但实现完整保留着：
+   * packages/server/src/runners/dsh-sdk.ts 919 行，transport 'dsh-sdk'
+   * 仍然可用——只要有人手工把它加回目录。
+   *
+   * 撤下的原因是它与桌面版存在无法调和的运行时冲突：dsh-sdk-client 内部
+   * 用 process.execPath 去跑 dsh 的 JS 模块，而 Electron 打包后 server 就是
+   * 被 ELECTRON_RUN_AS_NODE=1 启动的，process.execPath 指向 Electron 自己。
+   * dsh 的 native addon 一看 V8 指纹是 Electron 就直接拒绝启动：
+   *
+   *   node-addon-require-builtin unsupported: Unsupported/no-context
+   *   (unsupported Electron runtime fingerprint: V8 14.0.365.10-electron.0)
+   *
+   * 同样的能力由 dsh-acp 提供：它 spawn 系统上的 dsh --profile acp 子进程，
+   * 拿到的是真 Node，native addon 不炸，会话续跑也验证过。
+   */
   {
     id: 'dsh-acp',
     label: 'DeepSeek Harness（ACP）',
@@ -307,7 +303,22 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       auto: ['--sandbox', 'workspace-write', '-c', 'approvals_reviewer="auto_review"'],
       'bypass-permissions': ['--dangerously-bypass-approvals-and-sandbox'],
     },
-    session: { derive: 'none', resumeArgs: [] },
+    /**
+     * 会话 id 由 codex 自己分配（app-server 的 `thread.id`），我们只捕获。
+     *
+     * 上一版是 `derive: 'none'`——直接宣告「不支持续跑」。它其实支持：
+     * app-server 有 `thread/resume`（参数 `threadId`），CLI 有
+     * `codex resume <id> -- <prompt>`。一直没接是因为一个隐藏前提：首轮
+     * `thread/start` 带了 `ephemeral: true`，会话根本不落盘，没有东西可恢复。
+     *
+     * 现在首轮不再声明 ephemeral（走平台默认的持久化），`thread.started`
+     * 带回的 `thread_id` 被 `pickSessionId` 提取成 `agent.session` 事实，
+     * 下一轮拿它发 `thread/resume`。
+     *
+     * `resumeArgs` 留空：这条路走 JSON-RPC，不看 argv。CLI 那条路的续跑是
+     * `codex resume <id> -- <prompt>`（子命令形式），现有模板语法表达不了。
+     */
+    session: { derive: 'hooked', resumeArgs: [] },
     windowsShim: 'bypass',
     source: 'codex exec --json（官方文档）',
     note: '审查使用只读沙箱，规划和实现可在各自工作区内写入。',
@@ -370,7 +381,18 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       auto: ['--permission-mode', 'accept_edits'],
       'bypass-permissions': ['--permission-mode', 'accept_edits'],
     },
-    session: { derive: 'uuidv5', resumeArgs: ['--resume', '{session}'] },
+    /**
+     * 仍是 uuidv5：它接口对齐 Claude Code，用 `--session-id` 钉住首轮是那套语义。
+     *
+     * `newSessionArgs` 原本漏了——于是「确定性派生」这个声明从来没生效过：
+     * 首轮不钉 id，后续 `--resume` 永远接不上（它 `enabled: false`，本地没装，
+     * 所以一直没人发现）。这里补齐，让声明和实现对得上。
+     */
+    session: {
+      derive: 'uuidv5',
+      resumeArgs: ['--resume', '{session}'],
+      newSessionArgs: ['--session-id', '{session}'],
+    },
     source: 'docs.qoder.com/cli/run-in-scripts',
     note: '接口刻意对齐 Claude Code，因此复用同一套解析器。无头模式需 accept_edits 才能改文件。',
     timeoutMs: 300_000,

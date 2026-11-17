@@ -38,7 +38,7 @@ const RUN_ID = 'run-node-prompt';
 // 用真实 profile：手写的简化版会漏字段（比如 session.derive），
 // 那种错误只会把用例变成「测我的 fixture」而不是「测产品行为」
 const CATALOG: AgentProfile[] = DEFAULT_AGENT_PROFILES.filter(
-  (agent) => agent.id === 'dsh',
+  (agent) => agent.id === 'dsh-acp',
 ).map((agent) => ({ ...agent, availability: 'ready' as const }));
 
 let tempDir: string | undefined;
@@ -114,7 +114,7 @@ async function createFixture(): Promise<{
           description: '实现消息模块',
           dependsOn: [],
           files: [],
-          agentId: 'dsh',
+          agentId: 'dsh-acp',
           attempts: 0,
           maxAttempts: 3,
         },

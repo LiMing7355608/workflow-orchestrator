@@ -267,7 +267,7 @@ describe('编排循环', () => {
 
   it('thinking 入流，空思考块不占事件；status 只在带用量时落一条用量', async () => {
     const run = buildRun([
-      node({ id: 'impl-a', type: 'implement', agentId: 'dsh' }),
+      node({ id: 'impl-a', type: 'implement', agentId: 'dsh-acp' }),
     ]);
     const ndjson = [
       '{"type":"status","phase":"turn_start","turn":1}',
@@ -295,7 +295,7 @@ describe('编排循环', () => {
 
   it('不带用量的 status 不产生任何输出事件', async () => {
     const run = buildRun([
-      node({ id: 'impl-a', type: 'implement', agentId: 'dsh' }),
+      node({ id: 'impl-a', type: 'implement', agentId: 'dsh-acp' }),
     ]);
     const ndjson = [
       '{"type":"status","phase":"step_start"}',
@@ -310,14 +310,26 @@ describe('编排循环', () => {
   });
 
   it('节点重跑时携带派生会话 id，argv 里出现 --resume，并发出一条续跑事件', async () => {
-    // attempts = 1 表示这个节点已经被退回过一次，这一轮算「重跑」
+    /**
+     * claude 走 `session.derive: 'hooked'`：会话 id 由 claude 自己铸，
+     * 编排器从流式输出里捕获、落进 `node.nativeSessionId`，重跑时用它续。
+     *
+     * 早先这里是「attempts = 1 + 注入派生器」的 uuidv5 写法。那条路在 claude
+     * 身上有个绕不过的冲突：`--session-id` 是「创建并占用」，不幂等，同一个 id
+     * 用过一次就永久报 already in use。所以现在验的是捕获路径。
+     */
     const run = buildRun([
-      node({ id: 'impl-a', type: 'implement', agentId: 'claude', attempts: 1 }),
+      node({
+        id: 'impl-a',
+        type: 'implement',
+        agentId: 'claude',
+        attempts: 1,
+        nativeSessionId: 'captured-uuid',
+      }),
     ]);
 
     const requests: AgentRunRequest[] = [];
     const h = harness(run, () => 'done', {
-      deriveSessionId: (runId, nodeId) => `sess-${runId}-${nodeId}`,
       onRequest: (request) => requests.push(request),
     });
 
@@ -326,20 +338,21 @@ describe('编排循环', () => {
     // claude 的 profile 声明 resumeArgs = ['--resume', '{session}']
     expect(requests).toHaveLength(1);
     expect(requests[0]?.argv).toContain('--resume');
-    expect(requests[0]?.argv).toContain('sess-run-t-impl-a');
+    expect(requests[0]?.argv).toContain('captured-uuid');
 
     const resumed = h.events.filter(
       (event): event is Extract<OrchestratorEvent, { type: 'node.resumed_session' }> =>
         event.type === 'node.resumed_session',
     );
     expect(resumed).toHaveLength(1);
-    expect(resumed[0]?.sessionId).toBe('sess-run-t-impl-a');
+    expect(resumed[0]?.sessionId).toBe('captured-uuid');
     expect(resumed[0]?.agentId).toBe('claude');
 
-    // 续跑 id 进 lastResumeSessionId，绝不污染 hook 捕获的 nativeSessionId
+    // 续跑 id 进 lastResumeSessionId；nativeSessionId 是**捕获来的原始锚点**，
+    // 在这一轮里既不被清空也不被改写（hooked 模式下它就是续跑的来源）
     const nodeFacts = h.state().runs['run-t']?.nodes['impl-a'];
-    expect(nodeFacts?.lastResumeSessionId).toBe('sess-run-t-impl-a');
-    expect(nodeFacts?.nativeSessionId).toBeUndefined();
+    expect(nodeFacts?.lastResumeSessionId).toBe('captured-uuid');
+    expect(nodeFacts?.nativeSessionId).toBe('captured-uuid');
   });
 
   it('首次执行不带续跑参数，也不发续跑事件', async () => {
@@ -359,7 +372,8 @@ describe('编排循环', () => {
 
     expect(requests[0]?.argv).not.toContain('--resume');
     expect(h.events.some((event) => event.type === 'node.resumed_session')).toBe(false);
-    // 降级原因只进日志，不写成事件
-    expect(logged.some((line) => line.includes('首次执行'))).toBe(true);
+    // 降级原因只进日志，不写成事件。claude 走 hooked，所以理由是「没有捕获到
+    // 原生会话 id」而不是「首次执行」——那条判据只对 uuidv5 成立。
+    expect(logged.some((line) => line.includes('没有捕获到原生会话 id'))).toBe(true);
   });
 });

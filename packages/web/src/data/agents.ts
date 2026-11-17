@@ -52,15 +52,14 @@ export const seedAgents: AgentProfile[] = [
     source: 'claude --help（本机实测）',
     note: '提示词走 stdin。审查节点用 plan 档，实现节点用 acceptEdits 并放开 Write/Edit。',
     timeoutMs: 600_000,
-  },
-  {
-    id: 'dsh',
-    label: 'DeepSeek Harness',
+  },  {
+    id: 'dsh-acp',
+    label: 'DeepSeek Harness（ACP）',
     vendor: 'DeepSeek',
     logo: '/logos/dsh.svg',
     launch: {
       bin: 'dsh',
-      args: ['--profile', 'headless', '--json'],
+      args: ['--profile', 'acp'],
       stdin: true,
       parser: 'dsh-json',
     },
@@ -72,21 +71,20 @@ export const seedAgents: AgentProfile[] = [
     },
     availability: 'ready',
     enabled: true,
-    // headless profile 没有权限开关：审批请求以事件形式到来，由编排器应答。
     permissionArgs: {
       default: [],
       'accept-edits': [],
       auto: [],
       'bypass-permissions': [],
     },
-    // 续跑靠 ACP 的 session/resume；headless 拿不到原生 id 时退化为新跑。
     session: { derive: 'hooked', resumeArgs: [] },
     windowsShim: 'bypass',
     version: '0.2.0-rc.2',
-    source: 'apps/cli README + packages/bundle/headless（本机实测）',
-    note: '任务从 stdin 传入。无 hook 面，终端会话通常拿不到原生 id，续跑会退化为新跑。',
+    source: '本机实测：dsh --profile acp（2026-11-17）',
+    note: '走 Agent Client Protocol。取消有协议级 session/cancel，会话续跑已实测通过。',
     timeoutMs: 600_000,
   },
+
   {
     id: 'codex',
     label: 'Codex CLI',

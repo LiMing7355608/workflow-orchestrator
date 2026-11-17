@@ -23,7 +23,7 @@ function node(partial: Partial<NodeFacts> & Pick<NodeFacts, 'id' | 'type'>): Nod
     files: [],
     attempts: 0,
     maxAttempts: 3,
-    agentId: 'dsh',
+    agentId: 'dsh-acp',
     ...partial,
   };
 }
@@ -53,8 +53,8 @@ function buildRun(): RunFacts {
 }
 
 const agent: AgentProfile = {
-  id: 'dsh',
-  launch: { bin: 'dsh', args: [], parser: 'dsh-json', stdin: true },
+  id: 'dsh-acp',
+  launch: { bin: 'dsh-acp', args: [], parser: 'dsh-json', stdin: true },
   capabilities: { streaming: true, structured: true, resume: false, tools: true },
   availability: 'ready',
   enabled: true,
@@ -91,7 +91,7 @@ function reviewOutput(text: string): OrchestratorEvent {
     at: AT,
     runId: RUN,
     nodeId: 'review-a',
-    agentId: 'dsh',
+    agentId: 'dsh-acp',
     chunk: text,
     kind: 'text',
   };

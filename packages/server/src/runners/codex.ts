@@ -275,7 +275,21 @@ function pickPrompt(request: AgentRunRequest): string {
     }
   }
 
-  for (let index = 0; index < argv.length; index += 1) {
+  /**
+   * `argv[0]` 是**程序名**，不是参数。
+   *
+   * `buildAgentArgv` 以 bin 打头（`SpawnAgentRunner` 与 `AcpRunner` 都靠
+   * `slice(1)` 把它丢掉），而这里的启发式原本从 0 开始扫。codex 这个 profile
+   * 的 bin 恰好就叫 `codex`——它不以 `-` 开头、也不是子命令，于是被当成第一个
+   * 候选直接返回：**不管节点写了什么，Agent 收到的提示词永远是「codex」**。
+   * 表现是它把任务理解成「用户在问 Codex 是什么」，每次都在自我介绍。
+   *
+   * 只在它确实等于 `request.bin` 时才跳：外部调用方传纯参数表（不含程序名）
+   * 时不会被误删第一个真参数。
+   */
+  const start = argv[0] === request.bin ? 1 : 0;
+
+  for (let index = start; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === undefined) {
       continue;
@@ -293,7 +307,7 @@ function pickPrompt(request: AgentRunRequest): string {
     return arg;
   }
 
-  return argv.join(' ').trim();
+  return argv.slice(start).join(' ').trim();
 }
 
 /* ------------------------------------------------------------------ *
@@ -421,6 +435,14 @@ export class CodexAppServerWire {
       /** thread/start 的权限字段，见 POLICY_THREAD_PARAMS */
       threadParams: JsonObject;
       model?: string;
+      /**
+       * 要接上的已有 thread（续跑）。
+       *
+       * 给了就走 `thread/resume { threadId }`，不给才 `thread/start` 开新的。
+       * 两者的差别不只是「省一次调用」：`thread/resume` 会把历史从磁盘读回来，
+       * 而 `thread/start` 永远是一张白纸。
+       */
+      resumeThreadId?: string;
       /** 每合成一行 `codex exec --json` 形状的输出就回调一次（同步） */
       onLine: (line: string) => void;
       log?: LogSink;
@@ -494,13 +516,39 @@ export class CodexAppServerWire {
    * 界面上就会出现「Agent 已经在说话，但还不知道它在哪个会话里」。
    */
   async startThread(cwd: string, signal: AbortSignal): Promise<void> {
+    /**
+     * 有要接上的 thread 就 resume，否则新建。
+     *
+     * `ephemeral` 只在新建时出现过：它是「这一轮用完就丢」的意思，而且会让
+     * thread 不落盘——那正是上一版「codex 不支持续跑」的真正原因（首轮就把
+     * 可恢复的东西丢掉了）。续跑这一侧不需要它，也不该传。
+     */
+    const resume = this.options.resumeThreadId;
+    if (resume !== undefined && resume !== '') {
+      const resumed = requireObject(
+        await this.request(
+          'thread/resume',
+          {
+            threadId: resume,
+            ...(this.options.model === undefined ? {} : { model: this.options.model }),
+            ...this.options.threadParams,
+          },
+          signal,
+          'thread-start',
+        ),
+        'thread/resume 响应',
+      );
+      const thread = requireObject(resumed.thread, 'thread/resume thread');
+      this.threadId = requireId(thread.id, 'thread/resume thread id');
+      this.emitLine({ type: 'thread.started', thread_id: this.threadId });
+      return;
+    }
+
     const response = requireObject(
       await this.request(
         'thread/start',
         {
           cwd,
-          // 节点工作区是一次性的，会话记录没有留存价值
-          ephemeral: true,
           ...(this.options.model === undefined ? {} : { model: this.options.model }),
           ...this.options.threadParams,
         },
@@ -511,10 +559,11 @@ export class CodexAppServerWire {
     );
     const thread = requireObject(response.thread, 'thread/start thread');
     this.threadId = requireId(thread.id, 'thread/start thread id');
-    if (thread.ephemeral === false) {
-      // 老版本可能不返回这个字段，所以只认显式的 false。
-      // 会话落盘不是执行失败（工作区本身会被丢弃），但要留痕，方便解释磁盘上的残留。
-      this.log.warn('codex 没有建立临时会话，会话记录会落盘', { threadId: this.threadId });
+    if (thread.ephemeral === true) {
+      // 显式的临时会话不可恢复。这条要让人看见：它解释了「为什么下一轮接不上」。
+      this.log.warn('codex 建立了临时会话（ephemeral），这个 thread 无法续跑', {
+        threadId: this.threadId,
+      });
     }
     this.emitLine({ type: 'thread.started', thread_id: this.threadId });
   }
@@ -1375,6 +1424,15 @@ export class CodexAppServerRunner implements AgentRunner {
         // profile 的 modelArgs 是 `-m {model}`，两种写法都要认：读不出来就交给
         // codex 自己的配置，绝不替运维现场选模型
         model: argValue(request.argv, '--model') ?? argValue(request.argv, '-m'),
+        /**
+         * 续跑的唯一来源是 `request.sessionId`。
+         *
+         * 那是 core 的 `resolveSession` 从 `node.nativeSessionId` 里取出来的——
+         * 上一轮 `thread.started` 带回的 thread id。走 JSON-RPC 的这条路不看
+         * argv，所以别去 argv 里找 `--resume`：codex 的 CLI 续跑是子命令
+         * （`codex resume <id> -- <prompt>`），压根不是 flag。
+         */
+        ...(request.sessionId === undefined ? {} : { resumeThreadId: request.sessionId }),
         log: this.log,
         onLine: (line) => {
           // 同步路径：上层要求 onChunk 不 await（见 core 的 createAgentEventRelay）

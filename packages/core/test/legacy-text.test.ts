@@ -69,7 +69,7 @@ describe('deriveEvents 对旧数据的处理', () => {
         description: '',
         dependsOn: [],
         files: [],
-        agentId: 'dsh',
+        agentId: 'dsh-acp',
         attempts: 0,
         maxAttempts: 3,
       },
@@ -82,7 +82,7 @@ describe('deriveEvents 对旧数据的处理', () => {
       at,
       runId: 'run-legacy',
       nodeId: 'n1',
-      agentId: 'dsh',
+      agentId: 'dsh-acp',
       chunk,
       kind: 'text',
     };

@@ -57,7 +57,20 @@ export function resolveSession(
   const plannedSessionId =
     spec.derive === 'uuidv5' && deriveId ? deriveId(runId, facts.id) : undefined;
 
-  if (facts.attempts === 0) {
+  /**
+   * 「首轮不续」这条只对 `uuidv5` 成立。
+   *
+   * uuidv5 的 id 是算出来的，首轮必须用 `--session-id` 把它钉进平台，否则
+   * 后面永远接不上——所以首轮不能带 `--resume`。
+   *
+   * 而 `hooked` 的 id 是**捕获来的**：有就是有（上一轮真跑过），没有就是没有。
+   * 早先这里不看 derive 模式、一律用 `attempts === 0` 判首轮，后果是「用户重置
+   * 节点后重跑」被当成首轮——reset 不涨 attempts，于是捕获到的会话 id 被丢弃，
+   * 每次都开新会话。实测撞到过：一个 dsh 节点第一轮记住「7391」、第二轮问它，
+   * 它答得出来，但那是 dsh 自己的 profile 复用了会话，不是我们在续跑；换成两个
+   * 不同节点就会互相串话。
+   */
+  if (facts.attempts === 0 && spec.derive === 'uuidv5') {
     // 首次执行没有上一轮上下文，把续跑参数传进去只会换来一句「会话不存在」
     return { resumable: false, reason: '首次执行', plannedSessionId };
   }
