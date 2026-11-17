@@ -762,6 +762,12 @@ async function executeNode(
       cwd,
       timeoutMs: agent.timeoutMs,
       policy,
+      // CLI 那条路已经从 argv 里拿到了（`--resume <id>`）；这个字段是给
+      // 走 SDK / 走协议的执行器用的——它们的会话是协议对象，不看 argv。
+      // 复用它而不是各算一遍：续不续、续哪个，只能由 resolveSession 说了算。
+      ...(session.resumable && session.sessionId
+        ? { sessionId: session.sessionId }
+        : {}),
       signal: deps.signal,
     },
     (chunk) => {

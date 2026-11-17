@@ -82,6 +82,7 @@ export type {
   AgentParserId,
   AgentProfile,
   AgentSessionSpec,
+  AgentTransport,
   PermissionPolicy,
   SessionDerive,
 } from './agents.js';

@@ -39,6 +39,33 @@ export type PermissionPolicy =
   | 'bypass-permissions';
 
 /**
+ * 驱动一个 Agent 的方式。
+ *
+ * - `cli`：拼 argv、起子进程、解析 stdout。所有平台都能走这条路，
+ *   代价是模型名映射、会话续跑、权限开关全由我们手工拼（见 `buildAgentArgv`）。
+ * - `claude-sdk`：官方 Agent SDK。上面那些差异本来就是这个 SDK 的职责，
+ *   执行器只需要把请求翻译成 Options，再把消息流还原成事件。
+ */
+/**
+ * 这个 Agent 用哪种方式驱动。
+ *
+ * - `cli`：拼 argv、起进程、解析 stdout。缺省值，旧目录与旧日志都走它。
+ * - `claude-sdk`：官方 Agent SDK（会话、权限、模型名由 SDK 负责）
+ * - `codex-app-server`：Codex 的 app-server 协议（JSON-RPC over stdio）
+ * - `dsh-sdk`：DeepSeek Harness 官方 client SDK
+ * - `acp`：Agent Client Protocol，任何实现了它的 agent 都能接
+ *
+ * 每条路的差别都只在「怎么把提示词送进去、怎么把输出翻译成 AgentEvent」，
+ * 编排层只认 `AgentRunner` 一个接口。
+ */
+export type AgentTransport =
+  | 'cli'
+  | 'claude-sdk'
+  | 'codex-app-server'
+  | 'dsh-sdk'
+  | 'acp';
+
+/**
  * 原生会话 id 的来源。
  * - uuidv5：由编排器 session id 确定性派生，重启后能重算
  * - hooked：依赖平台 hook 或流式输出捕获，拿不到时续跑降级为新跑
@@ -86,6 +113,16 @@ export interface AgentProfile {
   vendor: string;
   /** 厂商图标路径，前端从 public 下取 */
   logo: string;
+  /**
+   * 这个 Agent 用哪种方式驱动，缺省视为 `'cli'`。
+   *
+   * 缺省不能是必填：`transport` 是后加的，磁盘上的旧目录、测试里手写的
+   * profile、以及第三方塞进来的配置都不会带它。把缺省当成 `'cli'`，
+   * 这些旧数据的行为与加这个字段之前完全一致——它们本来就是拼 argv 跑的。
+   * 反过来说，只有显式声明 `'claude-sdk'` 才会换执行路径，任何一条旧日志
+   * 与旧 profile 的语义都不会被悄悄改写。
+   */
+  transport?: AgentTransport;
   launch: AgentLaunchSpec;
   capabilities: AgentCapabilities;
   availability: AgentAvailability;
@@ -107,6 +144,10 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
     label: 'Claude Code',
     vendor: 'Anthropic',
     logo: '/logos/claude.svg',
+    // 换官方 SDK 驱动：模型名映射、会话、权限档位都归 SDK 管，
+    // 下面的 launch 只保留「声明它有哪些能力、参数怎么拼」的历史形态，
+    // CLI 执行器仍可拿它兜底（比如 SDK 那一路临时不可用时）
+    transport: 'claude-sdk',
     launch: {
       bin: 'claude',
       args: [
@@ -122,10 +163,21 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       modelArgs: ['--model', '{model}'],
     },
     capabilities: { streaming: true, structured: true, resume: true, tools: true },
-    // 装了、但这台机器上跑不通：Claude Code 被配成指向 deepseek-v4-flash，
-    // 它报 unrecognized_model。按定义「可直接调用」要求本机实测跑通，
-    // 所以这里只能是仅安装，不能凭 --version 就认定可用
-    availability: 'installed',
+    /**
+     * 走 SDK 之后本机实测**真的产出了回答**，所以是 ready。
+     *
+     * 结论变化有据：上一版判 installed 是因为凭证指向 tokenhub 网关，模型请求被
+     * 判 402（服务 ID 不匹配），一次回答都没产出。凭证改成 DeepSeek 官方
+     * Anthropic 兼容端点（`api.deepseek.com/anthropic`）之后，SDK 0.3.326 真跑
+     * 「只回复两个字：收到」用时 4.9 秒：init 报 `deepseek-v4-flash[1m]`，
+     * 拿到 thinking（空）与 text（「收到」）两个块，result `is_error=false`。
+     *
+     * 注意「不传 model」这件事是刻意的：SDK 的 `options.model` 省略即用
+     * `~/.claude/settings.json` 里的默认值。我们的 profile 不该替用户决定模型名
+     * ——本机这份配置改过两次，每次都是网关侧的名字对不上，把名字写死在代码里
+     * 只会让同一个错误再犯一次。
+     */
+    availability: 'ready',
     enabled: true,
     permissionArgs: {
       default: ['--permission-mode', 'plan'],
@@ -141,7 +193,7 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
     windowsShim: 'bypass',
     version: '2.1.278',
     source: 'claude --help（参数已核验）',
-    note: '这台机器上 claude 被配成指向 deepseek-v4-flash，非交互执行会报 unrecognized_model，先修模型配置再用。',
+    note: '走官方 Agent SDK。不传 model，用 ~/.claude/settings.json 的默认值——模型名属于部署环境，不该写死在目录里。本机实测：DeepSeek 官方 Anthropic 兼容端点下 4.9 秒产出回答。',
     timeoutMs: 600_000,
   },
   {
@@ -156,6 +208,15 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       parser: 'dsh-json',
     },
     capabilities: { streaming: true, structured: true, resume: true, tools: true },
+    /**
+     * 走官方 client SDK。
+     *
+     * 注意 `launch.args` 仍然写着 `--profile headless --json`——那是 **CLI 那条路**
+     * 用的，SDK 这条路完全忽略它：实测 `headless` 这个 bundle 里没有
+     * `dsh-sdk-jsonrpc-server`，用它握手 10 秒超时；SDK 固定要 `sdk` profile。
+     * 两边共用一份 profile，谁也没有权利为了自己把那串参数改掉。
+     */
+    transport: 'dsh-sdk',
     availability: 'ready',
     enabled: true,
     // headless profile 没有权限开关：审批请求以事件形式到来，由编排器应答。
@@ -174,6 +235,50 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
     timeoutMs: 600_000,
   },
   {
+    id: 'dsh-acp',
+    label: 'DeepSeek Harness（ACP）',
+    vendor: 'DeepSeek',
+    logo: '/logos/dsh.svg',
+    launch: {
+      bin: 'dsh',
+      // ACP 是常驻的 JSON-RPC 进程，不是一次性命令：这一串既是启动参数也是
+      // 「怎么进协议模式」的声明。
+      args: ['--profile', 'acp'],
+      stdin: true,
+      // 翻译在 AcpRunner 内部完成，但它按 dsh-json 的词汇出线，所以解析器
+      // 仍然写这个值——core 因此一行都不用改。
+      parser: 'dsh-json',
+    },
+    capabilities: { streaming: true, structured: true, resume: true, tools: true },
+    /**
+     * 与 `dsh` 并列的第二种驱动方式，值得单列而不是替换它。
+     *
+     * 差别在取消：SDK 那条路的协议里没有行级取消，只能关会话再杀进程；ACP 有
+     * 真正的 `session/cancel` 请求，Agent 能自己收尾。这是「打断节点」这条链上
+     * 更干净的一条路，所以两个条目共存，由用户在新建运行时选。
+     */
+    transport: 'acp',
+    availability: 'ready',
+    enabled: true,
+    permissionArgs: {
+      default: [],
+      'accept-edits': [],
+      auto: [],
+      'bypass-permissions': [],
+    },
+    session: { derive: 'hooked', resumeArgs: [] },
+    windowsShim: 'bypass',
+    version: '0.2.0-rc.2',
+    source: '本机实测：dsh --profile acp，2.9 秒产出回答（2026-11-17）',
+    /**
+     * 不写 `modelArgs`：这里的 argv 同时是启动命令，塞 `--model {model}` 等于
+     * 递给 agent 一个它未必认识的参数。模型选择走 ACP 的
+     * `session/set_config_option`，runner 已按 agent 暴露的选项自动映射。
+     */
+    note: '走 Agent Client Protocol。取消有协议级 session/cancel，比杀进程干净；模型由 set_config_option 协商，不走 argv。',
+    timeoutMs: 600_000,
+  },
+  {
     id: 'codex',
     label: 'Codex CLI',
     vendor: 'OpenAI',
@@ -186,6 +291,14 @@ export const DEFAULT_AGENT_PROFILES: AgentProfile[] = [
       modelArgs: ['-m', '{model}'],
     },
     capabilities: { streaming: true, structured: false, resume: false, tools: true },
+    /**
+     * 走 Codex 的 app-server 协议。
+     *
+     * `launch.args` 里的 `exec --json` 是 CLI 那条路的形状，这条路忽略它：
+     * app-server 是常驻的 JSON-RPC 进程，靠 thread/turn 驱动，而不是一次性的
+     * 命令行调用。两条路共用一份 profile，参数留给 CLI 用。
+     */
+    transport: 'codex-app-server',
     availability: 'installed',
     enabled: true,
     permissionArgs: {

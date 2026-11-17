@@ -49,7 +49,8 @@ import type { LockHandle } from './locks.js';
 import type { LogFn, LogSink } from './log.js';
 import { probeCatalog } from './probe.js';
 import type { ProcessRegistry } from './registry.js';
-import { MockAgentRunner, SpawnAgentRunner } from './runners.js';
+import { MockAgentRunner } from './runners.js';
+import { RoutingAgentRunner, transportResolver } from './runners/routing.js';
 import { buildSeedEvents } from './seed.js';
 import { SESSION_NAMESPACE, createSessionIdDeriver } from './session-id.js';
 import { RunStore } from './store.js';
@@ -469,7 +470,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   const runner: AgentRunner =
     options.runner ??
     (runnerMode === 'real'
-      ? new SpawnAgentRunner(options.registry, log)
+      ? new RoutingAgentRunner(transportResolver(() => catalog), {
+          registry: options.registry,
+          log,
+        })
       : new MockAgentRunner(workspaceMode === 'git'));
 
   // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。

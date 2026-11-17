@@ -23,6 +23,17 @@ export interface AgentRunRequest {
   timeoutMs: number;
   /** 权限档位。审查节点固定用 default，不追加任何提权参数 */
   policy: PermissionPolicy;
+  /**
+   * 要接着哪个会话继续跑。
+   *
+   * CLI 那条路一直靠 argv 传（`--resume <id>`），所以这个字段在那条路上是
+   * 冗余的；但「走 SDK / 走协议」的几条路根本不看 argv——它们的会话是协议
+   * 层面的对象，只能通过参数告诉它们。没有这个字段，那几条路的续跑就是空话：
+   * 编排器明明算出了 id、还落了 `node.resumed_session` 事件，实际却是全新会话。
+   *
+   * 缺省表示「开一个新的」。
+   */
+  sessionId?: string;
   signal?: AbortSignal;
 }
 
