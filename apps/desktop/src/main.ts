@@ -18,13 +18,27 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 
 /** 开发态与打包态下 server 入口的位置不同。 */
 function resolveServerEntry(): string {
-  // 打包后由 electron-builder/forge 的 extraResource 铺到 resources/server
-  const packaged = join(process.resourcesPath, 'server', 'main.js');
+  /**
+   * 打包后由 `prepare-resources.mjs` 铺到 `resources/server`，而入口在它的
+   * `dist/` 下——`server/main.js` 在这里是不存在的，少那一层就只会在运行时
+   * 弹「找不到 server 入口」。
+   */
+  const packaged = join(process.resourcesPath, 'server', 'dist', 'main.js');
   if (existsSync(packaged)) {
     return packaged;
   }
-  // 开发态：仓库里的构建产物（apps/desktop/dist → 仓库根 → packages/server/dist）
+  // 开发态：apps/desktop/dist → 仓库根 → packages/server/dist
   return resolve(__dirname, '../../../packages/server/dist/main.js');
+}
+
+/** 前端产物目录，打包后在 `resources/web`。 */
+function resolveWebRoot(): string | undefined {
+  const packaged = join(process.resourcesPath, 'web');
+  if (existsSync(join(packaged, 'index.html'))) {
+    return packaged;
+  }
+  const local = resolve(__dirname, '../../../packages/web/dist');
+  return existsSync(join(local, 'index.html')) ? local : undefined;
 }
 
 /**
@@ -115,7 +129,12 @@ function startServer(): ChildProcess {
       PORT: '0',
       HOST: '127.0.0.1',
       AGENT_DATA_DIR: resolveDataDir(),
-      // 子进程的日志不该混进窗口；不设 LOG_LEVEL 时默认 info 足够排障
+      /**
+       * server 自己不知道前端产物在哪：它按「仓库根/packages/web/dist」溯源，
+       * 那是开发态的布局。打包后前端在 `resources/web`，必须显式告诉它，
+       * 否则服务起来了但 `GET /` 是 404。
+       */
+      ...(resolveWebRoot() === undefined ? {} : { AGENT_WEB_DIR: resolveWebRoot()! }),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,

@@ -5,12 +5,13 @@
   "description": "桌面壳：把编排器 Web 应用包成一个可以直接双击的窗口",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsup src/main.ts src/preload.ts --format cjs --clean --external electron --external electron/*",
+    "build": "node ../../node_modules/tsup/dist/cli-default.js src/main.ts src/preload.ts --format cjs --clean --external electron --external electron/*",
     "typecheck": "tsc --noEmit",
     "start": "electron .",
     "dev": "pnpm build && electron .",
-    "package": "pnpm build && electron-forge package",
-    "make": "pnpm build && electron-forge make"
+    "package": "pnpm build && pnpm prepare:resources && node scripts/package.mjs",
+    "make": "pnpm package",
+    "prepare:resources": "node scripts/prepare-resources.mjs"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.0",
@@ -19,6 +20,7 @@
     "@electron-forge/plugin-fuses": "^7.11.2",
     "@electron-forge/shared-types": "^8.0.1",
     "@electron/fuses": "^1.8.0",
+    "@electron/packager": "^20.3.0",
     "@types/node": "^22.20.5",
     "electron": "^38.0.0",
     "tsup": "^8.3.5",
