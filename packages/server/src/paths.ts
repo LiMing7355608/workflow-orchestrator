@@ -1,4 +1,4 @@
-import { existsSync, accessSync, constants } from 'node:fs';
+import { existsSync, accessSync, constants, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +57,42 @@ export function repoRoot(): string {
   return resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 }
 
-/** 编排器的数据根目录。三种形态见文件头注释。 */
+/** 运行地址文件的路径：启动方读它拿到真实 URL，人也能直接看。 */
+export function resolveRunningFile(dataDir = resolveDataDir()): string {
+  return resolve(dataDir, 'running.json');
+}
+
+/**
+ * 读运行地址文件。
+ *
+ * 桌面版用它在启动 server 子进程之后等「地址出现了」。返回 `undefined` 表示
+ * 还没写出来或内容不可用——调用方应当继续轮询，而不是当成失败。
+ */
+export function readRunningFile(
+  dataDir = resolveDataDir(),
+): { url: string; port: number; pid: number; startedAt: string } | undefined {
+  try {
+    const raw = readFileSync(resolveRunningFile(dataDir), 'utf8');
+    const parsed = JSON.parse(raw) as {
+      url?: unknown;
+      port?: unknown;
+      pid?: unknown;
+      startedAt?: unknown;
+    };
+    if (typeof parsed.url !== 'string' || typeof parsed.port !== 'number') {
+      return undefined;
+    }
+    return {
+      url: parsed.url,
+      port: parsed.port,
+      pid: typeof parsed.pid === 'number' ? parsed.pid : 0,
+      startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : '',
+    };
+  } catch {
+    // 文件不存在、正被写、内容坏了：都是「还没准备好」，不是错误
+    return undefined;
+  }
+}
 export function resolveDataDir(): string {
   const override = process.env.AGENT_DATA_DIR?.trim();
   if (override) {

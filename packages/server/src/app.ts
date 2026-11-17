@@ -5,7 +5,8 @@ import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -82,6 +83,13 @@ export interface AppOptions {
    * 有没有进提示词」这类端到端行为。
    */
   runner?: AgentRunner;
+  /**
+   * 前端构建产物目录（含 index.html）。
+   *
+   * 给了就由 server 自己托管静态资源与 SPA 兜底路由——桌面版和「单进程生产
+   * 形态」都靠它，因为没有 Vite dev server 可依赖。不给就只提供 API。
+   */
+  webRoot?: string;
   /**
    * 数据目录锁句柄。buildApp 不自己获取也不释放它——锁的生死属于进程
    * 生命周期，不属于应用实例；这里只是接收并带出去，避免调用方为了
@@ -2666,6 +2674,40 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     pausedRuns: recovery.pausedRuns,
     interruptedPlans: recovery.interruptedPlans,
   }));
+
+  /**
+   * 托管前端构建产物。
+   *
+   * 之前这条路根本不存在：开发时前端跑在 Vite dev server 上、由它代理 `/api`，
+   * 所以「生产形态」一直是空缺的。桌面版没有 Vite 可依赖，必须由 server
+   * 自己把 `index.html` 与 assets 发出去。
+   *
+   * 两个细节：
+   * - `wildcard: false` + 兜底的 `index.html`，因为前端用的 history 路由，
+   *   刷新 `/runs/xxx` 时文件系统里没有对应路径。`/api/*` 在这之前已经注册完，
+   *   不会被这条兜底吃掉。
+   * - 目录不存在就跳过（测试、纯 API 场景不需要它）。
+   */
+  const webRoot = options.webRoot ?? process.env.AGENT_WEB_DIR;
+  if (webRoot && existsSync(join(webRoot, 'index.html'))) {
+    await app.register(fastifyStatic, {
+      root: webRoot,
+      wildcard: false,
+      // `/api` 与 `/events` 不是静态资源，别让通配把它们吞了
+      prefix: '/',
+    });
+    app.setNotFoundHandler((request, reply) => {
+      const url = request.raw.url ?? '';
+      if (url.startsWith('/api/') || url.startsWith('/events')) {
+        return reply.code(404).send({ error: 'not_found', message: `没有这个接口：${url}` });
+      }
+      // SPA 路由：交给前端自己解析
+      return reply.sendFile('index.html');
+    });
+    log.debug(`静态前端：${webRoot}`);
+  } else if (webRoot) {
+    log.warn(`静态前端目录里没有 index.html，跳过托管：${webRoot}`);
+  }
 
   return { app, store, getCatalog: () => catalog, lock: options.lock };
 }

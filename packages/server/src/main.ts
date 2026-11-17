@@ -1,8 +1,10 @@
+import { existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildApp } from './app.js';
 import { resolveJournalRoot } from './journal-file.js';
 import { DataDirLock, type LockHandle } from './locks.js';
-import { resolveDataDir } from './paths.js';
+import { repoRoot, resolveDataDir, resolveRunningFile } from './paths.js';
 import { ProcessRegistry } from './registry.js';
 
 const port = Number(process.env.PORT ?? 3000);
@@ -24,6 +26,8 @@ const journalRoot = resolve(resolveJournalRoot(logPath));
 // 便于「同一台机器跑两个互不干扰的实例」这种调试场景。
 const lockPath = resolve(process.env.LOCK_PATH ?? resolve(dataDir, 'orchestrator.lock'));
 const processDir = resolve(process.env.PROCESS_DIR ?? resolve(dataDir, 'processes'));
+/** 真实监听地址写在这里，供启动方（桌面壳）读取。 */
+const runningFile = resolveRunningFile(dataDir);
 
 /**
  * 抢数据目录锁，抢不到就退出。
@@ -69,8 +73,24 @@ for (const record of reaped.terminated) {
   );
 }
 
+/**
+ * 前端构建产物目录。
+ *
+ * 开发态在仓库里（`packages/web/dist`）；打包后由外壳铺到 `resources/web`，
+ * 通过 `AGENT_WEB_DIR` 告诉这里。都没有就只提供 API——那是测试与纯后端场景。
+ */
+function resolveWebRoot(): string | undefined {
+  const explicit = process.env.AGENT_WEB_DIR?.trim();
+  if (explicit) {
+    return resolve(explicit);
+  }
+  const local = resolve(repoRoot(), 'packages/web/dist');
+  return existsSync(local) ? local : undefined;
+}
+
 const { app } = await buildApp({
   logPath,
+  webRoot: resolveWebRoot(),
   logger: { level: process.env.LOG_LEVEL ?? 'info' },
   registry,
   lock: lockHandle,
@@ -78,13 +98,47 @@ const { app } = await buildApp({
 
 try {
   await app.listen({ port, host });
+  /**
+   * 真实监听地址以 Fastify 报出来的为准，不是配置值。
+   *
+   * `PORT=0` 时由操作系统分配，服务自己事先不知道会拿到哪个端口；桌面版就靠
+   * 这种方式避免和 Web 版或任何别的服务撞号（参考实现同样是“OS 分配的端口，
+   * 因此不可能撞上 3080 或保留端口”）。
+   */
+  const address = app.server.address();
+  const actualPort =
+    typeof address === 'object' && address !== null ? address.port : port;
+  const url = `http://${host}:${actualPort}`;
+
+  /**
+   * 把地址写成文件，供**启动方**读取。
+   *
+   * 桌面版是「Electron 守护一个独立 server 进程」，它必须知道窗口该加载哪个
+   * URL。从 stdout 里抠 pid 或端口是脆的（日志格式一改就断），而一个 JSON 文件
+   * 是人也能看懂、进程也能读的契约。心跳时间戳让启动方判断这份文件是不是
+   * 上一轮崩溃留下的陈旧记录。
+   */
+  await writeFile(
+    runningFile,
+    `${JSON.stringify(
+      { url, port: actualPort, host, pid: process.pid, startedAt: new Date().toISOString() },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  ).catch((error: unknown) => {
+    // 写不出地址文件不该阻止服务运行：它只是给启动方的便利，不是前提
+    console.error(`[warn] 写运行地址文件失败（不影响服务）：${String(error)}`);
+  });
+
   // 启动横幅留在 console：此刻用户还没把日志管道接好，而这是他要看的第一屏。
   // 之后的一切（请求、推进、失败）都走 pino，不再往 stdout 里撒字符串。
-  console.log(`orchestrator server listening on http://${host}:${port}`);
+  console.log(`orchestrator server listening on ${url}`);
   console.log(`event journal: ${journalRoot} (<runId>/events.jsonl, 超限分片)`);
   console.log(`legacy event log (read-only): ${resolve(logPath)}`);
   console.log(`lock file: ${lockPath}`);
   console.log(`process registry: ${processDir}`);
+  console.log(`running file: ${runningFile}`);
   console.log(`log level: ${process.env.LOG_LEVEL ?? 'info'}（LOG_LEVEL 可调）`);
 } catch (error) {
   // 启动失败要能一眼看出「卡在哪一步」：端口、主机、日志目录、锁，逐个摊开
