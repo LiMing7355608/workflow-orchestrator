@@ -65,6 +65,8 @@ const appPaths = await packager({
       identity: '-',
       identityValidation: false,
       preAutoEntitlements: false,
+      // Local ad hoc signatures lack a Team ID for hardened runtime library validation.
+      optionsForFile: () => ({ hardenedRuntime: false }),
       continueOnError: false,
     },
   }),
