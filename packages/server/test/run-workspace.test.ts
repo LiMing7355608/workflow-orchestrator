@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
@@ -318,8 +318,39 @@ describe('POST /api/runs：目标目录的解析与校验', () => {
     );
     expect(status).toBe('completed');
 
-    // 用户仓库里不该留下任何编排器的东西
-    expect(existsSync(join(target, '.worktrees'))).toBe(false);
+    /**
+     * worktree 落在目标仓库旁边，这是刻意的：`git worktree` 不能跨文件系统，
+     * 而目标仓库可能在另一块盘上。放这里还有个好处——用户清项目时把它一起
+     * 删掉就彻底干净，不会在别处留下不知道属于哪个项目的目录。
+     */
+    // 测试用 AGENT_WORKTREE_DIR 隔离到临时根，所以这里看那个覆盖目录
+    expect(existsSync(root)).toBe(true);
+    /**
+     * 实现节点的工作区是**保留**的，不是泄漏。
+     *
+     * 节点重跑要接着上次那个工作区（`prepare` 看到同名目录存在就当「接着干」），
+     * 删掉等于每次从头开始，会话续跑也白做。所以这里断言它还在；清理是更高一层
+     * 的事（运行结束后由人决定要不要留证据）。
+     */
+    expect(existsSync(join(root, 'worktrees', created.id, 'impl-a'))).toBe(true);
+
+    // 忽略是写进 `.git/info/exclude` 的本地配置，不该改用户的 .gitignore
+    const exclude = readFileSync(join(target, '.git', 'info', 'exclude'), 'utf8');
+    expect(exclude).toContain('.worktrees/');
+
+    /**
+     * 编排器自己的仓库里不该出现节点分支。
+     *
+     * 这条是用户提的：目标仓库里留多少 `node/<runId>/<nodeId>` 都无所谓，
+     * 但编排器自己的 git 必须只有 main——那里长出几十条编排产物分支，
+     * 就是「荒唐景象」。
+     */
+    const targetBranches = await execFileAsync('git', ['branch', '--list', 'node/*'], {
+      cwd: target,
+      windowsHide: true,
+    }).then((result) => result.stdout.trim(), () => '');
+    // 目标仓库里有节点分支是正常的：那是它自己工程的 git
+    expect(targetBranches).toContain('node/');
 
     await app.close();
   });

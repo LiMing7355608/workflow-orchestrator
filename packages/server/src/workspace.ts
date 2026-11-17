@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, rmdirSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -387,9 +387,20 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   /**
    * 释放工作区。
    *
-   * 顺序与直觉相反：必须先移除 worktree，再删分支——git 拒绝删除
-   * 已被某个工作树检出的分支。有未提交改动时整体跳过：
-   * 用户数据安全优先于清理干净。
+   * 只清理**目录**，不删分支。
+   *
+   * 目录必须清：它是我们建在目标仓库 `.worktrees/` 下的，攒下来会挡住下一次
+   * `prepare`（同名目录已存在就会被当成「接着上次干」），也会让用户的
+   * `.worktrees` 永远清不空。产物在 `publish` 时已经 `update-ref` 进了
+   * `publishedRef`，`capture` 采集的 diff 也早落了 artifacts，删目录不会丢东西。
+   *
+   * 分支留着：用户明确说过本地分支无所谓。反过来，删分支在「工作区里有未提交
+   * 改动」时风险很大——那份改动并不总是已经落到 ref 上（节点失败、被中断、
+   * 或 Agent 中途改了但没走到 publish），删了就真没了。宁可在目标仓库里多留
+   * 一条 `node/<runId>/<nodeId>`，也不赌一把。
+   *
+   * 前提是 `repoRoot` 指向**目标仓库**而不是编排器自己：分支理应长在用户
+   * 工程的 git 里，编排器自己的仓库只该有 main。
    */
   async release(runId: string, nodeId: string): Promise<void> {
     const dir = this.dirOf(runId, nodeId);
@@ -397,24 +408,37 @@ export class GitWorktreeWorkspace implements WorkspacePort {
       return;
     }
 
-    try {
-      const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
-        cwd: dir,
-        windowsHide: true,
-        timeout: 30_000,
-      });
-      if (stdout.trim()) {
-        // 有未提交改动，留给人工处理，不强行删除
-        return;
-      }
-    } catch {
-      return;
+    // --force：跳过「有未提交改动」的拒绝，但那份改动对应的分支仍然留着
+    const removed = await this.gitRun(
+      ['worktree', 'remove', '--force', dir],
+      this.repoRoot,
+    );
+    if (!removed.ok) {
+      // git 有时因目录非空（构建产物、node_modules）而拒绝。目录本身是
+      // 我们建的，直接删掉再让 git 忘掉这条登记即可。
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      await this.gitRun(['worktree', 'prune'], this.repoRoot);
     }
 
-    const removed = await this.gitRun(['worktree', 'remove', dir], this.repoRoot);
-    if (removed.ok) {
-      await this.gitRun(['branch', '-D', this.branchOf(runId, nodeId)], this.repoRoot);
-      await this.gitRun(['update-ref', '-d', this.baseRef(runId, nodeId)], this.repoRoot);
+    // 基线 ref 只是 prepare 的内部记账，留着没用；分支不动
+    await this.gitRun(['update-ref', '-d', this.baseRef(runId, nodeId)], this.repoRoot);
+
+    /**
+     * 顺手收掉空的运行目录。
+     *
+     * 每个节点有自己的子目录，节点删完之后 `<worktreeRoot>/<runId>/` 就成了
+     * 空壳。不清的话 `.worktrees` 里会留下一排只含空目录的运行 id，用户看不出
+     * 哪些还在用、也不敢整体删。
+     *
+     * 只在确实为空时才删：还有兄弟节点在跑时这里必须留着。
+     */
+    const runDir = resolve(this.worktreeRoot, runId);
+    try {
+      if (existsSync(runDir) && readdirSync(runDir).length === 0) {
+        rmdirSync(runDir);
+      }
+    } catch {
+      // 目录被别人同时删掉、或还有兄弟节点：都不是问题
     }
   }
 

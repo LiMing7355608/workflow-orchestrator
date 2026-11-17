@@ -2,18 +2,28 @@ import { resolve } from 'node:path';
 import { buildApp } from './app.js';
 import { resolveJournalRoot } from './journal-file.js';
 import { DataDirLock, type LockHandle } from './locks.js';
+import { resolveDataDir } from './paths.js';
 import { ProcessRegistry } from './registry.js';
 
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '127.0.0.1';
-const logPath = process.env.EVENT_LOG_PATH ?? './data/events.jsonl';
+
+/**
+ * 编排器的数据根目录：**仓库自己的 `data/`**（源码运行时）。
+ *
+ * 打包成可执行文件之后规则会变——那时候没有「仓库」可溯源，见
+ * `paths.ts` 里的三种形态。这里只负责取，不重复那套判断。
+ */
+const dataDir = resolveDataDir();
+
+const logPath = process.env.EVENT_LOG_PATH ?? resolve(dataDir, 'events.jsonl');
 /** 分片事件日志的根目录：`/api/runs/:id/events` 读的就是 `<root>/<runId>/` */
 const journalRoot = resolve(resolveJournalRoot(logPath));
 
-// 锁与登记簿都落在 data/ 下（已 gitignore），可用环境变量挪走，
-// 便于「同一个仓库跑两个互不干扰的实例」这种调试场景。
-const lockPath = resolve(process.env.LOCK_PATH ?? './data/orchestrator.lock');
-const processDir = resolve(process.env.PROCESS_DIR ?? './data/processes');
+// 锁与登记簿都在数据根下，可用环境变量挪走，
+// 便于「同一台机器跑两个互不干扰的实例」这种调试场景。
+const lockPath = resolve(process.env.LOCK_PATH ?? resolve(dataDir, 'orchestrator.lock'));
+const processDir = resolve(process.env.PROCESS_DIR ?? resolve(dataDir, 'processes'));
 
 /**
  * 抢数据目录锁，抢不到就退出。

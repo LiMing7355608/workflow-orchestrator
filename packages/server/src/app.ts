@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -47,6 +48,7 @@ import { ArtifactStore } from './artifacts.js';
 import { buildAmendInstruction, buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
 import type { LockHandle } from './locks.js';
 import type { LogFn, LogSink } from './log.js';
+import { resolveDataDir } from './paths.js';
 import { probeCatalog } from './probe.js';
 import type { ProcessRegistry } from './registry.js';
 import { MockAgentRunner } from './runners.js';
@@ -480,22 +482,22 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   // temp 保留作为降级选项——在没有 git 的环境里仍能跑通整条编排链路，
   // 代价是审查提示词里只会有一句「该上游节点没有产出 diff」。
   /**
-   * 编排器自己的数据根目录（启动目录），与「这次在哪干活」完全无关。
+   * 编排器自己的数据根目录，与「这次在哪干活」无关。
    *
-   * 两者之前是同一个值（`process.cwd()` 既当仓库根又当数据根），于是所有运行
-   * 都被钉死在启动 server 的那个仓库里。现在这里只用来定位 data/*。
+   * 规则集中在 `paths.ts`：源码运行时是仓库根下的 `data/`；打包成 exe 之后
+   * 没有仓库可溯源，会退到 exe 同级目录或用户目录。这里不重复那套判断——
+   * 两处各写一份，迟早出现「锁在一处、journal 在另一处」。
    */
-  const dataRoot = process.cwd();
+  const dataRoot = resolveDataDir();
 
   /**
-   * 各节点 worktree 的存放根，集中在编排器自己的 data 目录下。
+   * 临时工作区（planner 拆图用）的存放根。
    *
-   * 为什么不能写进目标仓库：那是用户自己的工程，往里面塞 `.worktrees/`
-   * 等于让他替我们清理垃圾，`git status` 也会被一堆临时目录污染。
+   * 留在数据目录下：它不是任何人的工程，用完即删，不该出现在用户的项目里。
    */
-  const worktreeRoot = process.env.AGENT_WORKTREE_DIR
+  const scratchRoot = process.env.AGENT_WORKTREE_DIR
     ? resolve(process.env.AGENT_WORKTREE_DIR)
-    : resolve(dataRoot, 'data/worktrees');
+    : resolve(dataRoot, 'worktrees');
 
   /**
    * 服务级默认目标目录：只有运维显式配了 `AGENT_TARGET_DIR` 才有。
@@ -517,6 +519,28 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    */
   const workspaces = new Map<string, WorkspacePort>();
 
+  /**
+   * 某个目标仓库的节点 worktree 存放根：默认 `<目标仓库>/.worktrees`。
+   *
+   * 跟着目标仓库走，不集中在编排器数据目录里，理由是这两个位置在物理上经常
+   * 不是一回事：目标仓库可能在别的盘、别的机器挂载点上，而 `git worktree`
+   * 跨文件系统会直接失败。放在同一个仓库旁边还有个好处——用户清项目时把
+   * `.worktrees` 一起删掉就是彻底清干净，不会在 home 里留下一堆不知道属于
+   * 哪个项目的目录。
+   *
+   * 它会出现在 `git status` 里，所以下面会往目标仓库的 `.git/info/exclude`
+   * 写一条本地忽略：只影响这台机器上的这一个克隆，不改用户的 `.gitignore`。
+   *
+   * `AGENT_WORKTREE_DIR` 仍是**覆盖**：测试要隔离到临时目录，多实例要分家。
+   */
+  const worktreeRootOverride = process.env.AGENT_WORKTREE_DIR
+    ? resolve(process.env.AGENT_WORKTREE_DIR)
+    : undefined;
+
+  function worktreeRootFor(root: string): string {
+    return worktreeRootOverride ?? resolve(root, '.worktrees');
+  }
+
   /** 取出某个目标目录对应的工作区实现。 */
   function workspaceAt(root: string): WorkspacePort {
     const cached = workspaces.get(root);
@@ -525,8 +549,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     }
     const created: WorkspacePort =
       workspaceMode === 'git'
-        ? new GitWorktreeWorkspace(root, worktreeRoot)
-        : new TempDirWorkspace(worktreeRoot);
+        ? new GitWorktreeWorkspace(root, worktreeRootFor(root))
+        : new TempDirWorkspace(scratchRoot);
     workspaces.set(root, created);
     return created;
   }
@@ -713,7 +737,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           message: `目标目录不存在，自动创建也失败了：${root}（${(error as Error).message}）`,
         };
       }
-      return { ok: true, root };
+      return { ok: true, root: await withWorktreeExcluded(root) };
     }
 
     // 已经存在但不是 git 仓库：同样就地初始化。
@@ -741,12 +765,48 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       }
     }
 
-    return { ok: true, root };
+    return { ok: true, root: await withWorktreeExcluded(root) };
+  }
+
+  /**
+   * 让目标仓库**本地**忽略 `.worktrees/`，返回原值以便就地串进 return。
+   *
+   * 写 `.git/info/exclude` 而不是用户的 `.gitignore`：后者会进版本库、被
+   * 别的机器和协作者看到，而「这台机器上编排器在这里干活」是纯粹的本地事实。
+   * 用户不该因为用了编排器就往自己的仓库里提交一条 `.worktrees/`。
+   *
+   * 失败不阻断：忽略配不上顶多让 `git status` 多一行，不该让整个运行起不来。
+   */
+  async function withWorktreeExcluded(root: string): Promise<string> {
+    const entry = '.worktrees/';
+    try {
+      const gitDir = resolve(root, '.git');
+      // worktree 形式的仓库 `.git` 是文件而不是目录，这里只需要常见那种
+      if (!existsSync(gitDir) || !statSync(gitDir).isDirectory()) {
+        return root;
+      }
+      const infoDir = resolve(gitDir, 'info');
+      const excludeFile = resolve(infoDir, 'exclude');
+      const current = existsSync(excludeFile) ? await readFile(excludeFile, 'utf8') : '';
+      if (current.split(/\r?\n/).some((line) => line.trim() === entry)) {
+        return root;
+      }
+      await mkdir(infoDir, { recursive: true });
+      const prefix = current && !current.endsWith('\n') ? `${current}\n` : current;
+      await writeFile(
+        excludeFile,
+        `${prefix}${entry}\n`,
+        'utf8',
+      );
+    } catch (error) {
+      log.debug('写入 .git/info/exclude 失败（不影响运行）', { root, error });
+    }
+    return root;
   }
 
   // diff 原文落盘，事件日志里只留统计量与路径。data/* 已在 gitignore 内。
   const artifacts = new ArtifactStore(
-    process.env.AGENT_ARTIFACT_DIR ?? resolve(dataRoot, 'data/artifacts'),
+    process.env.AGENT_ARTIFACT_DIR ?? resolve(dataRoot, 'artifacts'),
   );
 
   /**
