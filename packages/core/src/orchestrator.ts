@@ -255,6 +255,89 @@ async function reviewChangesSection(
   return lines;
 }
 
+/**
+ * 上一轮审查意见。
+ *
+ * 实现节点被驳回后会重置重跑，但提示词与上一轮**一字不差**——审查说的
+ * 「哪里不对」既不在提示词里，也不在实现节点的会话里。后者是因为审查跑的是
+ * 另一个会话，原生续跑救不了这条跨会话的信息。
+ *
+ * 结果是一种很别扭的状态：它记得自己上一轮干了什么（续跑成立），却不知道该
+ * 改哪儿。没有这一段，「审查驳回」实质上只是「再跑一遍碰运气」。
+ *
+ * 数据只能从事件流读：驳回会 `resetNode` 实现节点并连带作废下游，审查节点
+ * 的 `verdict` 字段当场被清掉。历史判决与审查正文还在 append-only 的事件里。
+ */
+function reviewFeedbackSection(
+  run: RunFacts,
+  node: NodeFacts,
+  events: readonly OrchestratorEvent[],
+): string[] {
+  // 只看直接下游的审查节点：更远的审查评的是别人，与这一轮无关
+  const reviewers = Object.values(run.nodes).filter(
+    (item) => item.type === 'review' && item.dependsOn.includes(node.id),
+  );
+  if (reviewers.length === 0) {
+    return [];
+  }
+
+  const blocks: string[] = [];
+  for (const reviewer of reviewers) {
+    // 最近一次判决是「要求修改」才有意见可给；通过的那次不该继续挂在提示词里
+    const latest = events
+      .filter(
+        (event): event is Extract<OrchestratorEvent, { type: 'review.verdict' }> =>
+          event.type === 'review.verdict' &&
+          event.runId === run.id &&
+          event.nodeId === reviewer.id,
+      )
+      .at(-1);
+    if (latest?.verdict !== 'changes_requested') {
+      continue;
+    }
+
+    // 审查的正文就是它说的话。取最近一轮的输出，拼成一段引用。
+    const body = events
+      .filter(
+        (event) =>
+          event.type === 'agent.output' &&
+          event.runId === run.id &&
+          event.nodeId === reviewer.id,
+      )
+      .map((event) => (event.type === 'agent.output' ? event.chunk : ''))
+      .join('\n')
+      .trim();
+    if (!body) {
+      // 审查没留下正文时不要凭空编一段「它说……」，只报事实
+      blocks.push(`### ${reviewer.title}（${reviewer.id}）`, '（审查没有留下文字意见）');
+      continue;
+    }
+
+    blocks.push(
+      `### ${reviewer.title}（${reviewer.id}）`,
+      body.length > REVIEW_FEEDBACK_LIMIT
+        ? `${body.slice(0, REVIEW_FEEDBACK_LIMIT)}\n…（意见过长已截断）`
+        : body,
+    );
+  }
+
+  if (blocks.length === 0) {
+    return [];
+  }
+
+  return [
+    '',
+    '## 上一轮审查意见',
+    '下面是你上一轮的交付被审查指出的问题。这一轮必须逐条处理，',
+    '不要重复上一轮的做法；审查会按同样的标准再看一遍。',
+    '',
+    ...blocks,
+  ];
+}
+
+/** 嵌进提示词的审查意见上限。与 diff 段同理：超长会把真正的任务要求挤掉。 */
+const REVIEW_FEEDBACK_LIMIT = 4_000;
+
 async function buildPrompt(
   run: RunFacts,
   node: NodeFacts,
@@ -298,6 +381,14 @@ async function buildPrompt(
       '完成后简要说明你做了什么。',
     );
   }
+
+  /**
+   * 审查意见排在人类补充要求之前。
+   *
+   * 顺序是有意的：审查意见是机器按既定标准给的，人类补充是最后拍板的话。
+   * 两者冲突时该以人说的为准，所以人说的必须更靠近末尾。
+   */
+  lines.push(...reviewFeedbackSection(run, node, deps.eventsForRun?.(run.id) ?? []));
 
   /**
    * 人类补充要求放在最末尾。
