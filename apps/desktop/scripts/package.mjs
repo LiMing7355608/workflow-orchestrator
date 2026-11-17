@@ -1,4 +1,6 @@
 import { packager } from '@electron/packager';
+import { execFileSync } from 'node:child_process';
+import { renameSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,8 +13,7 @@ import { fileURLToPath } from 'node:url';
  * `nodeLinker: hoisted` 已经生效。直接调 forge 底层的 `@electron/packager`
  * 没有这层检查，产物是一样的（forge 就是它的封装）。
  *
- * 走 forge 官方的 `make`（做 zip / 安装器）才需要它，那一步可以等真正要出
- * 安装包时再解决——先把「打出来的目录能跑」这件事验证掉。
+ * macOS 额外使用系统 ditto 生成保留 .app 目录结构和符号链接的 ZIP。
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,23 @@ const appPaths = await packager({
     /^\/node_modules($|\/)/,
   ],
 });
+
+if (process.platform === 'darwin') {
+  for (const appPath of appPaths) {
+    const bundle = join(appPath, 'WorkflowOrchestrator.app');
+    const archive = join(desktopRoot, 'out', `WorkflowOrchestrator-mac-${process.arch}.zip`);
+    const temporaryArchive = `${archive}.tmp`;
+    try {
+      execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', bundle, temporaryArchive], {
+        stdio: 'inherit',
+      });
+      renameSync(temporaryArchive, archive);
+      console.log(`[package] macOS ZIP: ${archive}`);
+    } finally {
+      rmSync(temporaryArchive, { force: true });
+    }
+  }
+}
 
 console.log('[package] 完成：');
 for (const path of appPaths) {
