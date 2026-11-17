@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { constants } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { AgentAvailability, AgentProfile } from '@orchestrator/core';
 import { silentLog, type LogSink } from './log.js';
@@ -6,6 +8,7 @@ import { silentLog, type LogSink } from './log.js';
 const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 5_000;
+const MACOS_CHATGPT_CODEX = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
 
 export interface ProbeResult {
   installed: boolean;
@@ -48,15 +51,23 @@ async function locateBinary(bin: string): Promise<string | undefined> {
       timeout: PROBE_TIMEOUT_MS,
       windowsHide: true,
     });
-    return pickBestCandidate(
-      stdout
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean),
-    );
+    const candidate = pickBestCandidate(stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    if (candidate) {
+      return candidate;
+    }
   } catch {
-    return undefined;
+    // Finder 启动的桌面应用通常只继承系统 PATH。
   }
+
+  if (process.platform === 'darwin' && bin === 'codex') {
+    try {
+      await access(MACOS_CHATGPT_CODEX, constants.X_OK);
+      return MACOS_CHATGPT_CODEX;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function extensionOf(path: string): string {

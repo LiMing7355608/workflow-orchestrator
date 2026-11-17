@@ -5,7 +5,7 @@ import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -1316,12 +1316,27 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     }
 
-    /**
-     * 先定「在哪儿干活」，再谈其它。
-     *
-     * 这一步必须早于任何事实写入：目录不可用时这个运行根本不存在，
-     * 而不是「建了一条运行、跑起来才发现没地方落地」。
-     */
+    // 显式任务图可先校验，避免拒绝的请求创建目录或初始化仓库。
+    let submittedDag: Dag | undefined;
+    if (body.data.dag !== undefined) {
+      const parsed = safeParseDag(body.data.dag);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_dag', issues: parsed.error.issues });
+      }
+
+      // 角色覆盖要在校验之前：校验看的是最终 agentId，不是 Planner 猜的那个
+      submittedDag = applyRoleAgents(parsed.data, {
+        implementAgentId: body.data.implementAgentId,
+        reviewAgentId: body.data.reviewAgentId,
+      });
+
+      // 冻结前的最后一道闸：不合法就不许进执行阶段
+      const validation = validateDag(submittedDag, catalog);
+      if (!validation.ok) {
+        return reply.code(422).send({ error: 'dag_rejected', issues: validation.issues });
+      }
+    }
+
     const checked = await checkWorkspaceRoot(body.data.workspaceRoot);
     if (!checked.ok) {
       return reply.code(400).send({ error: checked.code, message: checked.message });
@@ -1335,30 +1350,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const at = now();
     const runId = `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 
-    /**
-     * 调用方自带图：没有拆解这一步，直接冻结。
-     *
-     * 这条路径保持同步——它不调 Agent，毫秒级就结束，没有需要绕开的等待。
-     * 反过来把它也改成异步，只会让「客户端已经算好的图」白白多绕一圈事件。
-     */
-    if (body.data.dag !== undefined) {
-      const parsed = safeParseDag(body.data.dag);
-      if (!parsed.success) {
-        return reply.code(400).send({ error: 'invalid_dag', issues: parsed.error.issues });
-      }
-
-      // 角色覆盖要在校验之前：校验看的是最终 agentId，不是 Planner 猜的那个
-      const dag = applyRoleAgents(parsed.data, {
-        implementAgentId: body.data.implementAgentId,
-        reviewAgentId: body.data.reviewAgentId,
-      });
-
-      // 冻结前的最后一道闸：不合法就不许进执行阶段
-      const validation = validateDag(dag, catalog);
-      if (!validation.ok) {
-        return reply.code(422).send({ error: 'dag_rejected', issues: validation.issues });
-      }
-
+    if (submittedDag) {
+      const dag = submittedDag;
       const frozenNodes = toNodeFacts(dag);
       const run: RunFacts = {
         id: runId,
@@ -2684,8 +2677,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    *
    * 两个细节：
    * - `wildcard: false` + 兜底的 `index.html`，因为前端用的 history 路由，
-   *   刷新 `/runs/xxx` 时文件系统里没有对应路径。`/api/*` 在这之前已经注册完，
-   *   不会被这条兜底吃掉。
+   *   刷新 `/runs/xxx` 时文件系统里没有对应路径。API 请求和缺失的静态文件返回 404。
    * - 目录不存在就跳过（测试、纯 API 场景不需要它）。
    */
   const webRoot = options.webRoot ?? process.env.AGENT_WEB_DIR;
@@ -2697,12 +2689,18 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       prefix: '/',
     });
     app.setNotFoundHandler((request, reply) => {
-      const url = request.raw.url ?? '';
-      if (url.startsWith('/api/') || url.startsWith('/events')) {
-        return reply.code(404).send({ error: 'not_found', message: `没有这个接口：${url}` });
+      const pathname = (request.raw.url ?? '').split('?')[0] ?? '';
+      const reserved = ['/api', '/events', '/assets'].some(
+        (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+      );
+      const acceptsHtml = request.headers.accept?.split(',').some(
+        (type) => type.trim().split(';')[0] === 'text/html',
+      );
+      if ((request.method === 'GET' || request.method === 'HEAD') &&
+          acceptsHtml && !reserved && !extname(pathname)) {
+        return reply.sendFile('index.html');
       }
-      // SPA 路由：交给前端自己解析
-      return reply.sendFile('index.html');
+      return reply.code(404).send({ error: 'not_found', message: `找不到资源：${pathname}` });
     });
     log.debug(`静态前端：${webRoot}`);
   } else if (webRoot) {

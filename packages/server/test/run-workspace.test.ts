@@ -203,6 +203,34 @@ afterEach(async () => {
 });
 
 describe('POST /api/runs：目标目录的解析与校验', () => {
+  it('拒绝无效的显式任务图时不创建目标目录', async () => {
+    const { app, store, root } = await createFixture();
+    const target = join(root, 'invalid-plan-target');
+    const before = runCount(store);
+    try {
+      for (const [dag, error, status] of [
+        [{}, 'invalid_dag', 400],
+        [{
+          ...HANDWRITTEN_DAG,
+          nodes: HANDWRITTEN_DAG.nodes.map((node) => ({ ...node, dependsOn: ['missing'] })),
+        }, 'dag_rejected', 422],
+      ] as const) {
+        const response = await createRun(app, {
+          title: '无效任务图',
+          goal: '校验无效任务图',
+          workspaceRoot: target,
+          dag,
+        });
+        expect(response.statusCode).toBe(status);
+        expect(response.json()).toMatchObject({ error });
+        expect(existsSync(target)).toBe(false);
+        expect(runCount(store)).toBe(before);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it('目录不存在：自动创建并 git init，而不是让用户先去手动建', async () => {
     const { app, store, root } = await createFixture();
     const missing = join(root, 'brand-new-project');
