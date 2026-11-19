@@ -117,8 +117,8 @@ export function MeetingEditor({ agents, initial, directory, canBrowse, busy, onS
         }}><Trash2 className="size-3.5" />移除角色</Button>
       </div>
       <ActorFields agents={agents} value={role} onChange={(actor) => updateRole(index, { ...actor, model: actor.model })} />
-      <label className={labelStyle}><span>角色提示词</span>
-        <textarea className={inputStyle} value={role.prompt} required rows={2} maxLength={4000} onChange={(event) => updateRole(index, { prompt: event.target.value })}
+      <label className={labelStyle}><span>角色提示词（可选）</span>
+        <textarea className={inputStyle} value={role.prompt} rows={2} maxLength={4000} onChange={(event) => updateRole(index, { prompt: event.target.value })}
           placeholder="说明如何分析、发现风险和向其他成员提问。" />
       </label>
     </div>)}

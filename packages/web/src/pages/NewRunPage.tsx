@@ -797,7 +797,7 @@ export function NewRunPage() {
 
             <p className="mt-2 text-[10px] leading-4 text-passive">
               {mode === 'interview' && !finalSpec
-                ? '访谈使用当前选择的编排 Agent。规格确认后才会进入 PM 分解。'
+                ? '访谈使用所选设计 Agent 和规格模型。确认规格后进入 PM 分解。'
                 : '开始拆解后，任务图和执行进度会显示在运行详情。'}
             </p>
           </Card>
