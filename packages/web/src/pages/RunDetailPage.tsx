@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import { EventStream } from '../components/run/EventStream';
 import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
+import { PlanningSteps, PlanReviewPanel } from '../components/run/PlanReviewPanel';
 import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
 import { RunBoard } from '../components/run/RunBoard';
 import { RunBlackboard } from '../components/run/RunBlackboard';
@@ -177,8 +178,12 @@ export function RunDetailPage() {
 
       <div className="flex min-h-0 flex-1 max-[1100px]:block">
         <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
-          {planning ? (
+          {run.planDraft ? (
+            <PlanReviewPanel key={run.planDraft.revision} runId={run.id} revision={run.planDraft.revision}
+              paused={run.status === 'paused'} onCommit={reload} onDiscuss={() => setOrchestratorOpen(true)} />
+          ) : planning ? (
             <div className="flex h-full flex-col bg-canvas">
+              {run.reviewPlan && planningActive && <PlanningSteps phase={run.planCheckingAt ? 'checking' : 'drafting'} />}
               <div className="flex shrink-0 items-start gap-3 border-b border-line bg-surface px-4 py-3">
                 {planFailure ? (
                   <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
@@ -192,7 +197,7 @@ export function RunDetailPage() {
                       ? '任务拆解已暂停。点击顶部的继续按钮重新拆解。'
                       : planFailure
                         ? failureText(planFailure)
-                        : '正在生成任务图。Agent 输出会实时出现在下方。'}
+                        : run.planCheckingAt ? '正在核对需求覆盖、依赖和验收条件。' : '正在生成任务图。Agent 输出会实时出现在下方。'}
                   </p>
                 </div>
               </div>

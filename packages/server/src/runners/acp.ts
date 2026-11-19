@@ -17,7 +17,7 @@
  *      否则 `cmd.exe /c dsh.cmd dsh --profile acp` 会在参数解析阶段就退出。
  *   2. `initialize`：必须第一个发。我们声明 `clientCapabilities: {}`——见下文「能力」。
  *   3. `session/new`：`cwd` 传绝对路径，`mcpServers` 传空数组。
- *   4. `session/set_config_option`（可选）：调用方在 argv 里点了模型名才做，失败不阻断。
+ *   4. `session/set_config_option`（可选）：有显式模型时协商，兼容 argv 里的默认模型提示。
  *      但 argv 同时是启动命令，所以往 `modelArgs` 里写 `--model {model}` 有风险，
  *      详见 `applyModel` 的注释。
  *   5. `session/prompt`：`request.stdin ?? argv.join(' ')` 作为一个 text 内容块提交。
@@ -1016,7 +1016,19 @@ export class AcpRunner implements AgentRunner {
       // 续跑时这里发出去的必须是**上游传进来的那个 id**，见 openSession 的注释。
       emit([{ kind: 'session', sessionId: opened.sessionId }]);
 
-      await this.applyModel(agent, opened, { request, argv });
+      const config = await this.applyModel(agent, opened, { request, argv });
+      if (request.reasoningEffort) {
+        const effort = config?.find((item) => item.category === 'thought_level');
+        if (effort?.type === 'select' && effort.currentValue !== request.reasoningEffort) {
+          const low = effort.options.flatMap((item) => 'group' in item ? item.options : [item])
+            .find((item) => item.value === request.reasoningEffort);
+          if (low) {
+            await agent.request(methods.agent.session.setConfigOption, {
+              sessionId: opened.sessionId, configId: effort.id, value: low.value,
+            }).catch((error: unknown) => this.log.debug('ACP 保持客户端推理设置', { runId: request.runId, error }));
+          }
+        }
+      }
 
       const response = await agent.request(methods.agent.session.prompt, {
         sessionId: opened.sessionId,
@@ -1218,10 +1230,7 @@ export class AcpRunner implements AgentRunner {
   /**
    * 按 argv 里点名的模型改会话选择。
    *
-   * 为什么做成「尽力而为」：模型是 agent 侧的配置，选不上不该让节点失败——
-   * 节点没交付是失败，模型名对不上是配置问题，两者在时间线上不该混成一句话。
-   * 拿不到 `category: 'model'` 的选择项（agent 没暴露，或只读）就说明模型由
-   * agent 自己的配置决定，这不是错误。
+   * 产品规格和会议显式传入模型时，需得到 ACP 会话确认。旧的 argv 选择保持兼容。
    *
    * 注意 argv 同时是**启动命令**：往 ACP profile 的 `modelArgs` 里写
    * `--model {model}` 会把一个 agent 未必认识的参数塞进它的命令行。真要固定
@@ -1232,67 +1241,46 @@ export class AcpRunner implements AgentRunner {
     agent: ClientContext,
     opened: OpenedSession,
     input: { request: AgentRunRequest; argv: string[] },
-  ): Promise<void> {
+  ): Promise<OpenedSession['configOptions']> {
     const { request } = input;
-    const wanted = argValue(input.argv, '--model');
-    if (wanted === undefined) {
-      return;
+    const wanted = request.model ?? argValue(input.argv, '--model');
+    if (!wanted) return opened.configOptions;
+
+    const option = opened.configOptions?.find((item) => item.category === 'model' || item.id === 'model');
+    if (option?.type !== 'select') {
+      if (request.model) throw new Error('该 ACP 客户端未提供会话模型选择，请使用客户端默认模型。');
+      return opened.configOptions;
     }
 
-    const option = (opened.configOptions ?? []).find(
-      (item) => item.category === 'model',
-    );
-    // 两段判断而不是一个谓词：`type` 是判别的唯一依据，拿它收窄之后
-    // 才谈得上读 `options` / `currentValue`，不要用一个 `as` 把这件事糊过去。
-    if (!option || option.type !== 'select') {
-      this.log.debug('ACP agent 没有暴露 model 选择项，模型交给 agent 自己的配置', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        exposed: option === undefined ? 'none' : option.type,
-      });
-      return;
-    }
-
-    // 选项可能是平铺的，也可能分组；两种都要认，否则分组型 agent 上选模型永远落空
-    const choices: { value: string; name: string }[] = [];
-    for (const item of option.options) {
-      if ('group' in item) {
-        for (const inner of item.options) {
-          choices.push(inner);
-        }
-      } else {
-        choices.push(item);
+    const choices = option.options.flatMap((item) => 'group' in item ? item.options : [item]);
+    const selected = choices.find((item) => item.value === wanted)
+      ?? choices.find((item) => item.name === wanted && item.value === option.currentValue)
+      ?? choices.find((item) => item.name === wanted);
+    if (!selected) {
+      if (request.model) {
+        throw new Error('客户端未提供模型 ' + wanted + '。可选模型：' + choices.map((item) => item.name).join('、'));
       }
+      return opened.configOptions;
     }
-
-    const hit = choices.find((item) => item.value === wanted || item.name === wanted);
-    if (!hit) {
-      this.log.debug('ACP 模型选择项里没有调用方点名的模型', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        available: choices.map((item) => item.value),
-      });
-      return;
-    }
-    if (hit.value === option.currentValue) {
-      return;
-    }
+    if (selected.value === option.currentValue) return opened.configOptions;
 
     try {
-      await agent.request(methods.agent.session.setConfigOption, {
+      const changed = await agent.request(methods.agent.session.setConfigOption, {
         sessionId: opened.sessionId,
         configId: option.id,
-        value: hit.value,
+        value: selected.value,
       });
+      const resulting = changed.configOptions.find((item) => item.id === option.id);
+      if (request.model && (resulting?.type !== 'select' || resulting.currentValue !== selected.value)) {
+        throw new Error('客户端未确认该模型已生效。');
+      }
+      return changed.configOptions;
     } catch (error) {
+      if (request.model) throw error;
       this.log.warn('ACP 设置模型失败，继续用 agent 当前选择', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        error,
+        runId: request.runId, nodeId: request.nodeId, requested: wanted, error,
       });
+      return opened.configOptions;
     }
   }
 

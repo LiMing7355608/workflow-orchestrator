@@ -96,7 +96,7 @@ export function deriveRunStatus(run: RunFacts): RunStatus {
   //
   // 「在等人」也压过完成态：节点都跑完了、只剩一个人工审批卡着，那不算
   // 交付完成——它还在等一个人。
-  if (awaitingHuman && !run.pausedAt) {
+  if ((awaitingHuman || run.planDraft) && !run.pausedAt) {
     return 'waiting_for_boss';
   }
 
@@ -252,6 +252,9 @@ export function deriveRunView(run: RunFacts): RunView {
     // 视图是给界面读的，空串明确表示「这条运行的目录未知」，不能是 undefined。
     workspaceRoot: run.workspaceRoot ?? '',
     planFailure: run.planFailure,
+    ...(run.reviewPlan ? { reviewPlan: true } : {}),
+    ...(run.planCheckingAt ? { planCheckingAt: run.planCheckingAt } : {}),
+    ...(run.planDraft ? { planDraft: run.planDraft } : {}),
     progress: deriveProgress(run),
     nodeCount: run.nodeOrder.length,
     specVersion: run.specVersion,
@@ -271,6 +274,8 @@ function eventKind(event: OrchestratorEvent): EventKind {
     case 'run.frozen':
     // 拆解属于阶段性事件，归 stage 页签：它说的是「图还没生出来」，
     // 而不是某个 Agent 的执行过程——虽然产图这个动作是 Agent 干的。
+    case 'plan.checking':
+    case 'plan.drafted':
     case 'plan.started':
     case 'plan.failed':
     case 'run.paused':
@@ -347,6 +352,10 @@ function eventMessage(run: RunFacts, event: OrchestratorEvent): string {
       // 带上 Agent：用户点了「开始拆解」之后唯一的进展信号就是「谁在拆」，
       // 只写「正在拆解」等于把等待的原因藏起来
       return `编排器开始拆解任务图（${event.agentId}）`;
+    case 'plan.checking':
+      return '初稿通过结构校验，开始交叉核对需求和任务覆盖。';
+    case 'plan.drafted':
+      return '任务草案与核对结果已就绪，等待人工确认。';
     case 'plan.failed':
       // 原因原样带出：这是用户决定「重试还是改目标」的唯一依据，
       // 概括成「拆解失败」等于让他再猜一次

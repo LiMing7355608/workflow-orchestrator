@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Plus,
   SquarePen,
+  UsersRound,
   Workflow,
   type LucideIcon,
 } from 'lucide-react';
@@ -23,6 +24,7 @@ const navItems: NavItem[] = [
   { to: '/', label: '工作台', icon: LayoutDashboard },
   { to: '/new', label: '新建运行', icon: SquarePen },
   { to: '/runs', label: '运行记录', icon: History },
+  { to: '/meetings', label: '会议协作', icon: UsersRound },
   { to: '/agents', label: 'Agent 管理', icon: Bot },
 ];
 

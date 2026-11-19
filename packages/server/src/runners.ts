@@ -594,6 +594,35 @@ export class MockAgentRunner implements AgentRunner {
     // 所以整条命令都要看，不能只查 stdin
     const haystack = `${request.stdin ?? ''} ${request.argv.join(' ')}`;
 
+    const discussionPrompt = request.stdin ?? request.argv.find((arg) => arg.startsWith('WORKFLOW_'));
+    const marker = discussionPrompt?.split('\n')[0];
+    if (discussionPrompt && (marker === 'WORKFLOW_PLAN_CHECK_JSON' || marker?.startsWith('WORKFLOW_MEETING_'))) {
+      await delay(480);
+      if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');
+      const input = JSON.parse(discussionPrompt.split('\n').at(-1)!) as {
+        agents?: Array<{ id: string }>;
+        agenda?: string;
+        role?: { name: string };
+        instructions?: Array<{ text: string }>;
+      };
+      const roles = [{ name: '产品负责人', responsibility: '核对产品范围和验收', prompt: '写出用户流程、预期结果和优先级。' },
+        { name: '工程评审', responsibility: '核对依赖和实施风险', prompt: '挑战技术假设，说明验证方式。' }];
+      const latestNote = input.instructions?.at(-1)?.text;
+      const report = '# 会议方案（回放）\n\n## 会议议题\n' + input.agenda +
+        '\n\n## 决策\n先约定用户流程和验收步骤，再确定实施顺序。' +
+        (latestNote ? '\n\n## 人工补充\n' + latestNote : '');
+      const response = marker === 'WORKFLOW_PLAN_CHECK_JSON'
+        ? { summary: '核对依赖、任务范围和交付顺序的回放结果。', findings: [] }
+        : marker === 'WORKFLOW_MEETING_ROSTER_JSON'
+          ? { roles: roles.map((role, index) => ({ ...role, agentId: input.agents?.[index]?.id ?? input.agents?.[0]?.id })) }
+          : marker === 'WORKFLOW_MEETING_CONTRIBUTION_JSON'
+            ? { text: input.role?.name + '建议明确产品验收与风险。' + (latestNote ? '人工补充：' + latestNote : '') }
+            : { markdown: report };
+      const output = JSON.stringify(response);
+      onChunk(output + '\n');
+      return { ok: true, exitCode: 0, output };
+    }
+
     const specMarker = 'WORKFLOW_SPEC_INTERVIEW_JSON';
     const specPrompt = request.stdin || request.argv.find((arg) => arg.startsWith(specMarker));
     if (specPrompt?.startsWith(specMarker)) {

@@ -1423,7 +1423,7 @@ export class CodexAppServerRunner implements AgentRunner {
         threadParams: POLICY_THREAD_PARAMS[request.policy] ?? FALLBACK_THREAD_PARAMS,
         // profile 的 modelArgs 是 `-m {model}`，两种写法都要认：读不出来就交给
         // codex 自己的配置，绝不替运维现场选模型
-        model: argValue(request.argv, '--model') ?? argValue(request.argv, '-m'),
+        model: request.model ?? argValue(request.argv, '--model') ?? argValue(request.argv, '-m'),
         /**
          * 续跑的唯一来源是 `request.sessionId`。
          *

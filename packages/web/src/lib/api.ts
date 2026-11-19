@@ -1,5 +1,5 @@
 import type { AgentProfile } from '../types/agent';
-import type { ActivityView, BlackboardView, InterviewView } from '../types/operations';
+import type { ActivityView, BlackboardView, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView } from '../types/operations';
 import type {
   AmendmentRejection,
   ConversationEntry,
@@ -34,8 +34,8 @@ async function operation<T>(path: string, method: 'GET' | 'POST' | 'DELETE', bod
   return data;
 }
 
-export function startInterview(idea: string, workspaceRoot: string, agentId: string) {
-  return operation<InterviewView>('/api/specs', 'POST', { idea, workspaceRoot, agentId });
+export function startInterview(idea: string, workspaceRoot: string, agentId: string, model?: string) {
+  return operation<InterviewView>('/api/specs', 'POST', { idea, workspaceRoot, agentId, model });
 }
 
 export function fetchInterview(workspaceRoot: string, id: string, signal?: AbortSignal) {
@@ -59,6 +59,38 @@ export function fetchBlackboard(id: string) {
 
 export function postBlackboard(id: string, text: string) {
   return operation<BlackboardView['entries'][number]>('/api/runs/' + encodeURIComponent(id) + '/blackboard', 'POST', { text });
+}
+
+export function fetchPlanDraft(id: string, signal?: AbortSignal) {
+  return requestJson<PlanDraftView>('/api/runs/' + encodeURIComponent(id) + '/plan-review', { signal });
+}
+
+export function confirmPlanDraft(id: string, revision: string) {
+  return operation<{ ok: boolean }>('/api/runs/' + encodeURIComponent(id) + '/plan-review/approve', 'POST', { revision });
+}
+
+export function fetchMeetings(signal?: AbortSignal) {
+  return requestJson<MeetingSummary[]>('/api/meetings', { signal });
+}
+
+export function fetchMeeting(id: string, signal?: AbortSignal) {
+  return requestJson<MeetingView>('/api/meetings/' + encodeURIComponent(id), { signal });
+}
+
+export function createMeeting(settings: MeetingSettings & { workspaceRoot: string }) {
+  return operation<MeetingView>('/api/meetings', 'POST', settings);
+}
+
+export function updateMeeting(id: string, settings: MeetingSettings & { revision: number }) {
+  return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + '/settings', 'POST', settings);
+}
+
+export function meetingAction(id: string, action: 'organize' | 'discuss' | 'summarize' | 'pause') {
+  return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + '/' + action, 'POST');
+}
+
+export function sendMeetingNote(id: string, text: string) {
+  return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + '/note', 'POST', { text });
 }
 
 export function fetchAgentActivity() {
@@ -106,6 +138,7 @@ export interface CreateRunInput {
   title: string;
   goal: string;
   specId?: string;
+  reviewPlan?: boolean;
   specSettings?: { granularity: 'coarse' | 'medium' | 'fine'; reviewRounds: number };
   /** 省略时由 Planner 现生成；给出则跳过规划直接冻结 */
   dag?: unknown;

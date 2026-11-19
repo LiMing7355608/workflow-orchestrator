@@ -55,7 +55,7 @@ export function useApiResource<T>(
     return () => { generation.current++; };
   }, [reload]);
 
-  return { data, source, loading, reload: () => void reload() };
+  return { data, source, loading, reload };
 }
 
 /**

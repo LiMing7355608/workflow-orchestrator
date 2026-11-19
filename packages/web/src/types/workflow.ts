@@ -71,6 +71,9 @@ export interface WorkflowRunSummary {
    * 而不是继续推进。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
 }
 
 export interface WorkflowNode {

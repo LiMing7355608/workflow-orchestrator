@@ -53,6 +53,9 @@ describe('项目级运行与规格访谈', () => {
     git(directory, 'add', 'original.txt');
     git(directory, 'commit', '-qm', 'baseline');
     let planCalls = 0;
+    let checkCalls = 0;
+    let implementationCalls = 0;
+    const interviewModels: Array<string | undefined> = [];
     let reviewPrompt = '';
     let plannerPrompt = '';
     let reviewDone = false;
@@ -61,6 +64,7 @@ describe('项目级运行与规格访谈', () => {
         const prompt = request.stdin ?? request.argv.join(' ');
         let output: string;
         if (request.nodeId.startsWith('spec-')) {
+          interviewModels.push(request.model);
           await sleep(100);
           if (prompt.includes('刷新后仍可查看')) {
             output = JSON.stringify({ status: 'ready', spec: specText });
@@ -78,7 +82,11 @@ describe('项目级运行与规格访谈', () => {
           await sleep(120);
           await writeFile(join(request.cwd, '.orchestrator-plan.json'), JSON.stringify(dag));
           output = '已生成任务图';
+        } else if (prompt.includes('WORKFLOW_PLAN_CHECK_JSON')) {
+          checkCalls++;
+          output = JSON.stringify({ summary: '规格和验收已核对。', findings: [] });
         } else if (request.nodeId === 'implement') {
+          implementationCalls++;
           await writeFile(join(request.cwd, 'index.html'), '<html lang="zh"><title>公告</title></html>');
           output = 'PRIVATE_IMPLEMENTER_CONTEXT\nBLACKBOARD: 实现节点已交付，审查请核对离线刷新。';
         } else {
@@ -96,7 +104,7 @@ describe('项目级运行与规格访谈', () => {
     apps.push(ctx);
     const { app, store } = ctx;
     const create = await app.inject({ method: 'POST', url: '/api/specs', payload: {
-      workspaceRoot: directory, agentId: 'codex', idea: '做个社团公告工具',
+      workspaceRoot: directory, agentId: 'codex', model: 'test-model', idea: '做个社团公告工具',
     } });
     expect(create.statusCode).toBe(201);
     let session = create.json();
@@ -114,7 +122,7 @@ describe('项目级运行与规格访谈', () => {
       expect.objectContaining({ role: 'spec', agentId: 'codex', runId }),
     ]));
     await poll('question');
-    const payload = { workspaceRoot: root, specId: runId, goal: '这段原始描述不应传给 PM', title: '公告工具' };
+    const payload = { workspaceRoot: root, specId: runId, reviewPlan: true, plannerAgentId: 'codex', reviewAgentId: 'codex', goal: '这段原始描述不应传给 PM', title: '公告工具' };
     const submit = () => app.inject({ method: 'POST', url: '/api/runs', payload });
     expect((await submit()).statusCode).toBe(409);
     expect(planCalls).toBe(0);
@@ -126,10 +134,30 @@ describe('项目级运行与规格访谈', () => {
     expect(session.rounds).toHaveLength(2);
     expect((await answer('同意，刷新后仍可查看。')).statusCode).toBe(200);
     await poll('ready');
+    expect(interviewModels).toEqual(['test-model', 'test-model', 'test-model']);
     expect(planCalls).toBe(0);
 
     expect((await submit()).statusCode).toBe(201);
     expect((await app.inject({ method: 'DELETE', url: '/api/runs/' + runId })).statusCode).toBe(409);
+    const runUrl = '/api/runs/' + runId;
+    const draftUrl = runUrl + '/plan-review';
+    await vi.waitFor(() => expect(store.snapshot.runs[runId]?.planDraft).toBeDefined(), { timeout: 12_000 });
+    const draft = (await app.inject(draftUrl)).json();
+    expect(draft.verification).toMatchObject({ status: 'checked', agentId: 'codex' });
+    expect(checkCalls).toBe(1);
+    expect(implementationCalls).toBe(0);
+    expect((await app.inject(runUrl)).json()).toMatchObject({ status: 'waiting_for_boss', nodes: [] });
+    expect((await app.inject({ method: 'POST', url: runUrl + '/messages', payload: { text: '额外要求：标题栏中文。' } })).statusCode).toBe(200);
+    await vi.waitFor(() => {
+      const revision = store.snapshot.runs[runId]?.planDraft?.revision;
+      expect(revision).toBeTruthy();
+      expect(revision).not.toBe(draft.revision);
+    }, { timeout: 12_000 });
+    const approveDraft = (revision: string) => app.inject({ method: 'POST', url: draftUrl + '/approve', payload: { revision } });
+    expect((await approveDraft(draft.revision)).statusCode).toBe(409);
+    expect(implementationCalls).toBe(0);
+    expect((await approveDraft(store.snapshot.runs[runId]!.planDraft!.revision)).statusCode).toBe(200);
+    expect(plannerPrompt).toContain('标题栏中文');
     await vi.waitFor(() => {
       expect(store.snapshot.approvals.some((approval) => approval.runId === runId && approval.status === 'pending')).toBe(true);
     }, { timeout: 15_000, interval: 50 });
@@ -140,7 +168,7 @@ describe('项目级运行与规格访谈', () => {
     expect(reviewPrompt).not.toContain('PRIVATE_IMPLEMENTER_CONTEXT');
     const projectRun = join(root, '.workflow-orchestrator', 'runs', runId);
     expect(await readFile(join(projectRun, 'spec.md'), 'utf8')).toBe(specText + '\n');
-    expect(await readdir(projectRun)).toEqual(expect.arrayContaining(['plan.json', 'events.jsonl', 'artifacts', 'memory']));
+    expect(await readdir(projectRun)).toEqual(expect.arrayContaining(['plan.json', 'plan-draft.json', 'events.jsonl', 'artifacts', 'memory']));
     expect(await readFile(join(projectRun, 'memory', 'agents', 'codex', 'implement.json'), 'utf8')).toContain('PRIVATE_IMPLEMENTER_CONTEXT');
     expect((await app.inject('/api/runs/' + runId + '/blackboard')).json().entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: 'agent', nodeId: 'implement' }),

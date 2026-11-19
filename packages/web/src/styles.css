@@ -160,3 +160,43 @@
 .react-flow__edge-textbg {
   fill: var(--color-surface);
 }
+
+.activity-span { background: #d1e7db; }
+.activity-span[data-state='running'] { background: #a5c6fa; }
+.activity-span[data-state='failed'] { background: #edb5b9; }
+.activity-span[data-state='interrupted'] { background: #f0d491; }
+.activity-span[data-state='running'] {
+  background-image: repeating-linear-gradient(105deg, #a5c6fa 0 6px, #2563eb 8px 11px, #a5c6fa 14px 24px);
+  background-size: 48px 100%;
+  animation: advance-activity 1.15s linear infinite;
+}
+.activity-live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 3px #dbeafe; }
+@keyframes advance-activity { to { background-position-x: 48px; } }
+
+.activity-map {
+  background-color: #f7faff;
+  background-image: radial-gradient(#d0deee 0.7px, transparent 0.7px);
+  background-size: 14px 14px;
+}
+.activity-map-grid { display: grid; gap: 16px; }
+.activity-wire { display: none; }
+.activity-state { color: var(--color-muted); }
+.activity-state[data-state='running'] { color: #1d4ed8; }
+.activity-state[data-state='completed'] { color: #047857; }
+.activity-state[data-state='failed'] { color: #b91c1c; }
+.activity-state[data-state='interrupted'] { color: #92400e; }
+@media (min-width: 960px) {
+  .activity-map-grid { grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.2fr) minmax(0, 0.78fr); gap: 29px; }
+  .activity-hub::before { content: ""; position: absolute; top: 24px; bottom: 0; left: -1px; border-left: 1px dashed #a1b3cc; pointer-events: none; }
+  .activity-wire { display: block; position: absolute; left: 100%; top: calc(50% - 17px); width: 30px; height: 34px; pointer-events: none; fill: #a1b3cc; }
+  .activity-result .activity-wire { left: auto; right: 100%; top: 4px; }
+  .activity-wire path { fill: none; vector-effect: non-scaling-stroke; }
+  .activity-wire-base { stroke: #a1b3cc; stroke-width: 1; stroke-dasharray: 5 7; }
+  .activity-wire[data-live='true'] { fill: #2563eb; }
+  .activity-wire[data-live='true'] .activity-wire-base { stroke: #4b82dc; }
+  .activity-wire-pulse { stroke: #2563eb; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 20 110; stroke-dashoffset: 20; animation: flow-progress 1.45s linear infinite; }
+}
+@keyframes flow-progress { to { stroke-dashoffset: -110; } }
+@media (prefers-reduced-motion: reduce) {
+  .activity-wire-pulse, .activity-span[data-state='running'] { animation: none; }
+}

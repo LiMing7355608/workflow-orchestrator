@@ -223,6 +223,8 @@ export function reduce(
             ]),
           );
         }
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
         run.frozenAt = event.at;
         run.stage = 'execute';
       });
@@ -237,12 +239,25 @@ export function reduce(
        */
       return withRun(state, event.runId, (run) => {
         run.planFailure = undefined;
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
+      });
+
+    case 'plan.checking':
+      return withRun(state, event.runId, (run) => { run.planCheckingAt = event.at; });
+
+    case 'plan.drafted':
+      return withRun(state, event.runId, (run) => {
+        run.planDraft = { revision: event.revision, at: event.at };
+        run.planCheckingAt = undefined;
       });
 
     case 'plan.failed':
       // 失败是结论而不是噪音：它必须进事实，否则这个运行除了「创建过」
       // 之外没有任何可派生状态，界面上会永远停在「运行中」。
       return withRun(state, event.runId, (run) => {
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
         run.planFailure = {
           at: event.at,
           message: event.message,

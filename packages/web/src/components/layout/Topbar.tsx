@@ -21,6 +21,9 @@ function getPageTitle(pathname: string): string {
   if (pathname === '/agents') {
     return 'Agent 管理';
   }
+  if (pathname === '/meetings' || pathname.startsWith('/meetings/')) {
+    return '会议协作';
+  }
   return '页面未找到';
 }
 

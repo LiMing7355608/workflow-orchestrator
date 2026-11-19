@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentRunner, OrchestratorEvent, RunFacts } from '@orchestrator/core';
+import { createParser, type AgentProfile, type AgentRunner, type OrchestratorEvent, type RunFacts } from '@orchestrator/core';
 
 export interface AgentInterval {
   id: string;
@@ -7,7 +7,9 @@ export interface AgentInterval {
   runTitle: string;
   nodeId?: string;
   agentId: string;
-  role: 'spec' | 'plan' | 'amend' | 'implement' | 'review';
+  role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review';
+  model?: string;
+  progress?: string;
   title: string;
   description: string;
   startedAt: string;
@@ -19,6 +21,9 @@ function describe(run: RunFacts, nodeId?: string): Pick<AgentInterval, 'role' | 
   const node = nodeId ? run.nodes[nodeId] : undefined;
   if (node?.type === 'implement' || node?.type === 'review') {
     return { role: node.type, title: node.title, description: node.description, nodeId };
+  }
+  if (!run.frozenAt && nodeId?.startsWith('check-')) {
+    return { role: 'check', title: '任务草案交叉核对', description: '核对需求覆盖、依赖关系和验收条件' };
   }
   if (run.frozenAt && nodeId) {
     return { role: 'amend', title: '调整任务图', description: '根据补充要求更新尚未开始的任务' };
@@ -44,20 +49,34 @@ export class AgentActivity {
     }
   }
 
-  observe(runner: AgentRunner): AgentRunner {
+  observe(runner: AgentRunner, getAgent: (id: string) => AgentProfile | undefined): AgentRunner {
     return {
       cancel: runner.cancel?.bind(runner),
       run: async (request, onChunk) => {
         const run = this.getRun(request.runId);
         if (!run) return runner.run(request, onChunk);
         const interval: AgentInterval = {
-          id: randomUUID(), runId: run.id, runTitle: run.title, agentId: request.agentId,
+          id: randomUUID(), runId: run.id, runTitle: run.title, agentId: request.agentId, model: request.model,
           ...describe(run, request.nodeId), startedAt: new Date().toISOString(), status: 'running',
         };
         this.intervals.set(interval.id, interval);
         this.notify(run.id);
+        const agent = getAgent(request.agentId);
+        const parser = agent ? createParser(agent.launch.parser) : undefined;
+        let lastNotice = 0;
         try {
-          const result = await runner.run(request, onChunk);
+          const result = await runner.run(request, (chunk) => {
+            onChunk(chunk);
+            for (const event of parser?.push(chunk) ?? []) {
+              if (event.kind === 'session') interval.progress = '已建立会话，等待输出';
+              if (event.kind === 'text' && event.text?.trim()) interval.progress = event.text.trim().replace(/\s+/g, ' ').slice(-180);
+              if (event.kind === 'result') interval.progress = '已收到回复，正在校验输出';
+            }
+            if (interval.progress && Date.now() - lastNotice >= 600) {
+              lastNotice = Date.now();
+              this.notify(run.id);
+            }
+          });
           interval.status = result.cancelled ? 'interrupted' : result.ok ? 'completed' : 'failed';
           return result;
         } catch (error) {
@@ -93,6 +112,11 @@ export class AgentActivity {
     for (const event of events) {
       switch (event.type) {
         case 'plan.started': start('', event.at, event.agentId); break;
+        case 'plan.checking':
+          finish('', event.at, 'completed');
+          start('', event.at, event.agentId, 'check-restored');
+          break;
+        case 'plan.drafted':
         case 'run.frozen': finish('', event.at, 'completed'); break;
         case 'plan.failed': finish('', event.at, 'failed'); break;
         case 'run.paused': finish('', event.at, 'interrupted'); break;

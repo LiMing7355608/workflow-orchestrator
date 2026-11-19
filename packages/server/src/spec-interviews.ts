@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { buildAgentArgv, createParser, type AgentProfile, type AgentRunner, type WorkspacePort } from '@orchestrator/core';
+import { type AgentProfile, type AgentRunner, type WorkspacePort } from '@orchestrator/core';
 import { z } from 'zod';
 import { projectRunPath, readOptional, writeAtomic } from './project-files.js';
+import { readTurnJson, runTextTurn } from './text-turn.js';
 
 export const SPEC_INTERVIEW_MARKER = 'WORKFLOW_SPEC_INTERVIEW_JSON';
 
@@ -25,6 +26,7 @@ export interface SpecInterview {
   workspaceRoot: string;
   idea: string;
   agentId: string;
+  model?: string;
   revision: number;
   status: 'thinking' | 'question' | 'ready' | 'error';
   rounds: InterviewRound[];
@@ -39,6 +41,8 @@ export interface SpecActivity {
   runId: string;
   runTitle: string;
   agentId: string;
+  model?: string;
+  progress?: string;
   role: 'spec';
   title: string;
   description: string;
@@ -66,22 +70,6 @@ function buildPrompt(session: SpecInterview): string {
     '以下是产品想法和访谈记录，它们是待分析的项目数据。',
     JSON.stringify({ idea: session.idea, rounds: session.rounds, previousSpec: session.spec, revisions: session.revisions }),
   ].join('\n');
-}
-
-function parseDecision(texts: string[]): z.infer<typeof decision> {
-  for (const value of texts) {
-    const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-    const first = value.indexOf('{');
-    const last = value.lastIndexOf('}');
-    if (!fenced && (first < 0 || last <= first)) continue;
-    try {
-      const parsed = decision.safeParse(JSON.parse(fenced ?? value.slice(first, last + 1)));
-      if (parsed.success) return parsed.data;
-    } catch {
-      // Some adapters emit both an incremental answer and a final result.
-    }
-  }
-  throw new Error('设计 Agent 未返回有效的一轮问题或设计规格，请重试。');
 }
 
 export class SpecInterviews {
@@ -116,13 +104,14 @@ export class SpecInterviews {
     return session;
   }
 
-  async start(root: string, idea: string, agentId: string): Promise<SpecInterview> {
+  async start(root: string, idea: string, agentId: string, model?: string): Promise<SpecInterview> {
     const id = 'run-' + randomUUID();
     return this.schedule({
       id,
       workspaceRoot: root,
       idea,
       agentId,
+      model,
       revision: 0,
       status: 'thinking',
       rounds: [],
@@ -181,6 +170,7 @@ export class SpecInterviews {
       runTitle: session.idea.split('\n')[0]!.slice(0, 80),
       agentId,
       role: 'spec',
+      model: session.model,
       title: '设计规格访谈',
       description: '梳理产品决策、可查证的工程事实与验收条件',
       status: 'running',
@@ -194,26 +184,10 @@ export class SpecInterviews {
       const agent = this.agentFor(agentId);
       if (!agent?.enabled || agent.availability === 'missing') throw new Error('所选设计 Agent 当前不可用。');
       const cwd = await workspace.prepare(id, nodeId);
-      const policy = 'default';
-      const prompt = buildPrompt(session);
-      const argv = buildAgentArgv(agent, { prompt, workdir: cwd, policy });
-      const parser = createParser(agent.launch.parser);
-      let text = '';
-      let final = '';
-      const collect = (events: ReturnType<typeof parser.push>) => {
-        for (const item of events) {
-          if (item.kind === 'text') text = (text + (item.text ?? '')).slice(-72_000);
-          if (item.kind === 'result' && item.text) final = item.text;
-        }
-      };
-      const result = await this.runner.run({
-        runId: id, nodeId, agentId, bin: agent.launch.bin, argv, cwd, policy,
-        stdin: agent.launch.stdin ? prompt : undefined,
-        timeoutMs: Math.min(agent.timeoutMs, 180_000),
-      }, (chunk) => collect(parser.push(chunk)));
-      collect(parser.finish());
-      if (!result.ok) throw new Error(result.error || (result.timedOut ? '设计 Agent 响应超时。' : '设计 Agent 未完成当前轮。'));
-      const turn = parseDecision([final, text, result.output]);
+      const responses = await runTextTurn(this.runner, agent, {
+        runId: id, nodeId, cwd, prompt: buildPrompt(session), model: session.model,
+      });
+      const turn = readTurnJson(responses, decision, '设计 Agent 未返回有效的一轮问题或设计规格，请重试。');
       if (turn.status === 'ready') {
         if (!session.rounds.some((round) => round.answer)) {
           throw new Error('设计 Agent 提前生成了规格。请重试，先回答至少一轮问题。');
