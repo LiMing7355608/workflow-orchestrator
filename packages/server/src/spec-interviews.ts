@@ -98,7 +98,9 @@ export class SpecInterviews {
     if (!raw) return undefined;
     const session = JSON.parse(raw) as SpecInterview;
     if (session.id !== id || session.workspaceRoot !== root) return undefined;
-    if (session.status === 'thinking' && !this.pending.has(id)) {
+    // The replacement file can be visible before the turn clears its in-memory lock.
+    if (this.pending.has(id)) return { ...session, status: 'thinking' };
+    if (session.status === 'thinking') {
       return { ...session, status: 'error', error: '上次规格访谈已中断，可以从当前轮重试。' };
     }
     return session;
