@@ -11,7 +11,7 @@ const actorSchema = z.object({ agentId: idSchema, model: modelIdSchema.optional(
 const roleSchema = actorSchema.extend({
   name: z.string().trim().min(1).max(60),
   responsibility: z.string().trim().min(1).max(240),
-  prompt: z.string().trim().min(1).max(4000),
+  prompt: z.string().trim().max(4000),
 });
 const settingsSchema = z.object({
   title: z.string().trim().min(1).max(100),

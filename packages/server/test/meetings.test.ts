@@ -45,7 +45,7 @@ it('分配和修改角色，保留并行调用与人工发言，重启后可读�
     expect((await post('/organize')).statusCode).toBe(200);
     await vi.waitFor(async () => expect((await read()).roles).toHaveLength(2));
     const organized = await read();
-    const roles = organized.roles.map((role: { name: string }) => ({ ...role, ...settings.host, prompt: '核对验收：' + role.name }));
+    const roles = organized.roles.map((role: { name: string }, index: number) => ({ ...role, ...settings.host, prompt: index === 0 ? '核对验收：' + role.name : '' }));
     const updated = { ...settings, mode: 'manual', roles, revision: organized.revision };
     expect((await post('/settings', updated)).statusCode).toBe(200);
     expect((await post('/settings', updated)).statusCode).toBe(409);
