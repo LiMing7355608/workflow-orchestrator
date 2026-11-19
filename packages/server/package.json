@@ -20,6 +20,7 @@
     "@orchestrator/core": "workspace:*",
     "@orchestrator/planner": "workspace:*",
     "fastify": "^5.2.0",
+    "tar": "7.5.23",
     "zod": "^3.24.1"
   },
   "devDependencies": {

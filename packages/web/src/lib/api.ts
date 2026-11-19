@@ -139,6 +139,7 @@ export interface CreateRunInput {
   goal: string;
   specId?: string;
   reviewPlan?: boolean;
+  requireDeliverables?: boolean;
   specSettings?: { granularity: 'coarse' | 'medium' | 'fine'; reviewRounds: number };
   /** 省略时由 Planner 现生成；给出则跳过规划直接冻结 */
   dag?: unknown;

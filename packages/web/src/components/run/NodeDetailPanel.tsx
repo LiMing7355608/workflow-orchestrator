@@ -1,3 +1,4 @@
+import { NodeTimes, TaskBreakdown } from './TaskBreakdown';
 import {
   GitBranch,
   Loader2,
@@ -319,6 +320,15 @@ function PanelSurface({
             <MetaItem label="上游依赖" value={`${node.dependsOn.length} 个`} />
             <MetaItem label="文件" value={`${node.files.length} 个`} />
           </div>
+
+          <div className="mt-2"><NodeTimes node={node} /></div>
+          {(node.delivery || node.deliverables?.length || node.acceptance?.length) && <details className="mt-2 rounded-lg border border-line bg-subtle/25 px-2.5 py-1.5">
+            <summary className="cursor-pointer text-xs font-semibold text-ink">产物与验收</summary>
+            <div className="mt-2 max-h-44 overflow-auto">
+              <TaskBreakdown task={node} runId={run.id} description={false}
+                dependencies={new Map(dependencies.map((item) => [item.id, item.title]))} onSelectNode={onSelectNode} />
+            </div>
+          </details>}
 
           {dependencies.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1.5">

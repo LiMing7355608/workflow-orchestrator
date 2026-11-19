@@ -1,3 +1,5 @@
+import type { TaskDeliverable } from './workflow';
+
 interface InterviewQuestion {
   title: string;
   question: string;
@@ -67,6 +69,8 @@ export interface PlanDraftView {
       description: string;
       dependsOn: string[];
       files: string[];
+      deliverables?: TaskDeliverable[];
+      acceptance?: string[];
       agentId?: string;
       action?: 'merge';
     }>;

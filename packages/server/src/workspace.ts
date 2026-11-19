@@ -333,7 +333,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     return dir;
   }
 
-  async publish(runId: string, nodeId: string): Promise<void> {
+  async publish(runId: string, nodeId: string): Promise<string> {
     const dir = this.dirOf(runId, nodeId);
     const branch = await this.gitValue(['symbolic-ref', '--short', 'HEAD'], dir);
     if (branch !== this.branchOf(runId, nodeId)) {
@@ -345,6 +345,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     }
     const head = await this.gitValue(['rev-parse', 'HEAD'], dir);
     await this.gitValue(['update-ref', this.publishedRef(runId, nodeId), head]);
+    return head;
   }
 
   private async nodeCommit(runId: string, nodeId: string): Promise<string> {

@@ -162,6 +162,8 @@ export function deriveProgress(run: RunFacts): number {
 export function deriveUpdatedAt(run: RunFacts): string {
   const stamps = [
     run.createdAt,
+    run.planCheckingAt,
+    run.planDraft?.at,
     run.frozenAt,
     run.pausedAt,
     run.completedAt,
@@ -198,6 +200,11 @@ export function deriveNodeView(
     agentId: node.agentId,
     dependsOn: node.dependsOn,
     files: node.files,
+    ...(node.deliverables ? { deliverables: node.deliverables } : {}),
+    ...(node.acceptance ? { acceptance: node.acceptance } : {}),
+    ...(node.delivery ? { delivery: node.delivery } : {}),
+    ...(node.startedAt ? { startedAt: node.startedAt } : {}),
+    ...(node.finishedAt ? { finishedAt: node.finishedAt } : {}),
     attempts: node.attempts,
     durationMs: duration !== undefined && Number.isFinite(duration) ? duration : undefined,
     escalated: node.escalated,

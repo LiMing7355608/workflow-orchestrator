@@ -56,6 +56,8 @@ export const AMENDABLE_FIELDS = [
   'title',
   'description',
   'files',
+  'deliverables',
+  'acceptance',
   'maxAttempts',
 ] as const;
 

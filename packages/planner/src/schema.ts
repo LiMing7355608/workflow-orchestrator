@@ -1,3 +1,4 @@
+import { isWorkspaceFilePath } from '@orchestrator/core';
 import { z } from 'zod';
 
 /**
@@ -20,6 +21,13 @@ export const dagNodeSchema = z.object({
   dependsOn: z.array(z.string()).default([]),
   /** 独占文件范围。并行实现节点的集合不允许相交 */
   files: z.array(z.string()).default([]),
+  /** 验收时可以在目标工程中核对的具体路径。历史任务允许缺省。 */
+  deliverables: z.array(z.object({
+    path: z.string().refine(isWorkspaceFilePath, '产物必须是普通的仓库相对文件路径'),
+    description: z.string().trim().min(1).max(360).optional(),
+    kind: z.enum(['file', 'remove']).optional(),
+  })).max(24).optional(),
+  acceptance: z.array(z.string().trim().min(1).max(600)).max(12).optional(),
   /** 实现与审查节点必填，审批与路由节点留空 */
   agentId: z.string().min(1).optional(),
   /** 人类审批人或编排器节点的展示名 */

@@ -18,6 +18,7 @@ import type {
   OrchestratorEvent,
   ReviewVerdict,
   RunFacts,
+  SavedTaskFiles,
 } from './types.js';
 
 export interface AdvanceDeps {
@@ -68,6 +69,8 @@ export interface AdvanceDeps {
    * 读回某节点上次落盘的 diff 文本，供审查提示词使用
    */
   loadArtifact?: (runId: string, nodeId: string) => Promise<string | undefined>;
+  saveTaskFiles?: (run: RunFacts, node: NodeFacts, cwd: string, commit?: string) => Promise<SavedTaskFiles | undefined>;
+  exportDelivery?: (run: RunFacts, node: NodeFacts, result: Extract<MergeResult, { ok: true }>) => Promise<SavedTaskFiles | undefined>;
   memory?: {
     context(runId: string, nodeId: string, agentId: string): Promise<string | undefined>;
     remember(runId: string, nodeId: string, agentId: string, result: AgentRunResult, text: string): Promise<void>;
@@ -383,7 +386,7 @@ async function buildPrompt(
     lines.push(
       '',
       '## 审查要求',
-      '只读审查，不要修改任何文件。检查正确性、边界条件与验收条件。',
+      '只读审查，可以运行不改动交付文件的检查。发现问题时在回复中给出证据，交由实现节点修改。',
       '最后一行必须给出裁决标记，二选一：',
       'VERDICT: APPROVED',
       'VERDICT: CHANGES_REQUESTED',
@@ -395,6 +398,17 @@ async function buildPrompt(
       `只在下列范围内改动：${node.files.join(', ') || '整个仓库'}`,
       '完成后简要说明你做了什么。',
     );
+  }
+
+  if (node.deliverables?.length) {
+    lines.push('', '## 必须落盘的交付文件');
+    for (const item of node.deliverables) {
+      lines.push(`- ${item.kind === 'remove' ? '删除' : '交付'} ${item.path}${item.description ? ' · ' + item.description : ''}`);
+    }
+    lines.push('离开前逐项核对实际工程文件。请把交付文件保存在指定路径。');
+  }
+  if (node.acceptance?.length) {
+    lines.push('', '## 验收条件', ...node.acceptance.map((criterion) => '- ' + criterion));
   }
 
   /**
@@ -661,7 +675,17 @@ async function executeMerge(
       branch: result.branch,
       merged: result.merged,
     });
-    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+    let delivery: SavedTaskFiles | undefined;
+    try {
+      delivery = await deps.exportDelivery?.(run, node, result);
+    } catch (error) {
+      await deps.emit({
+        type: 'node.failed', at: deps.now(), runId, nodeId: node.id,
+        reason: `合并已完成，交付文件落盘失败：${(error as Error).message}`,
+      });
+      return;
+    }
+    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id, ...(delivery ? { delivery } : {}) });
     return;
   }
 
@@ -988,9 +1012,13 @@ async function executeNode(
     return;
   }
 
+  let delivery: SavedTaskFiles | undefined;
   if (node.type === 'implement') {
     try {
-      await workspace.publish?.(runId, node.id);
+      const commit = await workspace.publish?.(runId, node.id);
+      if (node.deliverables?.length) {
+        delivery = await deps.saveTaskFiles?.(run, node, cwd, commit || undefined);
+      }
       await captureArtifact(runId, node.id, workspace, deps);
     } catch (error) {
       await deps.emit({
@@ -1000,7 +1028,7 @@ async function executeNode(
       return;
     }
   }
-  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id, ...(delivery ? { delivery } : {}) });
   if (node.type !== 'implement' || !workspace.publish) {
     await workspace.release(runId, node.id).catch(() => {});
   }

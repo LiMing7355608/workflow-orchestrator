@@ -408,19 +408,7 @@ export function NewRunPage() {
     setSubmitting(true);
     setSubmitError(null);
 
-    // 分解粒度和审查轮次仍然只是给 Planner 的参考（后端没有对应参数），
-    // 并行度不同：它会被落成运行事实、真的决定调度器一次派发几个节点，
-    // 所以下面单独传 `concurrency`，不再只靠这段文字。
-    const granularityLabel =
-      granularityOptions.find((option) => option.value === granularity)?.label ??
-      granularity;
-    const settings = [
-      `分解粒度：${granularityLabel}`,
-      `并行度：${parallelism}`,
-      `审查轮次：${reviewRounds} 轮`,
-    ].join('；');
-
-    const goal = `${text.trim()}\n\n补充要求：${settings}`;
+    const goal = text.trim();
     const title = (finalSpec || text).trim().split('\n')[0]?.replace(/^#+\s+/, '').slice(0, 48) || '未命名运行';
 
     const outcome = await createRun({
@@ -430,7 +418,8 @@ export function NewRunPage() {
       workspaceRoot: finalSpec ? interview!.workspaceRoot : trimmedWorkspaceRoot,
       specId: finalSpec ? interview!.id : undefined,
       reviewPlan,
-      specSettings: finalSpec ? { granularity, reviewRounds: Number(reviewRounds) } : undefined,
+      requireDeliverables: true,
+      specSettings: { granularity, reviewRounds: Number(reviewRounds) },
       // 并行度是这次运行的属性，不是服务的属性
       concurrency: Number(parallelism),
       plannerAgentId: plannerAgentId || undefined,

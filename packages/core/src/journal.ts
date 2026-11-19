@@ -98,6 +98,7 @@ function resetNode(run: RunFacts, nodeId: string): string[] {
       escalated: undefined,
       artifactBytes: undefined,
       artifactFiles: undefined,
+      delivery: undefined,
       mergedBranch: undefined,
       attempts: node.attempts + Number(id === nodeId),
     };
@@ -285,6 +286,7 @@ export function reduce(
       return withNode(next, event.runId, event.nodeId, (node) => {
         node.startedAt = event.at;
         node.finishedAt = undefined;
+        node.delivery = undefined;
         node.failureReason = undefined;
         // 重新开始意味着「待恢复」这个展示不再成立：不清掉它，看板会一直
         // 说这个节点已停止，而它正在跑
@@ -295,6 +297,7 @@ export function reduce(
     case 'node.completed':
       return withNode(state, event.runId, event.nodeId, (node) => {
         node.finishedAt = event.at;
+        node.delivery = event.delivery;
         node.failureReason = undefined;
         node.interruptedAt = undefined;
       });

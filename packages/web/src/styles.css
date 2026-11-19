@@ -200,3 +200,49 @@
 @media (prefers-reduced-motion: reduce) {
   .activity-wire-pulse, .activity-span[data-state='running'] { animation: none; }
 }
+
+.workflow-canvas {
+  background: linear-gradient(180deg, #f3f7fd 0%, #f9fbfe 70%, #f5f8fc 100%);
+}
+
+.workflow-dependency { --edge: #adb6c3; }
+.workflow-dependency[data-state='passed'] { --edge: #659682; }
+.workflow-dependency[data-state='running'] { --edge: #5794e8; }
+.workflow-dependency[data-state='waiting'] { --edge: #bb832e; }
+.workflow-dependency[data-state='failed'] { --edge: #ba4750; }
+.workflow-dependency[data-dim='true'] { opacity: 0.5; }
+
+.workflow-dependency .workflow-dependency-base {
+  stroke: var(--edge);
+  stroke-width: 1.6;
+  fill: none;
+}
+.workflow-dependency[data-related='true'] .workflow-dependency-base { stroke-width: 2.4; }
+.workflow-dependency[data-state='pending'] .workflow-dependency-base { stroke-dasharray: 3 4; }
+.workflow-dependency-pulse {
+  fill: none;
+  pointer-events: none;
+  stroke: #2563eb;
+  stroke-width: 2.9;
+  stroke-linecap: round;
+  stroke-dasharray: 16 84;
+  animation: dispatch-flow 1.6s linear infinite;
+}
+
+.workflow-node[data-state='running']::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, #3b82f6 50%, transparent);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: node-progress 2.2s linear infinite;
+}
+
+@keyframes dispatch-flow { to { stroke-dashoffset: -100; } }
+@keyframes node-progress { from { background-position-x: -75%; } to { background-position-x: 175%; } }
+@media (prefers-reduced-motion: reduce) {
+  .workflow-dependency-pulse, .workflow-node[data-state='running']::after { animation: none; }
+}

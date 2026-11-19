@@ -40,7 +40,7 @@ export const nodeTypeMeta: Record<NodeType, NodeTypeMeta> = {
     color: '#b45309',
   },
   route: {
-    label: '路由',
+    label: '编排',
     icon: GitBranch,
     tile: 'bg-subtle text-muted',
     dot: 'bg-passive',
@@ -58,7 +58,7 @@ export interface NodeStatusMeta {
 
 export const nodeStatusMeta: Record<NodeStatus, NodeStatusMeta> = {
   pending: {
-    label: '待定',
+    label: '待执行',
     dot: 'bg-passive',
     text: 'text-passive',
     tone: 'neutral',

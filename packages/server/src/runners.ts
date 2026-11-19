@@ -393,6 +393,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '按目标写出可交付的初稿',
           dependsOn: [],
           files: ['docs/**'],
+          deliverables: [{ path: 'docs/impl-doc.md', description: '文档初稿' }],
+          acceptance: ['打开初稿，查看与需求对应的正文。'],
           agentId: primary,
           maxAttempts: 3,
         },
@@ -405,6 +407,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '按目标实现主路径并自测',
           dependsOn: [],
           files: ['src/impl-core.md'],
+          deliverables: [{ path: 'src/impl-core.md', description: '核心流程说明' }],
+          acceptance: ['打开说明文件，核对核心交付内容可读。'],
           agentId: primary,
           maxAttempts: 3,
         },
@@ -415,6 +419,7 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '独立核对正确性、边界条件与验收标准',
           dependsOn: ['impl-core'],
           files: ['src/core/**'],
+          acceptance: ['读取核心产物，核对范围和主流程。'],
           agentId: reviewer,
           maxAttempts: 3,
         },
@@ -428,6 +433,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
       description: '读取核心节点的产物并生成集成说明',
       dependsOn: ['impl-core'],
       files: ['src/impl-integration.md'],
+      deliverables: [{ path: 'src/impl-integration.md', description: '集成说明' }],
+      acceptance: ['读取集成说明，确认包含上游产物内容。'],
       agentId: primary,
       maxAttempts: 3,
     });
@@ -698,7 +705,7 @@ export class MockAgentRunner implements AgentRunner {
       return { ok: true, exitCode: 0, output };
     }
 
-    const isReview = haystack.includes('VERDICT:');
+    const isReview = haystack.includes('\n## 审查要求\n');
 
     const lines = isReview
       ? [

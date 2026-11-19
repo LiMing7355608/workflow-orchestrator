@@ -4,7 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import { EventStream } from '../components/run/EventStream';
 import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
-import { PlanningSteps, PlanReviewPanel } from '../components/run/PlanReviewPanel';
+import { PlanningSteps, PlanReviewPanel, RunPlanPanel } from '../components/run/PlanReviewPanel';
 import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
 import { RunBoard } from '../components/run/RunBoard';
 import { RunBlackboard } from '../components/run/RunBlackboard';
@@ -75,6 +75,7 @@ export function RunDetailPage() {
   const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<RunView>('graph');
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  const [draftLogOpen, setDraftLogOpen] = useState(false);
 
   usePageTitle(run?.title ?? '运行详情');
 
@@ -82,6 +83,7 @@ export function RunDetailPage() {
     setSelectedNodeId(null);
     setDetailNodeId(null);
     setActiveView('graph');
+    setDraftLogOpen(false);
     setOrchestratorOpen(false);
   }, [runId]);
 
@@ -98,6 +100,9 @@ export function RunDetailPage() {
    */
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
+  useEffect(() => {
+    setDraftLogOpen(false);
+  }, [run?.planDraft?.revision]);
   useEffect(() => {
     if (!planningActive) {
       return;
@@ -169,18 +174,19 @@ export function RunDetailPage() {
       />
 
       <ViewBar
-        value={planning ? 'events' : activeView}
+        value={planning ? run.planDraft && !draftLogOpen ? 'plan' : 'events' : activeView}
         planning={planning}
-        onChange={setActiveView}
+        draft={Boolean(run.planDraft)}
+        onChange={(view) => planning ? setDraftLogOpen(view === 'events') : setActiveView(view)}
         nodeCount={run.nodes.length}
         eventCount={run.events.length}
       />
 
       <div className="flex min-h-0 flex-1 max-[1100px]:block">
         <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
-          {run.planDraft ? (
+          {run.planDraft && !draftLogOpen ? (
             <PlanReviewPanel key={run.planDraft.revision} runId={run.id} revision={run.planDraft.revision}
-              paused={run.status === 'paused'} onCommit={reload} onDiscuss={() => setOrchestratorOpen(true)} />
+              at={run.planDraft.at} paused={run.status === 'paused'} onCommit={reload} onDiscuss={() => setOrchestratorOpen(true)} />
           ) : planning ? (
             <div className="flex h-full flex-col bg-canvas">
               {run.reviewPlan && planningActive && <PlanningSteps phase={run.planCheckingAt ? 'checking' : 'drafting'} />}
@@ -206,11 +212,9 @@ export function RunDetailPage() {
               </div>
             </div>
           ) : activeView === 'graph' ? (
-            <WorkflowCanvas
-              run={run}
-              selectedNodeId={selectedNodeId}
-              onSelectNode={selectNode}
-            />
+            <WorkflowCanvas key={run.id} run={run} onInspectNode={selectNode} />
+          ) : activeView === 'plan' ? (
+            <RunPlanPanel run={run} live={source === 'live'} onSelectNode={selectNode} />
           ) : activeView === 'board' ? (
             <RunBoard
               run={run}

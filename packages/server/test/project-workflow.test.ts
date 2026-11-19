@@ -32,8 +32,8 @@ const specText = '# 社团公告工具\n\n## 范围\n只做离线公告创建。
 const dag = {
   title: '社团公告工具',
   nodes: [
-    { id: 'implement', type: 'implement', title: '实现公告页面', files: ['index.html'], agentId: 'codex' },
-    { id: 'review', type: 'review', title: '审查公告验收', dependsOn: ['implement'], agentId: 'codex' },
+    { id: 'implement', type: 'implement', title: '实现公告页面', files: ['index.html'], deliverables: [{ path: 'index.html', description: '可离线打开的公告页' }], acceptance: ['填写并保存公告后可以查看'], agentId: 'codex' },
+    { id: 'review', type: 'review', title: '审查公告验收', dependsOn: ['implement'], acceptance: ['打开页面验证公告流程'], agentId: 'codex' },
     { id: 'accept', type: 'approval', title: '人工验收', dependsOn: ['review'], executor: '学生' },
     { id: 'integrate', type: 'route', title: '集成交付', dependsOn: ['accept'], action: 'merge' },
   ],
@@ -178,6 +178,15 @@ describe('项目级运行与规格访谈', () => {
       decision: 'approve', actor: '学生',
     } })).statusCode).toBe(200);
     await vi.waitFor(() => expect(store.snapshot.runs[runId]?.completedAt).toBeTruthy(), { timeout: 15_000, interval: 60 });
+    const implementation = store.snapshot.runs[runId]!.nodes.implement!.delivery!;
+    expect(implementation.files[0]).toEqual(expect.objectContaining({ path: 'index.html' }));
+    const entry = '/api/runs/' + runId + '/nodes/implement/file?revision=' + implementation.revision;
+    expect((await app.inject(entry + '&path=index.html')).body).toContain('<title>公告</title>');
+    expect((await app.inject(entry + '&path=..%2Foriginal.txt')).statusCode).toBe(404);
+    expect((await app.inject(entry.replace(implementation.revision, 'stale') + '&path=index.html')).statusCode).toBe(404);
+    const integrated = store.snapshot.runs[runId]!.nodes.integrate!.delivery!;
+    expect(await readFile(join(projectRun, 'output', integrated.revision, 'index.html'), 'utf8')).toContain('<title>公告</title>');
+    expect((await app.inject('/api/runs/' + runId + '/plan-files/plan.json')).json().nodes[0].deliverables[0].path).toBe('index.html');
     const delivery = await app.inject('/api/runs/' + runId + '/output');
     expect(delivery.statusCode).toBe(200);
     expect(delivery.rawPayload.subarray(0, 2).toString()).toBe('PK');
