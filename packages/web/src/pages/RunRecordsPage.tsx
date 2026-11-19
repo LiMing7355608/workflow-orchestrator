@@ -7,10 +7,10 @@ import { Card } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Segmented } from '../components/ui/Segmented';
 import { seedRuns } from '../data/seed';
-import { fetchRuns } from '../lib/api';
+import { deleteRun, fetchRuns } from '../lib/api';
 import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
-import type { RunStatus } from '../types/workflow';
+import type { RunStatus, WorkflowRunSummary } from '../types/workflow';
 
 type StatusFilter = 'all' | RunStatus;
 type SortKey = 'updated' | 'progress' | 'nodes';
@@ -47,9 +47,25 @@ export function RunRecordsPage() {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [sort, setSort] = useState<SortKey>('updated');
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const { data: runs, source, reload } = useApiResource(fetchRuns, seedRuns);
   useLiveRefresh(source === 'live', reload);
+
+  async function remove(run: WorkflowRunSummary) {
+    if (deleting || !window.confirm('删除「' + run.title + '」的运行记录、工作区、协作记忆和产物？已经合入项目正式分支的文件会保留。')) return;
+    setDeleting(run.id);
+    setDeleteError(null);
+    try {
+      await deleteRun(run.id);
+      reload();
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : '删除运行失败。');
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   const counts = useMemo(
     () => ({
@@ -57,12 +73,14 @@ export function RunRecordsPage() {
       running: runs.filter((run) => run.status === 'running').length,
       waiting: runs.filter((run) => run.status === 'waiting_for_boss').length,
       completed: runs.filter((run) => run.status === 'completed').length,
-      paused: runs.filter((run) => run.status === 'paused').length,
+        paused: runs.filter((run) => run.status === 'paused').length,
+        failed: runs.filter((run) => run.status === 'failed').length,
     }),
     [runs],
   );
 
   const statusOptions: Array<{ value: StatusFilter; label: string }> = [
+    { value: 'failed', label: '失败 ' + counts.failed },
     { value: 'all', label: `全部 ${counts.all}` },
     { value: 'running', label: `运行中 ${counts.running}` },
     { value: 'waiting_for_boss', label: `待你处理 ${counts.waiting}` },
@@ -186,8 +204,9 @@ export function RunRecordsPage() {
         </span>
       </div>
 
+      {deleteError && <p role="alert" className="mt-2 text-[12px] text-danger">{deleteError}</p>}
       <Card className="mt-2 overflow-hidden">
-        <div className="grid grid-cols-[minmax(0,1fr)_96px_96px_150px_64px_88px_20px] items-center gap-4 border-b border-line bg-subtle/30 px-5 py-2 text-[10px] text-passive max-[1100px]:grid-cols-[minmax(0,1fr)_96px_150px_64px_88px_20px] max-[900px]:hidden">
+        <div className="grid grid-cols-[minmax(0,1fr)_96px_96px_150px_64px_88px_20px] items-center gap-4 border-b border-line bg-subtle/30 py-2 pl-5 pr-14 text-[10px] text-passive max-[1100px]:grid-cols-[minmax(0,1fr)_96px_150px_64px_88px_20px] max-[900px]:hidden">
           <span>运行</span>
           <span>状态</span>
           <span className="max-[1100px]:hidden">阶段</span>
@@ -212,7 +231,7 @@ export function RunRecordsPage() {
               </div>
               <div className="divide-y divide-line">
                 {group.runs.map((run) => (
-                  <RunRecordRow key={run.id} run={run} />
+                  <RunRecordRow key={run.id} run={run} deleting={Boolean(deleting)} onDelete={source === 'live' ? () => void remove(run) : undefined} />
                 ))}
               </div>
             </div>

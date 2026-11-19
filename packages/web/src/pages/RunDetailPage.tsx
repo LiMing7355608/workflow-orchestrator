@@ -6,6 +6,7 @@ import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
 import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
 import { RunBoard } from '../components/run/RunBoard';
+import { RunBlackboard } from '../components/run/RunBlackboard';
 import { RunHeader } from '../components/run/RunHeader';
 import { ViewBar, type RunView } from '../components/run/ViewBar';
 import { WorkflowCanvas } from '../components/run/WorkflowCanvas';
@@ -241,6 +242,7 @@ export function RunDetailPage() {
             </Button>
           </div>
 
+          <RunBlackboard key={run.id} runId={run.id} />
           <NodeInspector
             run={run}
             node={selectedNode}

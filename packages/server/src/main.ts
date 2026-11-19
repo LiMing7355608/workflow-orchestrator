@@ -134,8 +134,8 @@ try {
   // 启动横幅留在 console：此刻用户还没把日志管道接好，而这是他要看的第一屏。
   // 之后的一切（请求、推进、失败）都走 pino，不再往 stdout 里撒字符串。
   console.log(`orchestrator server listening on ${url}`);
-  console.log(`event journal: ${journalRoot} (<runId>/events.jsonl, 超限分片)`);
-  console.log(`legacy event log (read-only): ${resolve(logPath)}`);
+  console.log(`运行位置索引：${resolve(journalRoot, '.project-runs')}`);
+  console.log(`旧运行日志：${resolve(logPath)}`);
   console.log(`lock file: ${lockPath}`);
   console.log(`process registry: ${processDir}`);
   console.log(`running file: ${runningFile}`);

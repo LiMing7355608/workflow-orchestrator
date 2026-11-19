@@ -181,6 +181,12 @@ export function reduce(
   event: OrchestratorEvent,
 ): ProjectState {
   switch (event.type) {
+    case 'run.deleted': {
+      const runs = { ...state.runs };
+      delete runs[event.runId];
+      return { runs, approvals: state.approvals.filter((approval) => approval.runId !== event.runId) };
+    }
+
     case 'run.created':
       /**
        * `workspaceRoot` 在这里归一化，而不是让每个读取方自己判空。

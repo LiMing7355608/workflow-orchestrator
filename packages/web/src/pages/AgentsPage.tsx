@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { AgentCard } from '../components/agents/AgentCard';
+import { AgentActivityPanel } from '../components/agents/AgentActivityPanel';
 import { StatCard } from '../components/home/StatCard';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -176,6 +177,7 @@ export function AgentsPage() {
         </div>
       </div>
 
+      <AgentActivityPanel />
       <div className="mt-6 grid gap-3 sm:grid-cols-3">
         <StatCard
           label="可直接调用"
