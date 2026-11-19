@@ -23,6 +23,10 @@ export interface AgentRunRequest {
   timeoutMs: number;
   /** 权限档位。审查节点固定用 default，不追加任何提权参数 */
   policy: PermissionPolicy;
+  /** Explicit model selection for transports that negotiate it outside argv. */
+  model?: string;
+  /** Optional for short structured turns on clients that expose an effort selector. */
+  reasoningEffort?: 'low';
   /**
    * 要接着哪个会话继续跑。
    *

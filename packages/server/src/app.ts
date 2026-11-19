@@ -5,7 +5,7 @@ import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { extname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -46,12 +46,15 @@ import {
   type Dag,
 } from '@orchestrator/planner';
 import { ArtifactStore } from './artifacts.js';
+import { registerMeetingRoutes } from './meeting-routes.js';
+import { Meetings } from './meetings.js';
 import { AgentActivity } from './agent-activity.js';
 import { buildAmendInstruction, buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
 import type { LockHandle } from './locks.js';
 import type { LogFn, LogSink } from './log.js';
 import { resolveDataDir } from './paths.js';
-import { PROJECT_DATA, ownedPath, projectRunPath, writeAtomic } from './project-files.js';
+import { verifyPlan, type PlanDraft } from './plan-review.js';
+import { PROJECT_DATA, ownedPath, projectRunPath, readOptional, writeAtomic } from './project-files.js';
 import { probeCatalog } from './probe.js';
 import type { ProcessRegistry } from './registry.js';
 import { MockAgentRunner } from './runners.js';
@@ -61,6 +64,7 @@ import { buildSeedEvents } from './seed.js';
 import { SESSION_NAMESPACE, createSessionIdDeriver } from './session-id.js';
 import { InterviewConflict, SpecInterviews } from './spec-interviews.js';
 import { RunStore } from './store.js';
+import { modelIdSchema, supportsModel } from './text-turn.js';
 import { GitWorktreeWorkspace, TempDirWorkspace, isGitWorkTree } from './workspace.js';
 
 const execFileAsync = promisify(execFile);
@@ -127,6 +131,7 @@ const createRunBodySchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
   specId: runIdSchema.optional(),
+  reviewPlan: z.boolean().optional(),
   specSettings: z.object({
     granularity: z.enum(['coarse', 'medium', 'fine']),
     reviewRounds: z.number().int().min(1).max(3),
@@ -499,7 +504,12 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     (id) => store.snapshot.runs[id],
     (runId) => store.bus.publish({ type: 'agent.activity', runId, at: now() }),
   );
-  const runner = activity.observe(baseRunner);
+  const runner = activity.observe(baseRunner, (id) => findAgent(id, catalog));
+  const meetings = new Meetings(dirname(resolve(options.logPath)), baseRunner, () => catalog,
+    (runId) => store.bus.publish({ type: 'meeting.updated', runId, at: now() }));
+  await meetings.load();
+  registerMeetingRoutes(app, meetings, resolveActor);
+  app.addHook('onClose', () => meetings.close());
 
   // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。
   // temp 保留作为降级选项——在没有 git 的环境里仍能跑通整条编排链路，
@@ -938,6 +948,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       // 这里接出去；整轮推进与单跑共用同一个取值函数，否则同一个节点在两条
       // 路径上会读到不同的补充要求——那正是最难解释的一类不一致。
       eventsForRun: (id) => store.eventsForRun(id),
+      waitBeforeDispatch: (id) => amendChains.get(id),
     };
   }
 
@@ -1021,6 +1032,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    * 比回一个「稍后再试」有用得多。
    */
   const amendChains = new Map<string, Promise<void>>();
+  const planControls = new Set<string>();
 
   /**
    * 排到该运行的改图队尾，返回释放函数。
@@ -1114,35 +1126,24 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         );
       }
 
-      await writePlan(runId, dag);
-      await memory.remember(runId, '_planner', generated.agentId, { ok: true, exitCode: 0, output: '' },
-        `生成了 ${dag.nodes.length} 个节点，规划尝试 ${generated.attempts} 次。任务图已通过校验。`,
-      ).catch((error: unknown) => log.warn('无法写入规划 Agent 记忆', error));
-      await memory.post(runId, {
-        source: 'system',
-        author: resolveAgent(generated.agentId) ?? generated.agentId,
-        text: `PM 已生成 ${dag.nodes.length} 个任务，执行节点可在共享黑板交接决定和结果。`,
-      }).catch((error: unknown) => log.warn('无法写入规划交接记录', error));
-      await store.emit({
-        type: 'run.frozen',
-        at: now(),
-        runId,
-        nodes: toNodeFacts(dag),
-      });
+      const run = store.snapshot.runs[runId]!;
+      if (run.reviewPlan) {
+        const root = store.projectWorkspace(runId)!;
+        const checker = [findAgent(run.reviewAgentId ?? '', catalog), ...catalog.filter((item) => item.id !== agentId), findAgent(agentId, catalog)]
+          .find((item) => item?.enabled && item.availability !== 'missing');
+        await store.emit({ type: 'plan.checking', at: now(), runId, agentId: checker?.id ?? 'orchestrator' });
+        const verification = checker
+          ? await verifyPlan({ runId, goal: request.goal, dag, agent: checker, runner, signal, workspace: workspaceFor(run) })
+          : { status: 'unavailable' as const, agentId: 'orchestrator', summary: '没有可用的核对 Agent。', findings: [] };
+        signal.throwIfAborted();
+        const draft: PlanDraft = { revision: randomUUID(), dag, attempts: generated.attempts, verification };
+        await writeAtomic(await projectRunPath(root, runId, 'plan-draft.json'), JSON.stringify(draft, null, 2) + '\n');
+        signal.throwIfAborted();
+        await store.emit({ type: 'plan.drafted', at: now(), runId, revision: draft.revision });
+        return;
+      }
 
-      app.log.debug(
-        {
-          runId,
-          agentId: generated.agentId,
-          nodes: dag.nodes.length,
-          // 回放器几轮才给出合格图是排障线索，不是成功指标
-          attempts: generated.attempts,
-        },
-        '任务图已冻结',
-      );
-
-      // 冻结即可开跑，不必等客户端再踢一脚
-      void advance(runId);
+      await freezePlan(runId, dag, generated.agentId, generated.attempts, signal);
     } catch (error) {
       if (signal.aborted) {
         return;
@@ -1176,6 +1177,66 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         });
     }
   }
+
+  async function freezePlan(runId: string, dag: Dag, agentId: string, attempts: number, signal?: AbortSignal, actor?: string) {
+    await writePlan(runId, dag);
+    signal?.throwIfAborted();
+    await store.emit({ type: 'run.frozen', at: now(), runId, nodes: toNodeFacts(dag), ...(actor ? { actor } : {}) });
+    await memory.remember(runId, '_planner', agentId, { ok: true, exitCode: 0, output: '' },
+      `生成了 ${dag.nodes.length} 个节点，规划尝试 ${attempts} 次。任务图已通过校验。`,
+    ).catch((error: unknown) => log.warn('无法写入规划 Agent 记忆', error));
+    await memory.post(runId, {
+      source: 'system', author: resolveAgent(agentId) ?? agentId,
+      text: `PM 已生成 ${dag.nodes.length} 个任务，执行节点可在共享黑板交接决定和结果。`,
+    }).catch((error: unknown) => log.warn('无法写入规划交接记录', error));
+    if (!signal?.aborted) void advance(runId);
+  }
+
+  function currentPlanningGoal(run: RunFacts) {
+    const input = recentConversation(run.id).filter((message) => message.role === 'user').map((message) => message.text);
+    return input.length ? replanGoal(run.goal, input.join('\n')) : run.goal;
+  }
+
+  async function readPlanDraft(run: RunFacts): Promise<PlanDraft | undefined> {
+    const root = store.projectWorkspace(run.id);
+    if (!root || !run.planDraft) return undefined;
+    const raw = await readOptional(await projectRunPath(root, run.id, 'plan-draft.json'));
+    if (!raw) return undefined;
+    const draft = JSON.parse(raw) as PlanDraft;
+    return draft.revision === run.planDraft.revision ? draft : undefined;
+  }
+
+  app.get<{ Params: { id: string } }>('/api/runs/:id/plan-review', async (request, reply) => {
+    const run = store.snapshot.runs[request.params.id];
+    const draft = run && await readPlanDraft(run);
+    return draft ?? reply.code(404).send({ message: '草案尚未就绪。' });
+  });
+
+  app.post<{ Params: { id: string } }>('/api/runs/:id/plan-review/approve', async (request, reply) => {
+    const runId = request.params.id;
+    const revision = z.object({ revision: z.string().uuid() }).safeParse(request.body);
+    const run = store.snapshot.runs[runId];
+    if (!run) return reply.code(404).send({ message: '未找到该运行。' });
+    if (!revision.success || !run.planDraft || run.planDraft.revision !== revision.data.revision || run.pausedAt ||
+        deletingRuns.has(runId) || planControls.has(runId)) {
+      return reply.code(409).send({ message: '草案正在更新或已暂停，请查看最新版本。' });
+    }
+    planControls.add(runId);
+    try {
+      const draft = await readPlanDraft(run);
+      if (!draft) return reply.code(409).send({ message: '草案文件已更新，请刷新。' });
+      const checked = safeParseDag(draft.dag);
+      if (!checked.success || !validateDag(checked.data, catalog).ok) {
+        return reply.code(422).send({ message: '草案或 Agent 配置已变化，请重新核对。' });
+      }
+      const actor = resolveActor(request.headers);
+      const planner = pickPlannerAgent(catalog, run.plannerAgentId)?.id ?? 'orchestrator';
+      await freezePlan(runId, checked.data, planner, draft.attempts, undefined, actor);
+      return { ok: true };
+    } finally {
+      planControls.delete(runId);
+    }
+  });
 
   /** 发起一次拆解。已经在拆的直接复用：不排队，也不重复调 Agent。 */
   function startPlanning(runId: string, request: PlanRequest): void {
@@ -1248,7 +1309,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   app.get('/api/agents', async () => catalog);
 
   app.get('/api/agents/activity', async () => {
-    const intervals = [...activity.entries, ...interviews.activity]
+    const intervals = [...activity.entries, ...interviews.activity, ...meetings.activity]
       .filter((entry) => entry.agentId !== 'orchestrator')
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     return {
@@ -1263,6 +1324,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     workspaceRoot: specRoot,
     idea: z.string().trim().min(1).max(16_000),
     agentId: z.string().min(1).optional(),
+    model: modelIdSchema.optional(),
   });
   const specAnswer = z.object({
     workspaceRoot: specRoot,
@@ -1280,7 +1342,10 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const checked = await checkWorkspaceRoot(body.data.workspaceRoot);
     if (!checked.ok) return reply.code(400).send({ message: checked.message });
     await ownedPath(checked.root, PROJECT_DATA, 'worktrees');
-    return reply.code(201).send(await interviews.start(checked.root, body.data.idea, agent.id));
+    if (body.data.model && !supportsModel(agent)) {
+      return reply.code(422).send({ message: '该设计 Agent 使用客户端默认模型。' });
+    }
+    return reply.code(201).send(await interviews.start(checked.root, body.data.idea, agent.id, body.data.model));
   });
 
   app.get<{ Params: { id: string }; Querystring: { workspaceRoot?: string } }>('/api/specs/:id', async (request, reply) => {
@@ -1376,7 +1441,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return reply.code(404).send({ error: 'run_not_found', message: '未找到这条运行。' });
     }
     if (deletingRuns.has(runId) || mutationCounts.has(runId) || handingOff.has(runId) ||
-        advancing.has(runId) || planning.has(runId) || amendChains.has(runId) ||
+        advancing.has(runId) || planning.has(runId) || amendChains.has(runId) || planControls.has(runId) ||
         run.nodeOrder.some((id) => nodeInFlight.has(nodeInFlightKey(runId, id))) ||
         activity.entries.some((entry) => entry.runId === runId && entry.status === 'running')) {
       return reply.code(409).send({ error: 'run_busy', message: '请先停止运行，等 Agent 退出后再删除。' });
@@ -1606,6 +1671,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         workspaceRoot,
         ...(body.data.concurrency === undefined ? {} : { concurrency: body.data.concurrency }),
         specVersion: submittedDag?.specVersion ?? 'v1.0',
+        ...(body.data.reviewPlan && !submittedDag ? { reviewPlan: true } : {}),
         plannerAgentId: body.data.plannerAgentId,
         implementAgentId: body.data.implementAgentId,
         reviewAgentId: body.data.reviewAgentId,
@@ -1832,6 +1898,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
       await store.emit({ type: 'run.resumed', at: now(), runId });
       const run = store.snapshot.runs[runId]!;
+      if (run.planDraft) return { ok: true };
       if (!run.frozenAt) {
         // 还没拆完的运行要继续拆，必须知道在哪儿建 planner 的 worktree。
         // 旧数据没记目录、服务也没配默认值时就只能拒绝——猜一个目录继续跑，
@@ -1844,7 +1911,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           });
         }
         startPlanning(runId, {
-          goal: run.goal,
+          goal: currentPlanningGoal(run),
           requestedAgentId: run.plannerAgentId,
           workspaceRoot: planningRoot,
           roles: { implementAgentId: run.implementAgentId, reviewAgentId: run.reviewAgentId },
@@ -2417,72 +2484,79 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
        * 这条线只在「图已经冻结」时才落到改图逻辑上，与界面那句提示一致。
        */
       const noGraphYet = run.frozenAt === undefined;
+      if (planControls.has(runId)) {
+        return reply.code(409).send({ message: '草案正在提交，请稍后再补充。' });
+      }
+      if (noGraphYet) planControls.add(runId);
+      try {
+        /**
+         * 先 abort，再落事件。
+         *
+         * 顺序反过来就会多出一个窗口：中间那一次磁盘写虽然只有几毫秒，却也够
+         * 拆解把图冻出来——那就成了一次没有打断可言的「打断」，紧接着的重拆还会
+         * 把刚生成的图整个换掉。
+         */
+        interrupted?.controller.abort();
 
-      /**
-       * 先 abort，再落事件。
-       *
-       * 顺序反过来就会多出一个窗口：中间那一次磁盘写虽然只有几毫秒，却也够
-       * 拆解把图冻出来——那就成了一次没有打断可言的「打断」，紧接着的重拆还会
-       * 把刚生成的图整个换掉。
-       */
-      interrupted?.controller.abort();
+        await store.emit({
+          type: 'orchestrator.message',
+          at,
+          runId,
+          role: 'user',
+          text,
+          ...(interrupted ? { interrupt: true } : {}),
+        });
 
-      await store.emit({
-        type: 'orchestrator.message',
-        at,
-        runId,
-        role: 'user',
-        text,
-        ...(interrupted ? { interrupt: true } : {}),
-      });
+        // ---- 一、还没有图：这句话是「停下重来」 ----
+        if (noGraphYet) {
+          if (interrupted) {
+            // abort 之后必须等它让位：见 settleAbortedPlanning 的注释
+            await settleAbortedPlanning(runId, interrupted);
+          }
 
-      // ---- 一、还没有图：这句话是「停下重来」 ----
-      if (noGraphYet) {
-        if (interrupted) {
-          // abort 之后必须等它让位：见 settleAbortedPlanning 的注释
-          await settleAbortedPlanning(runId, interrupted);
-        }
+          const planningRoot = run.workspaceRoot || defaultWorkspaceRoot;
+          if (!planningRoot) {
+            // 旧日志没记目标目录：猜一个目录继续跑，等于替用户决定成果落在哪
+            const replyText =
+              '这个运行没有记录目标目录，我没法重新拆解。请新建一个运行并选定目录。';
+            await replyToConversation(runId, replyText);
+            return reply.code(409).send({
+              error: 'workspace_missing',
+              message: replyText,
+              reply: replyText,
+              applied: [],
+              rejected: [],
+              run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
+            });
+          }
 
-        const planningRoot = run.workspaceRoot || defaultWorkspaceRoot;
-        if (!planningRoot) {
-          // 旧日志没记目标目录：猜一个目录继续跑，等于替用户决定成果落在哪
-          const replyText =
-            '这个运行没有记录目标目录，我没法重新拆解。请新建一个运行并选定目录。';
+          startPlanning(runId, {
+            goal: currentPlanningGoal(run),
+            requestedAgentId: run.plannerAgentId,
+            workspaceRoot: planningRoot,
+            roles: {
+              implementAgentId: run.implementAgentId,
+              reviewAgentId: run.reviewAgentId,
+            },
+          });
+
+          // 两种结局都算「重来」，但对人要说清是打断了在跑的活，还是接着上一次失败
+          const replyText = interrupted
+            ? '已打断正在进行的拆解，并按你这条要求重新拆解。新的任务图会随事件出现在运行详情里。'
+            : '已将你的补充要求并入原目标。重新拆解的结果会出现在运行详情里。';
           await replyToConversation(runId, replyText);
-          return reply.code(409).send({
-            error: 'workspace_missing',
-            message: replyText,
+          return {
+            ok: true,
+            // 界面据此说「这次是打断了拆解」，而不是「改了一下图」
+            interrupted: Boolean(interrupted),
             reply: replyText,
             applied: [],
             rejected: [],
             run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
-          });
+          };
         }
-
-        startPlanning(runId, {
-          goal: replanGoal(run.goal, text),
-          requestedAgentId: run.plannerAgentId,
-          workspaceRoot: planningRoot,
-          roles: {
-            implementAgentId: run.implementAgentId,
-            reviewAgentId: run.reviewAgentId,
-          },
-        });
-
-        // 两种结局都算「重来」，但对人要说清是打断了在跑的活，还是接着上一次失败
-        const replyText = interrupted
-          ? '已打断正在进行的拆解，并按你这条要求重新拆解。新的任务图会随事件出现在运行详情里。'
-          : '上一次拆解没有交出任务图。我已经把你的要求并进原目标，重新拆解一遍，结果会随事件出现在运行详情里。';
-        await replyToConversation(runId, replyText);
-        return {
-          ok: true,
-          // 界面据此说「这次是打断了拆解」，而不是「改了一下图」
-          interrupted: Boolean(interrupted),
-          reply: replyText,
-          applied: [],
-          rejected: [],
-          run: deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent),
-        };
+      } finally {
+        if (noGraphYet) planControls.delete(runId);
       }
 
       // ---- 二、图已经冻结：这句话是对那张图的修改指令 ----
@@ -2568,7 +2642,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         });
       }
 
-      const plan = diffDag(currentDag, amended.dag, current);
+      const latest = store.snapshot.runs[runId] ?? current;
+      const plan = diffDag(dagFromFacts(latest), amended.dag, latest);
 
       if (plan.applied.length > 0) {
         await store.emit({
@@ -2580,6 +2655,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           reason: text,
           changes: plan.applied,
         });
+        await writePlan(runId, dagFromFacts(store.snapshot.runs[runId]!)).catch(
+          (error: unknown) => log.warn('无法更新任务图备份', error),
+        );
         // 图变了就继续跑：新加/改过的节点应当在下一批被派发出去。
         // 但 `advance` 内部会复用已有链路，所以这里 fire-and-forget 是安全的。
         void advance(runId);

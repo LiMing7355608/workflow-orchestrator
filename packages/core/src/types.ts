@@ -130,6 +130,9 @@ export interface RunFacts {
    * 重新拆解（`plan.started`）会清掉它。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
   plannerAgentId?: string;
   implementAgentId?: string;
   reviewAgentId?: string;
@@ -277,6 +280,7 @@ export type OrchestratorEvent =
   | (BaseEvent & { type: 'spec.updated' })
   | (BaseEvent & { type: 'blackboard.updated' })
   | (BaseEvent & { type: 'agent.activity' })
+  | (BaseEvent & { type: 'meeting.updated' })
   | (BaseEvent & {
       /**
        * 图已冻结，进入执行阶段。
@@ -290,6 +294,7 @@ export type OrchestratorEvent =
        */
       type: 'run.frozen';
       nodes?: NodeFacts[];
+      actor?: string;
     })
   | (BaseEvent & {
       /**
@@ -314,6 +319,8 @@ export type OrchestratorEvent =
       message: string;
       issues?: PlanIssue[];
     })
+  | (BaseEvent & { type: 'plan.checking'; agentId: string })
+  | (BaseEvent & { type: 'plan.drafted'; revision: string })
   | (BaseEvent & { type: 'run.paused' })
   | (BaseEvent & { type: 'run.resumed' })
   | (BaseEvent & { type: 'run.completed' })
@@ -552,6 +559,9 @@ export interface RunView {
    * 会改；而「这个运行为什么没有图」是结构化的结论，界面要拿它渲染失败态。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
   /** 已完成节点占比，读时算 */
   progress: number;
   nodeCount: number;

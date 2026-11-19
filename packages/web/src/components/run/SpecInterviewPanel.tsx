@@ -1,15 +1,16 @@
 import { Check, Loader2, MessageSquare } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { InterviewView } from '../../types/operations';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 
 export function SpecInterviewPanel({
-  session, busy, canStart, locating, onStart, onAnswer, onReset,
+  session, busy, canStart, locating, settings, onStart, onAnswer, onReset,
 }: {
   session: InterviewView | null;
   busy: boolean;
   locating: boolean;
+  settings: ReactNode;
   canStart: boolean;
   onStart: () => void;
   onAnswer: (answer?: string) => Promise<boolean>;
@@ -26,7 +27,7 @@ export function SpecInterviewPanel({
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
         <MessageSquare className="h-4 w-4 text-accent" strokeWidth={1.8} />
         <h2 className="text-[13px] font-semibold text-ink">设计规格 Agent</h2>
-        {session && <span className="text-[11px] text-muted">{session.agentId}</span>}
+        {session && <span className="text-[11px] text-muted">{session.agentId} · {session.model ?? '客户端默认模型'}</span>}
         {locating && (
           <Button className="ml-auto" variant="ghost" size="sm" onClick={onReset} disabled={busy || session?.status === 'thinking'}>
             重新开始
@@ -38,6 +39,7 @@ export function SpecInterviewPanel({
           locating ? <p role="status" className="text-[12px] text-muted">正在恢复访谈记录…</p> : (
             <>
               <p className="text-[12px] leading-5 text-muted">写下一句产品想法并选好目标目录。Agent 每轮提问并给出建议，答完再生成可以确认的规格。</p>
+              {settings}
               <Button disabled={!canStart || busy} onClick={onStart}>
                 {busy ? '正在启动…' : '开始规格访谈'}
               </Button>

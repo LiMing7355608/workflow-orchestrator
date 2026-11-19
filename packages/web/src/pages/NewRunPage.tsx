@@ -19,12 +19,13 @@ import {
   type DragEvent,
 } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { AgentModelField } from '../components/agents/AgentModelField';
 import { SpecInterviewPanel } from '../components/run/SpecInterviewPanel';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Field } from '../components/ui/Field';
 import { Segmented } from '../components/ui/Segmented';
-import { createRun, fetchAgents, fetchInterview, fetchRuntime, pickDirectory, startInterview, submitInterviewAnswer } from '../lib/api';
+import { createRun, fetchAgents, fetchMeeting, fetchInterview, fetchRuntime, pickDirectory, startInterview, submitInterviewAnswer } from '../lib/api';
 import { cn } from '../lib/cn';
 import { formatFileSize } from '../lib/format';
 import { useApiResource } from '../lib/use-api';
@@ -178,13 +179,17 @@ export function NewRunPage() {
   const [mode, setMode] = useState<'interview' | 'direct'>('interview');
   const [interview, setInterview] = useState<InterviewView | null>(null);
   const [interviewBusy, setInterviewBusy] = useState(false);
+  const [chosenDesigner, setDesignAgentId] = useState('');
+  const [designModel, setDesignModel] = useState('');
   const [params, setParams] = useSearchParams();
   const interviewId = params.get('spec');
   const interviewRoot = params.get('project');
   const navigate = useNavigate();
+  const fromMeeting = params.get('meeting');
   const [granularity, setGranularity] = useState<Granularity>('medium');
   const [parallelism, setParallelism] = useState<Parallelism>('4');
   const [reviewRounds, setReviewRounds] = useState<ReviewRounds>('2');
+  const [reviewPlan, setReviewPlan] = useState(true);
 
   // 三个角色的 Agent 在这里就定下来，而不是等 Planner 自己挑
   const [chosenPlanner, setPlannerAgentId] = useState('');
@@ -199,6 +204,18 @@ export function NewRunPage() {
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   /** 原生目录选择框正在弹（它会阻塞到用户点确定或取消） */
   const [picking, setPicking] = useState(false);
+
+  useEffect(() => {
+    if (!fromMeeting) return;
+    const controller = new AbortController();
+    void fetchMeeting(fromMeeting, controller.signal).then((room) => {
+      if (!room?.report || controller.signal.aborted) return;
+      setMode('direct');
+      setText((previous) => previous || room.report || '');
+      setWorkspaceRoot(room.workspaceRoot);
+    });
+    return () => controller.abort();
+  }, [fromMeeting]);
 
   const watchInterview = Boolean(interviewId && interviewRoot && (
     interview?.id !== interviewId || interview.status === 'thinking'
@@ -255,6 +272,8 @@ export function NewRunPage() {
   const selectedAgent = (chosen: string, fallback?: string) =>
     usableAgents.some((agent) => agent.id === chosen) ? chosen : fallback ?? '';
   const plannerAgentId = selectedAgent(chosenPlanner, primary);
+  const designerId = selectedAgent(chosenDesigner, primary);
+  const designer = usableAgents.find((agent) => agent.id === designerId);
   const implementAgentId = selectedAgent(chosenImplementer, primary);
   const reviewerDefault = usableAgents.find((agent) => agent.id !== implementAgentId)?.id
     ?? implementAgentId;
@@ -352,11 +371,11 @@ export function NewRunPage() {
   }
 
   async function beginInterview() {
-    if (interviewBusy || !plannerAgentId || workspaceRootError || !text.trim()) return;
+    if (interviewBusy || !designerId || workspaceRootError || !text.trim()) return;
     setInterviewBusy(true);
     setSubmitError(null);
     try {
-      const session = await startInterview(text.trim(), trimmedWorkspaceRoot, plannerAgentId);
+      const session = await startInterview(text.trim(), trimmedWorkspaceRoot, designerId, designModel.trim() || undefined);
       setInterview(session);
       setWorkspaceRoot(session.workspaceRoot);
       setParams({ spec: session.id, project: session.workspaceRoot }, { replace: true });
@@ -410,6 +429,7 @@ export function NewRunPage() {
       // 目录必须随创建请求带走：运行一旦建好，目标仓库就是它的事实了
       workspaceRoot: finalSpec ? interview!.workspaceRoot : trimmedWorkspaceRoot,
       specId: finalSpec ? interview!.id : undefined,
+      reviewPlan,
       specSettings: finalSpec ? { granularity, reviewRounds: Number(reviewRounds) } : undefined,
       // 并行度是这次运行的属性，不是服务的属性
       concurrency: Number(parallelism),
@@ -586,7 +606,18 @@ export function NewRunPage() {
             session={interview}
             locating={Boolean(interviewId)}
             busy={interviewBusy}
-            canStart={Boolean(text.trim() && plannerAgentId && !workspaceRootError)}
+            canStart={Boolean(text.trim() && designerId && !workspaceRootError)}
+            settings={<div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1.5 text-[12px] font-medium text-muted">
+                <span>设计 Agent</span>
+                <select value={designerId} onChange={(event) => { setDesignAgentId(event.target.value); setDesignModel(''); }}
+                  disabled={interviewBusy} className="block h-9 w-full rounded-lg border border-line bg-surface px-2.5 text-ink">
+                  {!designerId && <option value="">暂无可用 Agent</option>}
+                  {usableAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.label}</option>)}
+                </select>
+              </label>
+              <AgentModelField agent={designer} value={designModel} onChange={setDesignModel} disabled={interviewBusy} label="规格模型" />
+            </div>}
             onStart={() => void beginInterview()}
             onAnswer={answerInterview}
             onReset={resetInterview}
@@ -751,6 +782,10 @@ export function NewRunPage() {
               </Field>
             </div>
 
+            <label className="flex items-start gap-2 rounded-lg border border-line bg-surface mt-3 px-3 py-2.5 text-[12px] text-ink">
+              <input className="mt-0.5 size-3.5 accent-accent" type="checkbox" checked={reviewPlan} onChange={(event) => setReviewPlan(event.target.checked)} />
+              <span><strong className="font-medium">先核对任务草案</strong><span className="mt-0.5 block text-[10px] text-muted">交叉核对后，由你确认是否派发。</span></span>
+            </label>
             {(mode === 'direct' || finalSpec) && <Button
               className="mt-4 w-full"
               disabled={!canSubmit || submitting || interviewBusy || Boolean(workspaceRootError)}

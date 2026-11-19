@@ -576,7 +576,7 @@ export class ClaudeSdkRunner implements AgentRunner {
    */
   private buildOptions(request: AgentRunRequest, slot: SdkSlot, resume?: string): Options {
     const permissionMode = resolvePermissionMode(request.policy, request.argv);
-    const model = argValue(request.argv, '--model');
+    const model = request.model ?? argValue(request.argv, '--model');
     const allowed = argValue(request.argv, '--allowedTools');
 
     const options: Options = {

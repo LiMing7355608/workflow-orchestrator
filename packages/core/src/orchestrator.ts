@@ -21,6 +21,8 @@ import type {
 } from './types.js';
 
 export interface AdvanceDeps {
+  /** Allow a pending human amendment to settle before issuing another batch. */
+  waitBeforeDispatch?: (runId: string) => Promise<void> | undefined;
   getRun(runId: string): RunFacts | undefined;
   emit(event: OrchestratorEvent): Promise<void>;
   runner: AgentRunner;
@@ -1149,6 +1151,11 @@ export async function advanceRun(
     // 这里只拦「还要不要派发」：上一批已经发出去的 executeNode 仍会跑到结算，
     // 并按 runner 的结局各自落 node.interrupted（而不是 node.failed）。那些
     // 事件会把节点重新交回就绪集合，这正是「继续」能接着跑的前提。
+    let pendingAmendment = deps.waitBeforeDispatch?.(runId);
+    while (pendingAmendment && !deps.signal?.aborted) {
+      await pendingAmendment;
+      pendingAmendment = deps.waitBeforeDispatch?.(runId);
+    }
     if (deps.signal?.aborted) {
       return { executed, stopped: 'cancelled' };
     }
