@@ -20,11 +20,13 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
   stat,
 } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type { OrchestratorEvent } from '@orchestrator/core';
 import { silentLog, type LogSink } from './log.js';
+import { assertRunId, ownedPath, readOptional, writeAtomic } from './project-files.js';
 
 export interface JournalOptions {
   /** 根目录，每个 run 一个子目录 */
@@ -188,6 +190,26 @@ export class EventJournal {
       }
     }
     return grouped;
+  }
+
+  async removeRun(runId: string): Promise<void> {
+    assertRunId(runId);
+    await this.enqueue(runId, async () => {
+      const directory = await ownedPath(this.rootDir, runId);
+      await rm(directory, { recursive: true, force: true });
+      this.shardBytes.delete(runId);
+      this.archiveSequence.delete(runId);
+    });
+
+    // Old installations kept every run in one JSONL file. Preserve other runs
+    // and serialize this read-modify-write across simultaneous deletions.
+    await this.enqueue('', async () => {
+      const path = await ownedPath(this.rootDir, ACTIVE_SHARD);
+      const raw = await readOptional(path);
+      if (raw === undefined) return;
+      const filtered = raw.split('\n').filter((line) => parseLine(line)?.runId !== runId).join('\n');
+      if (filtered !== raw) await writeAtomic(path, filtered);
+    });
   }
 
   /** 某个 run 已用的分片列表（从旧到新），用于诊断。归档与当前分片都在内。 */

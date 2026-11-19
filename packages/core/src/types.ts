@@ -273,6 +273,10 @@ export interface BaseEvent {
 
 export type OrchestratorEvent =
   | (BaseEvent & { type: 'run.created'; run: RunFacts })
+  | (BaseEvent & { type: 'run.deleted' })
+  | (BaseEvent & { type: 'spec.updated' })
+  | (BaseEvent & { type: 'blackboard.updated' })
+  | (BaseEvent & { type: 'agent.activity' })
   | (BaseEvent & {
       /**
        * 图已冻结，进入执行阶段。

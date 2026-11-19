@@ -1,5 +1,6 @@
 import { buildAgentArgv, type AgentProfile } from './agents.js';
 import type {
+  AgentRunResult,
   AgentRunner,
   MergeResult,
   NodeArtifact,
@@ -65,6 +66,10 @@ export interface AdvanceDeps {
    * 读回某节点上次落盘的 diff 文本，供审查提示词使用
    */
   loadArtifact?: (runId: string, nodeId: string) => Promise<string | undefined>;
+  memory?: {
+    context(runId: string, nodeId: string, agentId: string): Promise<string | undefined>;
+    remember(runId: string, nodeId: string, agentId: string, result: AgentRunResult, text: string): Promise<void>;
+  };
   /**
    * 中止信号。
    *
@@ -360,6 +365,14 @@ async function buildPrompt(
     for (const item of upstream) {
       lines.push(`- ${item.title}（${item.id}）`);
     }
+  }
+
+  if (node.agentId && deps.memory) {
+    const context = await deps.memory.context(run.id, node.id, node.agentId).catch((error: unknown) => {
+      deps.log?.('读取协作记忆失败', error);
+      return undefined;
+    });
+    if (context) lines.push('', '## 协作记忆', context);
   }
 
   if (node.type === 'review') {
@@ -832,7 +845,15 @@ async function executeNode(
   const relay = createAgentEventRelay(deps, { runId, nodeId: node.id, agentId: agent.id });
 
   let reviewOutput = '';
+  let memoryText = '';
+  let finalMemoryText = '';
   const forward = (events: ReturnType<typeof parser.push>): void => {
+    if (deps.memory) {
+      for (const event of events) {
+        if (event.kind === 'text' && event.text) memoryText = (memoryText + event.text).slice(-8000);
+        if (event.kind === 'result' && event.text) finalMemoryText = event.text.slice(-8000);
+      }
+    }
     if (node.type === 'review') {
       for (const event of events) {
         if (event.kind === 'text' || event.kind === 'result') {
@@ -879,6 +900,10 @@ async function executeNode(
     }
     return;
   }
+
+  await deps.memory?.remember(runId, node.id, agent.id, result, [memoryText, finalMemoryText].join('\n').slice(-8000).trim()).catch((error: unknown) => {
+    deps.log?.('保存协作记忆失败', error);
+  });
   if (!result.ok) {
     // 被用户停下 ≠ 执行失败，两者必须落成不同的事件。
     //

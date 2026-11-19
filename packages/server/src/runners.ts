@@ -594,6 +594,37 @@ export class MockAgentRunner implements AgentRunner {
     // 所以整条命令都要看，不能只查 stdin
     const haystack = `${request.stdin ?? ''} ${request.argv.join(' ')}`;
 
+    const specMarker = 'WORKFLOW_SPEC_INTERVIEW_JSON';
+    const specPrompt = request.stdin || request.argv.find((arg) => arg.startsWith(specMarker));
+    if (specPrompt?.startsWith(specMarker)) {
+      await delay(160);
+      if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');
+      const input = JSON.parse(specPrompt.split('\n').at(-1)!) as {
+        idea: string;
+        rounds: Array<{ answer?: string }>;
+        revisions?: string[];
+      };
+      const response = input.rounds.some((round) => round.answer)
+        ? {
+            status: 'ready',
+            spec: '# ' + input.idea.split('\n')[0] + '\n\n## 产品目标\n' + input.idea +
+              '\n\n## 范围与验收\n' + input.rounds.map((round) => round.answer).filter(Boolean).join('\n') +
+              '\n落实首期主要操作，并用输入、操作与预期结果描述验收示例。' +
+              (input.revisions?.length ? '\n\n## 追加要求\n' + input.revisions.join('\n') : ''),
+          }
+        : {
+            status: 'question',
+            questions: [{
+              title: '首期范围',
+              question: '首期是否先覆盖一种目标用户和一个完整的使用场景？',
+              recommendation: '按建议缩小范围，并说明谁来用、通过什么操作完成什么目标。',
+            }],
+          };
+      const output = JSON.stringify(response);
+      onChunk(output);
+      return { ok: true, exitCode: 0, output };
+    }
+
     // 改图必须先于规划判定：两条链路共用「写文件交付」的约定，
     // 但交付内容与判定标准完全不同，混在一个分支里迟早会互相污染。
     if (haystack.includes(PLANNER_AMEND_MARKER)) {

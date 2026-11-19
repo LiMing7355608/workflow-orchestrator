@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '../../lib/cn';
+import { useDataSource } from '../../lib/data-source';
 import { Avatar } from '../ui/Avatar';
 import { buttonStyles } from '../ui/Button';
 
@@ -27,6 +28,7 @@ const navItems: NavItem[] = [
 
 export function Sidebar() {
   const location = useLocation();
+  const live = useDataSource((state) => state.live);
 
   function isActive(item: NavItem) {
     if (item.to === '/') {
@@ -119,8 +121,8 @@ export function Sidebar() {
             </div>
           </div>
           <div className="mt-2.5 flex items-center gap-1.5 max-[1100px]:hidden">
-            <span className="h-1.5 w-1.5 rounded-full bg-warning" />
-            <span className="text-[10px] text-muted">当前为演示数据</span>
+            <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-success' : 'bg-warning')} />
+            <span className="text-[10px] text-muted">{live ? '已连接本地服务' : '当前为演示数据'}</span>
           </div>
         </div>
       </div>

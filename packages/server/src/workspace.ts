@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, rmdirSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -9,6 +9,7 @@ import type {
   NodeArtifact,
   WorkspacePort,
 } from '@orchestrator/core';
+import { assertRunId, isMissing, ownedPath } from './project-files.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,6 +83,57 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     private readonly repoRoot: string,
     private readonly worktreeRoot: string,
   ) {}
+
+  async removeRun(runId: string): Promise<void> {
+    assertRunId(runId);
+    const directory = await ownedPath(this.worktreeRoot, runId);
+    const listed = await this.gitValue(['worktree', 'list', '--porcelain']);
+    const worktrees = listed.trim().split(/\r?\n\r?\n/).map((record) => ({
+      path: record.split(/\r?\n/)[0]?.slice('worktree '.length),
+      branch: record.match(/^branch (.+)$/m)?.[1]?.trim(),
+    }));
+    const names = await readdir(directory).catch((error: unknown) => {
+      if (isMissing(error)) return [];
+      throw error;
+    });
+    const owned = new Set(await Promise.all(names.map(async (name) => resolve(await ownedPath(this.worktreeRoot, runId, name)))));
+    const checkedOutElsewhere = new Set<string>();
+    for (const entry of worktrees) {
+      if (entry.path && owned.has(resolve(entry.path))) {
+        await this.gitValue(['worktree', 'remove', '--force', entry.path]);
+      } else if (entry.branch) {
+        checkedOutElsewhere.add(entry.branch);
+      }
+    }
+    const integration = `refs/heads/run/${runId}`;
+    const nodePrefix = `refs/heads/node/${runId}/`;
+    const parents = ['node-base', 'published', 'run-base', 'integration'].map(
+      (kind) => `refs/orchestrator/${kind}/${runId}`,
+    );
+    const references = (await this.gitValue([
+      'for-each-ref', '--format=%(refname)', integration, nodePrefix, ...parents,
+    ])).split(/\r?\n/).filter(Boolean);
+    for (const ref of references) {
+      if (checkedOutElsewhere.has(ref)) continue;
+      if (ref === integration || ref.startsWith(nodePrefix)) {
+        const baseline = ref === integration
+          ? `refs/orchestrator/integration/${runId}/commit`
+          : this.publishedRef(runId, ref.slice(nodePrefix.length));
+        const recorded = await this.commitAt(baseline);
+        const current = await this.commitAt(ref);
+        if (current && (!recorded || current === recorded)) {
+          // Compare the old SHA so an intervening change never gets removed.
+          await this.gitValue(['update-ref', '-d', ref, current]);
+        }
+      }
+    }
+    for (const ref of references) {
+      if (parents.some((parent) => ref === parent || ref.startsWith(parent + '/'))) {
+        await this.gitValue(['update-ref', '-d', ref]);
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 
   private branchOf(runId: string, nodeId: string): string {
     return `node/${runId}/${nodeId}`;
@@ -247,7 +299,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   }
 
   async prepare(runId: string, nodeId: string, upstreamIds?: string[]): Promise<string> {
-    const dir = this.dirOf(runId, nodeId);
+    const dir = await ownedPath(this.worktreeRoot, runId, nodeId);
     const branch = this.branchOf(runId, nodeId);
     const base = upstreamIds ? await this.dependencyBase(runId, upstreamIds) : 'HEAD';
     const ref = this.baseRef(runId, nodeId);
@@ -403,7 +455,7 @@ export class GitWorktreeWorkspace implements WorkspacePort {
    * 工程的 git 里，编排器自己的仓库只该有 main。
    */
   async release(runId: string, nodeId: string): Promise<void> {
-    const dir = this.dirOf(runId, nodeId);
+    const dir = await ownedPath(this.worktreeRoot, runId, nodeId);
     if (!existsSync(dir)) {
       return;
     }
@@ -630,8 +682,13 @@ export class GitWorktreeWorkspace implements WorkspacePort {
 export class TempDirWorkspace implements WorkspacePort {
   constructor(private readonly root: string) {}
 
+  async removeRun(runId: string): Promise<void> {
+    assertRunId(runId);
+    await rm(await ownedPath(this.root, runId), { recursive: true, force: true });
+  }
+
   async prepare(runId: string, nodeId: string): Promise<string> {
-    const dir = resolve(this.root, runId, nodeId);
+    const dir = await ownedPath(this.root, runId, nodeId);
     await mkdir(dir, { recursive: true });
     return dir;
   }
@@ -644,7 +701,7 @@ export class TempDirWorkspace implements WorkspacePort {
    * 之前就已采集落盘，删目录不会丢东西。
    */
   async release(runId: string, nodeId: string): Promise<void> {
-    await rm(resolve(this.root, runId, nodeId), {
+    await rm(await ownedPath(this.root, runId, nodeId), {
       recursive: true,
       force: true,
     }).catch(() => {});

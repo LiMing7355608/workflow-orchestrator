@@ -1,4 +1,5 @@
 import type { AgentProfile } from '../types/agent';
+import type { ActivityView, BlackboardView, InterviewView } from '../types/operations';
 import type {
   AmendmentRejection,
   ConversationEntry,
@@ -17,6 +18,52 @@ import { getActor } from './identity';
  */
 
 const API_BASE = '';
+
+async function operation<T>(path: string, method: 'GET' | 'POST' | 'DELETE', body?: unknown): Promise<T> {
+  const response = await fetch(API_BASE + path, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      'X-Actor': encodeURIComponent(getActor()),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => null) as (T & { message?: string }) | null;
+  if (!response.ok || !data) throw new Error(data?.message ?? '操作失败，请检查本地服务后重试。');
+  return data;
+}
+
+export function startInterview(idea: string, workspaceRoot: string, agentId: string) {
+  return operation<InterviewView>('/api/specs', 'POST', { idea, workspaceRoot, agentId });
+}
+
+export function fetchInterview(workspaceRoot: string, id: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ workspaceRoot });
+  return requestJson<InterviewView>('/api/specs/' + encodeURIComponent(id) + '?' + query, { signal });
+}
+
+export function submitInterviewAnswer(session: InterviewView, answer?: string) {
+  return operation<InterviewView>('/api/specs/' + encodeURIComponent(session.id) + '/answer', 'POST', {
+    workspaceRoot: session.workspaceRoot, revision: session.revision, answer,
+  });
+}
+
+export function deleteRun(id: string) {
+  return operation<{ ok: boolean }>('/api/runs/' + encodeURIComponent(id), 'DELETE');
+}
+
+export function fetchBlackboard(id: string) {
+  return requestJson<BlackboardView>('/api/runs/' + encodeURIComponent(id) + '/blackboard');
+}
+
+export function postBlackboard(id: string, text: string) {
+  return operation<BlackboardView['entries'][number]>('/api/runs/' + encodeURIComponent(id) + '/blackboard', 'POST', { text });
+}
+
+export function fetchAgentActivity() {
+  return requestJson<ActivityView>('/api/agents/activity');
+}
 
 async function requestJson<T>(
   path: string,
@@ -58,6 +105,8 @@ export function fetchRunDetail(
 export interface CreateRunInput {
   title: string;
   goal: string;
+  specId?: string;
+  specSettings?: { granularity: 'coarse' | 'medium' | 'fine'; reviewRounds: number };
   /** 省略时由 Planner 现生成；给出则跳过规划直接冻结 */
   dag?: unknown;
   /**

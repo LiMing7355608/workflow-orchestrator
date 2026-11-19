@@ -29,6 +29,18 @@
 
 每个 package 内部统一为 `src/`（源码）+ `test/`（单元测试）。
 
+## 从想法到任务图
+
+- 在「新建运行」选「需求访谈」，填一句产品想法和目标目录。设计 Agent 沿决策依赖逐轮提问，每题带建议。答复后可以检查规格、补充修订，再点「确认规格并开始拆解」。已有明确规格时可以选「直接使用规格」。访谈方式参考 [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md) 调用的 [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)。
+- 进入运行详情右侧的「协作黑板」查看或发布项目决定。实现和审查 Agent 在开始执行时取得最近的共享消息和自己的续跑摘要，可以用 `BLACKBOARD:` 在最终答复中分享决定、问题或结果。续跑摘要按运行、Agent 工具和节点分开。
+- 「Agent 管理」显示当前执行的调用、任务简介、所属运行及按时间绘制的泳道。回放模式会标明数据来源。运行列表可删除不用的记录。仍有调用或调度在进行时，停止后再删除。
+
+新建运行的数据位于目标工程的 `.workflow-orchestrator/`。目录由 Git 本地忽略规则排除。
+
+- `runs/<运行 ID>/` 下有访谈记录、确认规格 `spec.md`、任务图 `plan.json`、事件日志、节点 diff 和 `memory/`。合并成功后可从协作黑板下载 `output.zip`。
+- `worktrees/<运行 ID>/` 下是实际执行目录和集成工作区。显式配置的 `AGENT_WORKTREE_DIR` 有优先级。
+- 应用的数据根保存运行位置索引，早期版本的旧日志仍可读取。删除运行会清理本轮创建的文件和工作区，并保留已并入正式分支的代码和在其他工作区签出的分支。
+
 ## 技术栈
 
 | 层 | 选型 |
