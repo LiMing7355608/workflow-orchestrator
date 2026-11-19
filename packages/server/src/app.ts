@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -26,6 +26,7 @@ import {
   nodeInFlightKey,
   runNode,
   reworkTarget,
+  reduce,
   type AdvanceDeps,
   type AgentProfile,
   type AgentRunner,
@@ -46,6 +47,7 @@ import {
   type Dag,
 } from '@orchestrator/planner';
 import { ArtifactStore } from './artifacts.js';
+import { attachment, deliveryFile, saveIntegratedDelivery, saveTaskDelivery } from './deliveries.js';
 import { registerMeetingRoutes } from './meeting-routes.js';
 import { Meetings } from './meetings.js';
 import { AgentActivity } from './agent-activity.js';
@@ -132,6 +134,7 @@ const createRunBodySchema = z.object({
   goal: z.string().min(1),
   specId: runIdSchema.optional(),
   reviewPlan: z.boolean().optional(),
+  requireDeliverables: z.boolean().optional(),
   specSettings: z.object({
     granularity: z.enum(['coarse', 'medium', 'fine']),
     reviewRounds: z.number().int().min(1).max(3),
@@ -381,6 +384,8 @@ function toNodeFacts(dag: Dag): NodeFacts[] {
     description: node.description,
     dependsOn: node.dependsOn,
     files: node.files,
+    deliverables: node.deliverables,
+    acceptance: node.acceptance,
     agentId: node.agentId,
     executor: node.executor,
     // 动作必须随事实一起冻结：编排器执行 route 节点时读的是 NodeFacts
@@ -865,21 +870,6 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     if (root) await writeAtomic(await projectRunPath(root, runId, 'plan.json'), JSON.stringify(dag, null, 2) + '\n');
   }
 
-  async function archiveOutput(event: Extract<OrchestratorEvent, { type: 'node.merged' }>) {
-    const root = store.projectWorkspace(event.runId);
-    if (!root) return;
-    const filename = await projectRunPath(root, event.runId, 'output.zip');
-    const temporary = await projectRunPath(root, event.runId, `output-${randomUUID()}.tmp`);
-    try {
-      await execFileAsync('git', ['archive', '--format=zip', '-o', temporary, `refs/heads/${event.branch}`], {
-        cwd: root, windowsHide: true, timeout: 120_000,
-      });
-      await rename(temporary, filename);
-    } finally {
-      await rm(temporary, { force: true });
-    }
-  }
-
   /**
    * 一条推进链路：能够被中止，且能被人等待完成。
    *
@@ -917,11 +907,23 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   function buildAdvanceDeps(signal?: AbortSignal): AdvanceDeps {
     return {
       getRun: (id) => store.snapshot.runs[id],
-      emit: async (event) => {
-        if (event.type === 'node.merged') {
-          await archiveOutput(event).catch((error: unknown) => log.warn('集成分支已生成，导出 ZIP 失败', error));
+      emit: (event) => store.emit(event),
+      saveTaskFiles: async (run, node, cwd, commit) => {
+        const root = store.projectWorkspace(run.id);
+        if (!root || !node.deliverables?.length) return undefined;
+        return saveTaskDelivery({ root, runId: run.id, nodeId: node.id, cwd, commit, deliverables: node.deliverables });
+      },
+      exportDelivery: async (run, _node, result) => {
+        const root = store.projectWorkspace(run.id);
+        if (!root) return undefined;
+        const commit = result.commit ?? (await execFileAsync('git', ['rev-parse', '--verify', `refs/heads/${result.branch}`], {
+          cwd: root, windowsHide: true, timeout: 30_000,
+        })).stdout.trim();
+        const planned = new Map<string, NonNullable<NodeFacts['deliverables']>[number]>();
+        for (const id of result.merged) {
+          for (const item of run.nodes[id]?.deliverables ?? []) planned.set(item.path, item);
         }
-        await store.emit(event);
+        return saveIntegratedDelivery(root, run.id, commit, planned.values());
       },
       runner,
       // 按运行取：同一个运行里所有节点共用一个目标仓库，不同运行之间不共用
@@ -1107,7 +1109,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           workspace: planningWorkspace(runId, workspaceAt(request.workspaceRoot, Boolean(store.projectWorkspace(runId)))),
           onEvents: relay.forward,
         },
-        { agentId: requestedAgentId, runId, signal },
+        { agentId: requestedAgentId, runId, signal, requireDeliverables: store.snapshot.runs[runId]?.requireDeliverables },
       ).finally(relay.flush);
 
       // 角色覆盖要在校验之前：校验看的是最终 agentId，不是 Planner 猜的那个
@@ -1117,7 +1119,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       // 冻结前的最后一道闸。覆盖可能把 agentId 换成目录里不存在的值，
       // 那样的图必须在这里被拦下——冻结之后再发现，只能靠画布上一个个
       // 节点报错，而不是一句「这张图不能用」。
-      const validation = validateDag(dag, catalog);
+      const validation = validateDag(dag, catalog, { requireDeliverables: store.snapshot.runs[runId]?.requireDeliverables });
       if (!validation.ok) {
         throw new DagGenerationError(
           '角色覆盖之后这张图不再合法',
@@ -1212,6 +1214,21 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     return draft ?? reply.code(404).send({ message: '草案尚未就绪。' });
   });
 
+  app.get<{ Params: { id: string; name: string } }>('/api/runs/:id/plan-files/:name', async (request, reply) => {
+    const { id, name } = request.params;
+    const run = store.snapshot.runs[id];
+    const root = run && store.projectWorkspace(id);
+    if (!root || !(name === 'spec.md' || name === 'plan.json' ||
+        name === 'plan-draft.json' && (run.planDraft || run.frozenAt))) {
+      return reply.code(404).send({ message: '规划文件尚未写入。' });
+    }
+    const path = await projectRunPath(root, id, name);
+    if (!existsSync(path)) return reply.code(404).send({ message: '规划文件尚未写入。' });
+    return reply.type(name.endsWith('.json') ? 'application/json' : 'text/markdown; charset=utf-8')
+      .header('X-Content-Type-Options', 'nosniff').header('Content-Disposition', attachment(name))
+      .send(createReadStream(path));
+  });
+
   app.post<{ Params: { id: string } }>('/api/runs/:id/plan-review/approve', async (request, reply) => {
     const runId = request.params.id;
     const revision = z.object({ revision: z.string().uuid() }).safeParse(request.body);
@@ -1226,7 +1243,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       const draft = await readPlanDraft(run);
       if (!draft) return reply.code(409).send({ message: '草案文件已更新，请刷新。' });
       const checked = safeParseDag(draft.dag);
-      if (!checked.success || !validateDag(checked.data, catalog).ok) {
+      if (!checked.success || !validateDag(checked.data, catalog, { requireDeliverables: run.requireDeliverables }).ok) {
         return reply.code(422).send({ message: '草案或 Agent 配置已变化，请重新核对。' });
       }
       const actor = resolveActor(request.headers);
@@ -1479,8 +1496,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     if (!Object.hasOwn(store.snapshot.runs, id)) return reply.code(404).send({ error: 'run_not_found' });
     const workspaceRoot = store.projectWorkspace(id);
     const directory = workspaceRoot ? await projectRunPath(workspaceRoot, id) : null;
-    const output = workspaceRoot ? await projectRunPath(workspaceRoot, id, 'output.zip') : undefined;
-    return { directory, hasOutput: Boolean(output && existsSync(output)), entries: await memory.board(id) };
+    return { directory, hasOutput: Boolean(await runArchive(id)), entries: await memory.board(id) };
   });
 
   app.post<{ Params: { id: string } }>('/api/runs/:id/blackboard', async (request, reply) => {
@@ -1494,17 +1510,47 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     return post ?? reply.code(409).send({ message: '这条旧运行没有项目目录内的协作黑板。' });
   });
 
+  async function runArchive(id: string) {
+    const run = store.snapshot.runs[id];
+    const root = run && store.projectWorkspace(id);
+    if (!root) return undefined;
+    const merge = Object.values(run.nodes).filter((node) =>
+      node.action === 'merge' && node.finishedAt && !node.failureReason && node.mergedBranch,
+    ).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!))[0];
+    if (!merge) return undefined;
+    const path = merge.delivery
+      ? await projectRunPath(root, id, 'output', merge.delivery.revision + '.zip')
+      : await projectRunPath(root, id, 'output.zip');
+    return existsSync(path) ? path : undefined;
+  }
+
   app.get<{ Params: { id: string } }>('/api/runs/:id/output', async (request, reply) => {
     const { id } = request.params;
-    const root = store.snapshot.runs[id] && store.projectWorkspace(id);
-    if (!root) return reply.code(404).send({ error: 'output_not_found' });
-    const path = await projectRunPath(root, id, 'output.zip');
-    if (!existsSync(path)) return reply.code(404).send({ error: 'output_not_found' });
+    const path = await runArchive(id);
+    if (!path) return reply.code(404).send({ error: 'output_not_found' });
     return reply
       .type('application/zip')
       .header('Content-Disposition', 'attachment; filename="' + id + '.zip"')
       .send(createReadStream(path));
   });
+
+  app.get<{ Params: { id: string; nodeId: string }; Querystring: { path?: string; revision?: string } }>(
+    '/api/runs/:id/nodes/:nodeId/file', async (request, reply) => {
+      const { id, nodeId } = request.params;
+      const run = store.snapshot.runs[id];
+      const root = run && store.projectWorkspace(id);
+      const node = run && Object.hasOwn(run.nodes, nodeId) ? run.nodes[nodeId] : undefined;
+      const current = node?.delivery;
+      const { path, revision } = request.query;
+      if (!root || !node || !current || typeof path !== 'string' || revision !== current.revision) {
+        return reply.code(404).send({ message: '没有找到本次落盘的文件。' });
+      }
+      const file = await deliveryFile(root, id, nodeId, path, current, node.action === 'merge');
+      return file ? reply.type('application/octet-stream').header('X-Content-Type-Options', 'nosniff')
+        .header('Content-Disposition', attachment(file)).send(createReadStream(file))
+        : reply.code(404).send({ message: '文件已经移走或不存在。' });
+    },
+  );
 
   app.get<{ Params: { id: string } }>('/api/runs/:id', async (request, reply) => {
     const run = store.snapshot.runs[request.params.id];
@@ -1621,7 +1667,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       });
 
       // 冻结前的最后一道闸：不合法就不许进执行阶段
-      const validation = validateDag(submittedDag, catalog);
+      const validation = validateDag(submittedDag, catalog, { requireDeliverables: body.data.requireDeliverables });
       if (!validation.ok) {
         return reply.code(422).send({ error: 'dag_rejected', issues: validation.issues });
       }
@@ -1656,7 +1702,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       const specification = spec?.spec ?? body.data.goal;
       const settings = body.data.specSettings;
       const granularity = settings ? { coarse: '粗', medium: '中', fine: '细' }[settings.granularity] : undefined;
-      const goal = spec && settings
+      const goal = settings
         ? specification + '\n\n编排设置：分解粒度 ' + granularity + '，并行上限 ' +
           (body.data.concurrency ?? 2) + '，审查轮次 ' + settings.reviewRounds + '。'
         : specification;
@@ -1672,6 +1718,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         ...(body.data.concurrency === undefined ? {} : { concurrency: body.data.concurrency }),
         specVersion: submittedDag?.specVersion ?? 'v1.0',
         ...(body.data.reviewPlan && !submittedDag ? { reviewPlan: true } : {}),
+        ...(body.data.requireDeliverables || body.data.reviewPlan && !submittedDag ? { requireDeliverables: true } : {}),
         plannerAgentId: body.data.plannerAgentId,
         implementAgentId: body.data.implementAgentId,
         reviewAgentId: body.data.reviewAgentId,
@@ -2644,17 +2691,20 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
       const latest = store.snapshot.runs[runId] ?? current;
       const plan = diffDag(dagFromFacts(latest), amended.dag, latest);
-
       if (plan.applied.length > 0) {
-        await store.emit({
-          type: 'dag.amended',
-          at: now(),
-          runId,
-          actor,
-          // 原文照存：排障要能回答「哪一句话导致了这次改图」
-          reason: text,
-          changes: plan.applied,
-        });
+        const amendment: OrchestratorEvent = {
+          type: 'dag.amended', at: now(), runId, actor, reason: text, changes: plan.applied,
+        };
+        if (latest.requireDeliverables) {
+          const candidate = reduce(store.snapshot, amendment).runs[runId]!;
+          const verification = validateDag(dagFromFacts(candidate), catalog, { requireDeliverables: true });
+          if (!verification.ok) {
+            const message = verification.issues.map((issue) => issue.message).slice(0, 4).join('。');
+            await replyToConversation(runId, message);
+            return reply.code(422).send({ message, reply: message, applied: [], rejected: plan.rejected });
+          }
+        }
+        await store.emit(amendment);
         await writePlan(runId, dagFromFacts(store.snapshot.runs[runId]!)).catch(
           (error: unknown) => log.warn('无法更新任务图备份', error),
         );

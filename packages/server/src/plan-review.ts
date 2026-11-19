@@ -51,7 +51,7 @@ export async function verifyPlan(input: {
     const prompt = [
       'WORKFLOW_PLAN_CHECK_JSON',
       '你负责对开发任务草案做独立核对，只审查，不改文件。按用户语言反馈。',
-      '核对需求覆盖、主流程、依赖、并行范围、验收可执行性和交付门禁。区分必改与建议，关联实际节点 ID。',
+      '核对需求覆盖、依赖、并行范围和门禁。检查 implement 的交付路径是否具体、是否符合改动边界，并逐项核对验收条件可执行性。区分必改与建议，关联实际节点 ID。',
       '对于输入缺少的信息，列出具体待确认事项。若发现漏掉的需求，写出规格对应内容和建议补充的任务。',
       '只返回 JSON 对象 {"summary":"简要结论","findings":[{"severity":"required 或 suggestion","text":"问题与具体修改建议","nodeIds":[]}]}。没有发现时 findings 为空。',
       isExcerpt ? '当前输入包含节录，只核对可见信息。' : '以下是待核对的规格和任务草案。',

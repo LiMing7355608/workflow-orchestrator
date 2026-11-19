@@ -57,6 +57,7 @@ export interface PlannerOptions {
   agentId?: string;
   /** Agent 产出不合格时最多重来几次 */
   maxAttempts?: number;
+  requireDeliverables?: boolean;
 }
 
 export interface GeneratedPlan {
@@ -180,6 +181,8 @@ function buildPlannerPrompt(
     '      "description": "要做什么、验收标准是什么",',
     '      "dependsOn": [],',
     '      "files": ["src/core/**"],',
+    '      "deliverables": [{"path":"src/core/index.ts","description":"核心流程入口"}],',
+    '      "acceptance": ["给定参考输入，运行主流程，输出符合示例"],',
     '      "agentId": "claude",',
     '      "maxAttempts": 3',
     '    }',
@@ -189,7 +192,9 @@ function buildPlannerPrompt(
     '## 分解方法',
     '- 先通读目标、界面流程、限制和验收条件，有既有工程时核实入口与已有模块。',
     '- 按业务主链拆分阶段。先确定共享接口或基础约定，再展开可并行的实施任务，最后串起集成、端到端验证和交付。',
-    '- 实现任务写清输入或依赖、改动边界、提交物、验收步骤。审查任务针对可验证行为和失败场景，明确覆盖哪些实现任务。',
+    '- 实现任务的 files 是允许改动的边界，deliverables 是实际要落盘的文件清单。每个交付项给具体相对路径与用途，不使用通配符。若要求删除文件，声明 kind: remove。',
+    '- 实现和审查节点各填 acceptance，写明可以重现的输入、操作与预期结果。审查任务覆盖主路径和与范围相关的失败场景。',
+    '- 所有实施任务都应能沿审查、审批或直接依赖关系追溯到最终交付节点。',
     '- 分解粒度按用户设置。同一责任且验收不可分的工作可以合并，审批和关键验证应能在图上定位。',
     '- 写图前逐项核对规格，关注漏项、交叉覆盖、无效并行、缺少验收和未验证的假设。不要为凑数量拆碎简单任务。',
     '',
@@ -481,7 +486,7 @@ export async function generateDag(
       continue;
     }
 
-    const validation = validateDag(parsed.data, catalog);
+    const validation = validateDag(parsed.data, catalog, { requireDeliverables: options.requireDeliverables });
     if (!validation.ok) {
       for (const issue of validation.issues) {
         const key = issueKey(issue);

@@ -2,10 +2,11 @@ import { cn } from '../../lib/cn';
 import { nodeTypeMeta } from '../../lib/workflow-meta';
 import { Segmented } from '../ui/Segmented';
 
-export type RunView = 'graph' | 'board' | 'events';
+export type RunView = 'graph' | 'board' | 'events' | 'plan';
 
 const viewOptions: Array<{ value: RunView; label: string }> = [
   { value: 'graph', label: '编排图' },
+  { value: 'plan', label: '任务拆解' },
   { value: 'board', label: '四泳道' },
   { value: 'events', label: '事件流' },
 ];
@@ -16,6 +17,7 @@ interface ViewBarProps {
   nodeCount: number;
   eventCount: number;
   planning?: boolean;
+  draft?: boolean;
 }
 
 export function ViewBar({
@@ -24,13 +26,14 @@ export function ViewBar({
   nodeCount,
   eventCount,
   planning = false,
+  draft = false,
 }: ViewBarProps) {
   return (
     <div className="flex h-10 shrink-0 items-center justify-between gap-4 border-b border-line bg-canvas px-6 max-[900px]:px-4">
       <div className="flex min-w-0 items-center gap-3">
         <Segmented
           options={planning
-            ? viewOptions.map((option) => ({ ...option, disabled: option.value !== 'events' }))
+            ? viewOptions.map((option) => ({ ...option, disabled: option.value !== 'events' && !(draft && option.value === 'plan') }))
             : viewOptions}
           value={value}
           onChange={onChange}

@@ -76,6 +76,19 @@ export interface WorkflowRunSummary {
   planDraft?: { revision: string; at: string };
 }
 
+export interface TaskDeliverable {
+  path: string;
+  description?: string;
+  kind?: 'file' | 'remove';
+}
+
+export interface SavedTaskFiles {
+  revision: string;
+  files: Array<{ path: string; bytes: number }>;
+  fileCount: number;
+  removed: string[];
+}
+
 export interface WorkflowNode {
   id: string;
   title: string;
@@ -88,6 +101,11 @@ export interface WorkflowNode {
   agentId?: string;
   dependsOn: string[];
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
+  startedAt?: string;
+  finishedAt?: string;
   attempts: number;
   durationMs?: number;
   /**

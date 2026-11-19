@@ -141,7 +141,7 @@ export interface WorkspacePort {
   /** 为节点准备独立工作目录，返回绝对路径。必须在 Agent 启动之前完成。 */
   prepare(runId: string, nodeId: string, upstreamIds?: string[]): Promise<string>;
   /** 提交节点改动并保留分支，供下游节点读取。 */
-  publish?(runId: string, nodeId: string): Promise<void>;
+  publish?(runId: string, nodeId: string): Promise<string | void>;
   /** 释放工作目录。清理失败不应让编排器崩溃。 */
   release(runId: string, nodeId: string): Promise<void>;
   /**

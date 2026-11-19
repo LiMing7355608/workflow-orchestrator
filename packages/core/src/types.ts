@@ -131,6 +131,7 @@ export interface RunFacts {
    */
   planFailure?: PlanFailure;
   reviewPlan?: boolean;
+  requireDeliverables?: boolean;
   planCheckingAt?: string;
   planDraft?: { revision: string; at: string };
   plannerAgentId?: string;
@@ -146,6 +147,19 @@ export interface RunFacts {
   amendments?: DagAmendment[];
 }
 
+export interface TaskDeliverable {
+  path: string;
+  description?: string;
+  kind?: 'file' | 'remove';
+}
+
+export interface SavedTaskFiles {
+  revision: string;
+  files: Array<{ path: string; bytes: number }>;
+  fileCount: number;
+  removed: string[];
+}
+
 /** 单个节点的持久事实。 */
 export interface NodeFacts {
   id: string;
@@ -155,6 +169,9 @@ export interface NodeFacts {
   dependsOn: string[];
   /** 独占文件范围，串并行安全的静态保障 */
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
   /** 执行该节点的 Agent；审批与路由节点为空 */
   agentId?: string;
   /** 人类审批人与编排器节点使用的展示名 */
@@ -325,7 +342,7 @@ export type OrchestratorEvent =
   | (BaseEvent & { type: 'run.resumed' })
   | (BaseEvent & { type: 'run.completed' })
   | (BaseEvent & { type: 'node.started'; nodeId: string })
-  | (BaseEvent & { type: 'node.completed'; nodeId: string })
+  | (BaseEvent & { type: 'node.completed'; nodeId: string; delivery?: SavedTaskFiles })
   | (BaseEvent & { type: 'node.failed'; nodeId: string; reason: string })
   | (BaseEvent & {
       /**
@@ -580,6 +597,11 @@ export interface NodeView {
   agentId?: string;
   dependsOn: string[];
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
+  startedAt?: string;
+  finishedAt?: string;
   attempts: number;
   durationMs?: number;
   escalated?: boolean;
