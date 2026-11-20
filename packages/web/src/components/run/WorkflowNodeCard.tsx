@@ -56,7 +56,7 @@ export function WorkflowNodeCard({ data, selected }: NodeProps<WorkflowFlowNode>
         </div>
         <p className={cn('break-words text-[13px] font-semibold leading-4 text-ink', compact && !expanded ? 'truncate' : 'line-clamp-2')}
           title={node.title}>{node.title}</p>
-        {(!compact || expanded) && <div className="flex items-center justify-between gap-2 text-[10px] text-muted">
+        {(!compact || expanded) && <div className="graph-secondary flex items-center justify-between gap-2 text-[10px] text-muted">
           <AgentChip agentId={node.agentId} label={node.type === 'route' ? '编排器' : node.agent} className="min-w-0" iconClassName="size-3" />
           {node.durationMs !== undefined && <span className="shrink-0 tabular-nums">{formatDuration(node.durationMs)}</span>}
         </div>}

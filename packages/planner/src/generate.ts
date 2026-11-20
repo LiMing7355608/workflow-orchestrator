@@ -141,6 +141,7 @@ function buildPlannerPrompt(
   goal: string,
   catalog: AgentProfile[],
   previousIssues: DagIssue[],
+  textOnly = false,
 ): string {
   const usable = usablePlannerAgents(catalog);
   const roster = usable
@@ -162,12 +163,14 @@ function buildPlannerPrompt(
     `可用 agentId 白名单：${usable.map((agent) => agent.id).join(', ') || '无'}`,
     '',
     '## 交付方式（这是硬要求）',
-    `把最终的任务图 JSON 写入当前工作目录下的 ${PLAN_FILENAME} 文件，用你的写文件工具完成。`,
-    '这是唯一的交付渠道。只在回复里贴 JSON 不算交付，编排器读不到就等于你没做。',
-    '写完之后可以再简短说明一句，但文件必须存在且内容是合法 JSON。',
+    ...(textOnly ? ['在回复中直接返回完整任务图 JSON。'] : [
+      `把最终的任务图 JSON 写入当前工作目录下的 ${PLAN_FILENAME} 文件，用你的写文件工具完成。`,
+      '写好文件后可附一句说明。',
+    ]),
     '',
     '## 输出要求',
-    '文件内容是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
+    '任务图是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
+    '- 实现节点只可选择具备工程工具的 Agent。HTTP 文本模型可以承担规划或文本审查。',
     '结构示例：',
     '{',
     '  "title": "短标题",',
@@ -228,7 +231,7 @@ function buildPlannerPrompt(
  * thinking），第一个配平对象是事件而不是答案。所以逐个扫描配平对象，
  * 只认带 `nodes` 数组的那个——这才是任务图。
  */
-function extractJsonObject(text: string): unknown {
+export function extractJsonObject(text: string): unknown {
   const candidates = [/(?:```(?:json)?\s*)([\s\S]*?)```/i.exec(text)?.[1], text]
     .filter((item): item is string => Boolean(item));
 
@@ -367,7 +370,7 @@ export async function generateDag(
     .slice(2, 8)}`;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const prompt = buildPlannerPrompt(goal, catalog, issues);
+    const prompt = buildPlannerPrompt(goal, catalog, issues, agent.transport === 'http-model');
     const nodeId = `attempt-${attempt}`;
     options.signal?.throwIfAborted();
 

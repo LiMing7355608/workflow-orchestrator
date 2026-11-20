@@ -48,8 +48,10 @@ import {
 } from '@orchestrator/planner';
 import { ArtifactStore } from './artifacts.js';
 import { attachment, deliveryFile, saveIntegratedDelivery, saveTaskDelivery } from './deliveries.js';
+import { HttpModelRunner, ModelProviders } from './model-providers.js';
+import { registerModelRoutes } from './model-routes.js';
 import { registerMeetingRoutes } from './meeting-routes.js';
-import { Meetings } from './meetings.js';
+import { MeetingError, Meetings } from './meetings.js';
 import { AgentActivity } from './agent-activity.js';
 import { buildAmendInstruction, buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
 import type { LockHandle } from './locks.js';
@@ -133,6 +135,7 @@ const createRunBodySchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
   specId: runIdSchema.optional(),
+  sourceMeetingId: runIdSchema.optional(),
   reviewPlan: z.boolean().optional(),
   requireDeliverables: z.boolean().optional(),
   specSettings: z.object({
@@ -441,11 +444,17 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   const runnerMode = process.env.AGENT_RUNNER ?? 'real';
   const workspaceMode = process.env.AGENT_WORKSPACE ?? 'git';
-  const loadCatalog = async (): Promise<AgentProfile[]> =>
+  const modelProviders = new ModelProviders(dirname(resolve(options.logPath)));
+  await modelProviders.load();
+  const loadCatalog = (): Promise<AgentProfile[]> =>
     runnerMode === 'mock' && !options.catalog
-      ? baseline.map((agent) => ({ ...agent, availability: 'ready' }))
+      ? Promise.resolve(baseline.map((agent) => ({ ...agent, availability: 'ready' })))
       : probeCatalog(baseline, log);
-  let catalog = await loadCatalog();
+  let builtinCatalog = await loadCatalog();
+  let catalog = [...builtinCatalog, ...modelProviders.profiles()];
+  registerModelRoutes(app, modelProviders, dirname(resolve(options.logPath)), () => catalog, () => {
+    catalog = [...builtinCatalog, ...modelProviders.profiles()];
+  });
 
   const resolveAgent = (agentId: string | undefined): string | undefined =>
     findAgent(agentId, catalog)?.label;
@@ -503,6 +512,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       ? new RoutingAgentRunner(transportResolver(() => catalog), {
           registry: options.registry,
           log,
+          http: new HttpModelRunner(modelProviders),
         })
       : new MockAgentRunner(workspaceMode === 'git'));
   const activity = new AgentActivity(
@@ -513,7 +523,6 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   const meetings = new Meetings(dirname(resolve(options.logPath)), baseRunner, () => catalog,
     (runId) => store.bus.publish({ type: 'meeting.updated', runId, at: now() }));
   await meetings.load();
-  registerMeetingRoutes(app, meetings, resolveActor);
   app.addHook('onClose', () => meetings.close());
 
   // 默认 git：只有真 git worktree 才产得出 diff，审查节点也才有东西可审。
@@ -610,7 +619,16 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     (root) => workspaceAt(root, true),
     (id) => findAgent(id, catalog),
     (runId) => store.bus.publish({ type: 'spec.updated', runId, at: now() }),
+    dirname(resolve(options.logPath)),
   );
+  await interviews.load();
+  const knownProjects = new Set(Object.values(store.snapshot.runs).map((run) => run.workspaceRoot).filter(Boolean));
+  if (defaultWorkspaceRoot) knownProjects.add(defaultWorkspaceRoot);
+  await Promise.allSettled([...knownProjects].map((root) => interviews.discover(root)));
+  registerMeetingRoutes(app, meetings, resolveActor, (id) => interviews.rootOf(id), (room) =>
+    room.sourceSpecId && store.snapshot.runs[room.sourceSpecId] ? room.sourceSpecId
+      : Object.values(store.snapshot.runs).filter((run) => run.sourceMeetingId === room.id)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.id);
   const handingOff = new Set<string>();
 
   /**
@@ -1325,14 +1343,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   app.get('/api/agents', async () => catalog);
 
-  app.get('/api/agents/activity', async () => {
+  app.get<{ Querystring: { runId?: string; summary?: string } }>('/api/agents/activity', async (request) => {
     const intervals = [...activity.entries, ...interviews.activity, ...meetings.activity]
-      .filter((entry) => entry.agentId !== 'orchestrator')
+      .filter((entry) => entry.agentId !== 'orchestrator' && (!request.query.runId || entry.runId === request.query.runId))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     return {
       mode: runnerMode,
       active: intervals.filter((entry) => entry.status === 'running').length,
-      intervals: intervals.map((entry) => ({ ...entry, agentLabel: resolveAgent(entry.agentId) ?? entry.agentId })),
+      intervals: request.query.summary === 'true' ? [] : intervals.map((entry) => ({ ...entry, agentLabel: resolveAgent(entry.agentId) ?? entry.agentId })),
     };
   });
 
@@ -1365,11 +1383,13 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     return reply.code(201).send(await interviews.start(checked.root, body.data.idea, agent.id, body.data.model));
   });
 
+  app.get('/api/specs', async () => interviews.list().filter(({ id }) => !store.snapshot.runs[id]));
   app.get<{ Params: { id: string }; Querystring: { workspaceRoot?: string } }>('/api/specs/:id', async (request, reply) => {
-    const root = specRoot.safeParse(request.query.workspaceRoot);
     const id = runIdSchema.safeParse(request.params.id);
-    if (!root.success || !id.success) return reply.code(400).send({ message: '访谈编号或目标目录无效。' });
-    const session = await interviews.read(resolve(root.data), id.data);
+    if (!id.success) return reply.code(400).send({ message: '访谈编号无效。' });
+    const root = specRoot.safeParse(interviews.rootOf(id.data) ?? request.query.workspaceRoot);
+    if (!root.success) return reply.code(404).send({ message: '找不到访谈目录。' });
+    const session = await interviews.recover(resolve(root.data), id.data);
     return session ?? reply.code(404).send({ message: '未找到这次规格访谈。' });
   });
 
@@ -1389,6 +1409,31 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       throw error;
     } finally {
       handingOff.delete(id.data);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/specs/:id/adopt-meeting', async (request, reply) => {
+    const { id } = request.params;
+    const input = z.object({ meetingId: runIdSchema, revision: z.number().int().nonnegative() }).safeParse(request.body);
+    const root = interviews.rootOf(id);
+    if (!root || !input.success) return reply.code(400).send({ message: '访谈或会议编号无效。' });
+    if (handingOff.has(id) || store.snapshot.runs[id]) {
+      return reply.code(409).send({ message: '该规格已交给 PM。' });
+    }
+    handingOff.add(id);
+    try {
+      const room = meetings.get(input.data.meetingId);
+      if (room.workspaceRoot !== root || room.sourceSpecId !== id || room.status !== 'complete' || room.reportStale || !room.report) {
+        return reply.code(422).send({ message: '请选择当前访谈关联的、已汇总的会议方案。' });
+      }
+      const session = await interviews.adopt(root, id, input.data.revision, { id: room.id, title: room.title, report: room.report, at: room.updatedAt });
+      return session ?? reply.code(404).send({ message: '访谈已移走。' });
+    } catch (error) {
+      if (error instanceof InterviewConflict) return reply.code(409).send({ message: error.message });
+      if (error instanceof MeetingError) return reply.code(error.code).send({ message: error.message });
+      throw error;
+    } finally {
+      handingOff.delete(id);
     }
   });
 
@@ -1415,7 +1460,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   app.post('/api/agents/probe', async () => {
     // 始终基于基线重新探测：拿上一次探测结果当输入会把 ready 磨成 installed
-    catalog = await loadCatalog();
+    builtinCatalog = await loadCatalog();
+    catalog = [...builtinCatalog, ...modelProviders.profiles()];
     return catalog;
   });
 
@@ -1678,6 +1724,21 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       return reply.code(400).send({ error: checked.code, message: checked.message });
     }
     const workspaceRoot = checked.root;
+    const implementer = findAgent(body.data.implementAgentId, catalog);
+    if (implementer?.transport === 'http-model') {
+      return reply.code(422).send({ message: '实现角色需要具备工程工具的 Agent。' });
+    }
+    if (body.data.sourceMeetingId) {
+      try {
+        const room = meetings.get(body.data.sourceMeetingId);
+        if (room.workspaceRoot !== workspaceRoot || room.status !== 'complete' || room.reportStale || !room.report) {
+          return reply.code(422).send({ message: '请先确认同一项目目录下的会议方案。' });
+        }
+      } catch (error) {
+        if (error instanceof MeetingError) return reply.code(error.code).send({ message: error.message });
+        throw error;
+      }
+    }
 
     if (body.data.specId && submittedDag) {
       return reply.code(400).send({ message: '规格访谈需要交给 PM 拆解，不能同时指定任务图。' });
@@ -1715,6 +1776,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         summary: summarizeGoal(goal, title) || submittedDag?.summary || '未命名运行',
         goal,
         workspaceRoot,
+        sourceMeetingId: body.data.sourceMeetingId,
         ...(body.data.concurrency === undefined ? {} : { concurrency: body.data.concurrency }),
         specVersion: submittedDag?.specVersion ?? 'v1.0',
         ...(body.data.reviewPlan && !submittedDag ? { reviewPlan: true } : {}),

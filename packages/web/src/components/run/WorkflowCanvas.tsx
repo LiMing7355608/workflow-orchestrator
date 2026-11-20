@@ -139,65 +139,62 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
     };
   }), [edges, byId, selected, onlyRelated]);
 
-  return <section className={cn('workflow-canvas relative h-full min-h-0 w-full overflow-hidden', fullscreen && 'fixed inset-0 z-40 !h-screen')}
-    aria-label="编排图">
-    <ReactFlow<WorkflowFlowNode, DependencyEdge>
-      nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-      onNodeClick={(_, node) => toggle(node.id)}
-      onNodeDoubleClick={(_, node) => onInspectNode(node.id)}
-      onKeyDown={(event) => {
-        if (event.target instanceof HTMLElement && event.target.closest('button, input, select, textarea')) return;
-        if (event.key === 'Enter' && selected) toggle(selected);
-      }}
-      onPaneClick={() => { setSelected(null); setExpanded(null); setOnlyRelated(false); }}
-      fitView fitViewOptions={fitted} minZoom={0.12} maxZoom={1.7}
-      nodesDraggable={false} nodesConnectable={false} elementsSelectable
-      proOptions={{ hideAttribution: true }}
-      onlyRenderVisibleElements={run.nodes.length > 80}
-    >
-      <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#ced9e5" />
-      <Panel position="top-left" className="!m-3 max-w-[calc(100%-1.5rem)]">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-line bg-surface/95 px-3 py-2 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold text-ink">
-            <Activity className={cn('size-4', active ? 'text-accent' : 'text-muted')} aria-hidden="true" />
-            {running.length ? running.length + ' 个执行中' : waiting.length ? waiting.length + ' 个待审批' : completed === run.nodes.length ? '已完成' : '运行状态'}
+  return <section className={cn('workflow-canvas relative flex h-full min-h-0 w-full flex-col overflow-hidden', fullscreen && 'fixed inset-0 z-40 !h-screen')}
+    data-detail={zoom < 0.5 ? 'minimal' : 'normal'} aria-label="编排图">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 shrink-0 border-b border-line bg-surface px-3 py-2">
+      <div className="flex items-center gap-2 text-xs font-semibold text-ink">
+        <Activity className={cn('size-4', active ? 'text-accent' : 'text-muted')} aria-hidden="true" />
+        {running.length ? running.length + ' 个执行中' : waiting.length ? waiting.length + ' 个待审批' : completed === run.nodes.length ? '已完成' : '运行状态'}
+      </div>
+      <span className="text-[11px] tabular-nums text-muted">{completed} / {run.nodes.length} 个已完成</span>
+      {run.updatedAt && <time dateTime={run.updatedAt} title={formatDateTime(run.updatedAt)} className="font-mono text-[10px] tabular-nums text-muted">更新 {formatClock(run.updatedAt)}</time>}
+      {active && <Button variant="ghost" size="sm" className="h-6 px-1.5 text-accent" onClick={() => { if (shownIds && !shownIds.has(active.id)) { setOnlyRelated(false); setSelected(active.id); fit(); } else locate(active.id); }}>
+        <Focus className="size-3.5" />定位{running.length ? '运行中' : '待审批'}节点
+      </Button>}
+    </div>
+    <div className="relative min-h-0 min-w-0 flex-1">
+      <ReactFlow<WorkflowFlowNode, DependencyEdge>
+        nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+        onNodeClick={(_, node) => toggle(node.id)}
+        onNodeDoubleClick={(_, node) => onInspectNode(node.id)}
+        onKeyDown={(event) => {
+          if (event.target instanceof HTMLElement && event.target.closest('button, input, select, textarea')) return;
+          if (event.key === 'Enter' && selected) toggle(selected);
+        }}
+        onPaneClick={() => { setSelected(null); setExpanded(null); setOnlyRelated(false); }}
+        fitView fitViewOptions={fitted} minZoom={0.12} maxZoom={1.7}
+        nodesDraggable={false} nodesConnectable={false} elementsSelectable
+        proOptions={{ hideAttribution: true }}
+        onlyRenderVisibleElements={run.nodes.length > 80}
+      >
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#ced9e5" />
+        {run.nodes.length > 12 && !current && <MiniMap<WorkflowFlowNode> position="bottom-right" pannable zoomable
+          nodeColor={(node) => nodeStatusMeta[displayNodeStatus(node.data.node)].color}
+          className="workflow-minimap !m-3 !h-[96px] !w-[140px] overflow-hidden rounded-lg border border-line !bg-surface/90" />}
+        {current && <Panel position="bottom-right" className="workflow-selected-overlay !m-3 max-w-[37%]">
+          <div className="min-w-0 rounded-xl border border-line bg-surface/95 px-3 py-2 shadow-sm">
+            <p className="flex items-center gap-1.5 text-xs font-semibold text-ink">
+              <span className="min-w-0 flex-1 truncate" title={current.title}>{current.title}</span>
+              <Button size="icon" variant="ghost" className="size-6 shrink-0" aria-label="清除节点选择" onClick={() => { setSelected(null); setExpanded(null); setOnlyRelated(false); }}><X className="size-3.5" /></Button>
+            </p>
+            <NodeTimes node={current} />
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              <Button size="sm" variant="ghost" aria-pressed={onlyRelated} onClick={() => { setOnlyRelated(!onlyRelated); fit(); }}>{onlyRelated ? '完整图' : '聚焦依赖链'}</Button>
+              <Button size="sm" variant="secondary" onClick={() => onInspectNode(current.id)}>节点详情<ChevronRight className="size-3" /></Button>
+            </div>
           </div>
-          <span className="text-[11px] tabular-nums text-muted">{completed} / {run.nodes.length} 个已完成</span>
-          {run.updatedAt && <time dateTime={run.updatedAt} title={formatDateTime(run.updatedAt)} className="font-mono text-[10px] tabular-nums text-muted">更新 {formatClock(run.updatedAt)}</time>}
-          {active && <Button variant="ghost" size="sm" className="h-6 px-1.5 text-accent" onClick={() => { if (shownIds && !shownIds.has(active.id)) { setOnlyRelated(false); setSelected(active.id); fit(); } else locate(active.id); }}>
-            <Focus className="size-3.5" />定位{running.length ? '运行中' : '待审批'}节点
-          </Button>}
-        </div>
-      </Panel>
-
-      <Panel position="bottom-left" className="!m-3 max-w-[calc(100%-1.5rem)]">
-        <div className="flex flex-wrap items-center gap-1 rounded-xl border border-line bg-surface/95 p-1 shadow-sm">
-          <Button size="icon" variant="ghost" aria-label="缩小编排图" title="缩小" onClick={() => void zoomOut({ duration: 120 })}><Minus className="size-4" /></Button>
-          <span className="w-10 text-center font-mono text-[11px] tabular-nums text-muted" aria-label="画布缩放比例">{Math.round(zoom * 100)}%</span>
-          <Button size="icon" variant="ghost" aria-label="放大编排图" title="放大" onClick={() => void zoomIn({ duration: 120 })}><Plus className="size-4" /></Button>
-          <Button size="icon" variant="ghost" aria-label="适应画布" title="适应画布" onClick={fit}><Expand className="size-4" /></Button>
-          <Button size="sm" variant="ghost" aria-pressed={compact} onClick={() => { setCompact(!compact); fit(); }}>{compact ? '标准卡片' : '紧凑卡片'}</Button>
-          <Button size="icon" variant="ghost" aria-label={fullscreen ? '退出全屏编排图' : '全屏编排图'} title={fullscreen ? '退出全屏' : '全屏查看'} onClick={() => { setFullscreen(!fullscreen); fit(); }}>
-            {fullscreen ? <Shrink className="size-4" /> : <Maximize2 className="size-4" />}
-          </Button>
-        </div>
-      </Panel>
-      {run.nodes.length > 12 && !current && <MiniMap<WorkflowFlowNode> position="bottom-right" pannable zoomable
-        nodeColor={(node) => nodeStatusMeta[displayNodeStatus(node.data.node)].color}
-        className="!m-3 !h-[96px] !w-[140px] overflow-hidden rounded-lg border border-line !bg-surface/90" />}
-      {current && <Panel position="bottom-right" className="!m-3 hidden max-w-[34%] min-[1240px]:block">
-        <div className="min-w-0 rounded-xl border border-line bg-surface/95 px-3 py-2 shadow-sm">
-          <p className="flex items-center gap-1.5 text-xs font-semibold text-ink">
-            <span className="min-w-0 flex-1 truncate" title={current.title}>{current.title}</span>
-            <Button size="icon" variant="ghost" className="size-6 shrink-0" aria-label="清除节点选择" onClick={() => { setSelected(null); setExpanded(null); setOnlyRelated(false); }}><X className="size-3.5" /></Button>
-          </p>
-          <NodeTimes node={current} />
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            <Button size="sm" variant="ghost" aria-pressed={onlyRelated} onClick={() => { setOnlyRelated(!onlyRelated); fit(); }}>{onlyRelated ? '完整图' : '聚焦依赖链'}</Button>
-            <Button size="sm" variant="secondary" onClick={() => onInspectNode(current.id)}>节点详情<ChevronRight className="size-3" /></Button>
-          </div>
-        </div>
-      </Panel>}
-    </ReactFlow>
+        </Panel>}
+      </ReactFlow>
+    </div>
+    <div className="flex flex-wrap items-center gap-1 shrink-0 border-t border-line bg-surface px-2 py-1">
+      <Button size="icon" variant="ghost" aria-label="缩小编排图" title="缩小" onClick={() => void zoomOut({ duration: 120 })}><Minus className="size-4" /></Button>
+      <span className="w-10 text-center font-mono text-[11px] tabular-nums text-muted" aria-label="画布缩放比例">{Math.round(zoom * 100)}%</span>
+      <Button size="icon" variant="ghost" aria-label="放大编排图" title="放大" onClick={() => void zoomIn({ duration: 120 })}><Plus className="size-4" /></Button>
+      <Button size="icon" variant="ghost" aria-label="适应画布" title="适应画布" onClick={fit}><Expand className="size-4" /></Button>
+      <Button size="sm" variant="ghost" aria-pressed={compact} onClick={() => { setCompact(!compact); fit(); }}>{compact ? '标准卡片' : '紧凑卡片'}</Button>
+      <Button size="icon" variant="ghost" aria-label={fullscreen ? '退出全屏编排图' : '全屏编排图'} title={fullscreen ? '退出全屏' : '全屏查看'} onClick={() => { setFullscreen(!fullscreen); fit(); }}>
+        {fullscreen ? <Shrink className="size-4" /> : <Maximize2 className="size-4" />}
+      </Button>
+    </div>
   </section>;
 }

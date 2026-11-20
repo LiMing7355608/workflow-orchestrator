@@ -100,6 +100,7 @@ export interface RunFacts {
    * 默认根目录，见 packages/server/src/app.ts 的 workspaceFor。
    */
   workspaceRoot: string;
+  sourceMeetingId?: string;
   /**
    * 这个运行允许同时跑几个节点。
    *

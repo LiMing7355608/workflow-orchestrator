@@ -82,3 +82,69 @@ it('分配和修改角色，保留并行调用与人工发言，重启后可读�
     await rm(directory, { recursive: true, force: true });
   }
 }, 15_000);
+
+it('重新进入页面或重启后可恢复规格，关联会议与其主持决议后交给 PM', async () => {
+  vi.stubEnv('AGENT_RUNNER', 'mock');
+  vi.stubEnv('AGENT_WORKSPACE', 'temp');
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'workflow-interview-resume-')));
+  const logPath = join(directory, 'runtime', 'events.jsonl');
+  const mock = new MockAgentRunner();
+  const prompts: string[] = [];
+  const runner: AgentRunner = {
+    async run(request, onChunk) {
+      const text = prompt(request);
+      prompts.push(text);
+      if (text.includes('"meetingDecisions":[{')) {
+        const output = JSON.stringify({ status: 'ready', spec: '# 会议确认后的设计规格\n\n交付一页离线课程表。使用合成课程数据，用户可按星期筛选，并在刷新后保留筛选条件。' });
+        onChunk(output);
+        return { ok: true, output, exitCode: 0 };
+      }
+      return mock.run(request, onChunk);
+    },
+  };
+  let ctx: AppContext | undefined;
+  try {
+    ctx = await buildApp({ logPath, logger: false, runner });
+    const appFor = () => ctx!.app;
+    const read = async (url: string) => (await appFor().inject(url)).json();
+    const post = (url: string, payload?: object) => appFor().inject({ method: 'POST', url, payload });
+    const created = await post('/api/specs', { idea: '想要一个简单的学校课程表', agentId: 'codex', workspaceRoot: directory });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+    expect((await read('/api/specs'))[0]).toMatchObject({ id, status: 'thinking' });
+    const specUrl = '/api/specs/' + id;
+    await vi.waitFor(async () => expect((await read(specUrl)).status).toBe('question'));
+    const first = await read(specUrl);
+
+    await appFor().close();
+    ctx = await buildApp({ logPath, logger: false, runner });
+    expect(await read(specUrl)).toMatchObject({ id, rounds: first.rounds, status: 'question' });
+    const host = { agentId: 'codex' };
+    const meeting = await post('/api/meetings', {
+      title: '课程表范围评审', agenda: '确认离线展示及筛选验收', workspaceRoot: directory, sourceSpecId: id,
+      mode: 'manual', host, roundControl: 'host', rounds: 4,
+      roles: [{ ...host, name: '验收', responsibility: '核对用户流程', prompt: '' }],
+    });
+    expect(meeting.statusCode).toBe(201);
+    const roomUrl = '/api/meetings/' + meeting.json().id;
+    expect((await read('/api/meetings?specId=' + id))[0].id).toBe(meeting.json().id);
+    expect((await post(roomUrl + '/discuss')).statusCode).toBe(200);
+    await vi.waitFor(async () => expect((await read(roomUrl)).status).toBe('complete'), { timeout: 5000 });
+    const room = await read(roomUrl);
+    expect(room.round).toBe(1);
+    expect(room.messages.map((entry: { kind: string }) => entry.kind)).toEqual(['agent', 'host']);
+
+    expect((await post(specUrl + '/adopt-meeting', { meetingId: room.id, revision: first.revision })).statusCode).toBe(200);
+    await vi.waitFor(async () => expect((await read(specUrl)).status).toBe('ready'));
+    const ready = await read(specUrl);
+    expect(ready.meetings[0]).toMatchObject({ id: room.id, report: room.report });
+    expect(prompts.some((text) => text.includes('"meetingDecisions":[{') && text.includes('课程表范围评审'))).toBe(true);
+    const run = await post('/api/runs', { specId: id, title: '课程表', goal: '交接规格', workspaceRoot: directory, reviewPlan: true });
+    expect(run.statusCode).toBe(201);
+    expect((await read(roomUrl)).linkedRunId).toBe(id);
+    expect(await read('/api/specs')).not.toContainEqual(expect.objectContaining({ id }));
+  } finally {
+    await ctx?.app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);

@@ -20,13 +20,18 @@ const settingsSchema = z.object({
   host: actorSchema,
   roles: z.array(roleSchema).max(8),
   rounds: z.number().int().min(1).max(4),
+  roundControl: z.enum(['manual', 'host']).default('manual'),
 });
-export const createMeetingSchema = settingsSchema.extend({ workspaceRoot: z.string().trim().refine(isAbsolute) });
+export const createMeetingSchema = settingsSchema.extend({ workspaceRoot: z.string().trim().refine(isAbsolute), sourceSpecId: idSchema.optional() });
 export const updateMeetingSchema = settingsSchema.extend({ revision: z.number().int().nonnegative() });
 export const meetingNoteSchema = z.object({ text: z.string().trim().min(1).max(4000) });
 
 const rosterSchema = z.object({ roles: z.array(roleSchema.omit({ model: true })).min(2).max(6) });
 const contributionSchema = z.object({ text: z.string().trim().min(1).max(6500) });
+const moderationSchema = z.object({
+  action: z.enum(['continue', 'summarize', 'ask_human']),
+  feedback: z.string().trim().min(1).max(1800),
+});
 const reportSchema = z.object({ markdown: z.string().trim().min(32).max(20_000) });
 
 type Settings = z.infer<typeof settingsSchema>;
@@ -53,7 +58,7 @@ export interface MeetingTurn {
 interface Message {
   id: string;
   at: string;
-  kind: 'human' | 'agent';
+  kind: 'human' | 'agent' | 'host';
   author: string;
   text: string;
   round?: number;
@@ -64,6 +69,7 @@ interface Message {
 interface Meeting extends Settings {
   id: string;
   workspaceRoot: string;
+  sourceSpecId?: string;
   revision: number;
   status: Status;
   round: number;
@@ -124,8 +130,8 @@ export class Meetings {
     }));
   }
 
-  list() {
-    return [...this.meetings.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  list(specId?: string) {
+    return [...this.meetings.values()].filter((room) => !specId || room.sourceSpecId === specId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map(({ id, title, status, updatedAt, round }) => ({ id, title, status, updatedAt, round }));
   }
 
@@ -160,6 +166,7 @@ export class Meetings {
     await this.persist(room);
     await writeAtomic(await ownedPath(this.dataRoot, 'meetings', id + '.json'), JSON.stringify({ root }) + '\n');
     this.meetings.set(id, room);
+    this.notify(id);
     return room;
   }
 
@@ -259,7 +266,7 @@ export class Meetings {
   private async execute(room: Meeting, action: MeetingAction, signal: AbortSignal): Promise<void> {
     try {
       if (action === 'organize') { await this.organize(room, signal); return; }
-      if (action === 'discuss') await this.discuss(room, signal);
+      if (action === 'discuss' && !await this.discuss(room, signal)) return;
       await this.summarize(room.id, signal);
     } catch (error) {
       await this.update(room.id, (draft) => {
@@ -299,12 +306,12 @@ export class Meetings {
     return {
       instructions: room.messages.filter((entry) => entry.kind === 'human').slice(-12)
         .map(({ author, text }) => ({ author, text })),
-      discussion: room.messages.filter((entry) => entry.kind === 'agent').slice(-16)
+      discussion: room.messages.filter((entry) => entry.kind !== 'human').slice(-20)
         .map(({ author, text, round }) => ({ author, text: text.slice(0, 2600), round })),
     };
   }
 
-  private async discuss(room: Meeting, signal: AbortSignal): Promise<void> {
+  private async discuss(room: Meeting, signal: AbortSignal): Promise<boolean> {
     for (let index = 0; index < room.rounds; index += 1) {
       signal.throwIfAborted();
       const current = await this.update(room.id, (draft) => { draft.round += 1; });
@@ -329,7 +336,27 @@ export class Meetings {
       signal.throwIfAborted();
       const failures = outcomes.filter((result) => result.status === 'rejected');
       if (failures.length === outcomes.length) throw new Error('本轮成员调用全部失败。' + (failures[0]?.reason as Error | undefined)?.message);
+      if (room.roundControl === 'host') {
+        const updated = this.get(room.id);
+        const limit = index + 1 === room.rounds;
+        const decision = await this.turn(updated, updated.host, '主持人', '评估讨论收敛度', '决定继续讨论、请求人工决策或汇总', [
+          'WORKFLOW_MEETING_MODERATE_JSON',
+          '根据本轮发言、失败的成员、人工指令和剩余轮次主持讨论。已形成可执行方案则 summarize，存在需要用户拍板的问题则 ask_human，否则 continue 并说明下一轮要讨论什么。',
+          '如果已到轮次上限而不需要人工决定，请汇总，并把未解决的分歧写进方案。',
+          '仅输出 JSON {"action":"continue|summarize|ask_human","feedback":"可直接发到群聊的简短主持意见"}。',
+          JSON.stringify({ agenda: updated.agenda, round: updated.round, limit, failed: failures.length, ...this.context(updated) }),
+        ].join('\n'), moderationSchema, signal);
+        await this.update(room.id, (draft) => {
+          signal.throwIfAborted();
+          draft.messages.push({ id: randomUUID(), at: draft.updatedAt, kind: 'host', author: '主持人',
+            text: decision.feedback, round: updated.round, agentId: updated.host.agentId, model: updated.host.model });
+          if (decision.action === 'ask_human') draft.status = 'paused';
+        });
+        if (decision.action === 'ask_human') return false;
+        if (decision.action === 'summarize') break;
+      }
     }
+    return true;
   }
 
   private async summarize(id: string, signal: AbortSignal): Promise<void> {

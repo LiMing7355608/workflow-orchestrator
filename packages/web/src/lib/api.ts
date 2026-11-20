@@ -1,5 +1,5 @@
-import type { AgentProfile } from '../types/agent';
-import type { ActivityView, BlackboardView, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView } from '../types/operations';
+import type { AgentProfile, ModelDirectory, ModelProvider, ModelProviderSettings } from '../types/agent';
+import type { ActivityView, BlackboardView, InterviewSummary, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView } from '../types/operations';
 import type {
   AmendmentRejection,
   ConversationEntry,
@@ -38,9 +38,19 @@ export function startInterview(idea: string, workspaceRoot: string, agentId: str
   return operation<InterviewView>('/api/specs', 'POST', { idea, workspaceRoot, agentId, model });
 }
 
-export function fetchInterview(workspaceRoot: string, id: string, signal?: AbortSignal) {
-  const query = new URLSearchParams({ workspaceRoot });
-  return requestJson<InterviewView>('/api/specs/' + encodeURIComponent(id) + '?' + query, { signal });
+export function fetchInterviews() {
+  return requestJson<InterviewSummary[]>('/api/specs');
+}
+
+export function fetchInterview(id: string, workspaceRoot?: string | null, signal?: AbortSignal) {
+  const query = workspaceRoot ? '?' + new URLSearchParams({ workspaceRoot }) : '';
+  return requestJson<InterviewView>('/api/specs/' + encodeURIComponent(id) + query, { signal });
+}
+
+export function adoptMeeting(session: InterviewView, meetingId: string) {
+  return operation<InterviewView>('/api/specs/' + encodeURIComponent(session.id) + '/adopt-meeting', 'POST', {
+    meetingId, revision: session.revision,
+  });
 }
 
 export function submitInterviewAnswer(session: InterviewView, answer?: string) {
@@ -69,15 +79,15 @@ export function confirmPlanDraft(id: string, revision: string) {
   return operation<{ ok: boolean }>('/api/runs/' + encodeURIComponent(id) + '/plan-review/approve', 'POST', { revision });
 }
 
-export function fetchMeetings(signal?: AbortSignal) {
-  return requestJson<MeetingSummary[]>('/api/meetings', { signal });
+export function fetchMeetings(signal?: AbortSignal, specId?: string) {
+  return requestJson<MeetingSummary[]>('/api/meetings' + (specId ? '?specId=' + encodeURIComponent(specId) : ''), { signal });
 }
 
 export function fetchMeeting(id: string, signal?: AbortSignal) {
   return requestJson<MeetingView>('/api/meetings/' + encodeURIComponent(id), { signal });
 }
 
-export function createMeeting(settings: MeetingSettings & { workspaceRoot: string }) {
+export function createMeeting(settings: MeetingSettings & { workspaceRoot: string; sourceSpecId?: string }) {
   return operation<MeetingView>('/api/meetings', 'POST', settings);
 }
 
@@ -89,12 +99,35 @@ export function meetingAction(id: string, action: 'organize' | 'discuss' | 'summ
   return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + '/' + action, 'POST');
 }
 
-export function sendMeetingNote(id: string, text: string) {
-  return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + '/note', 'POST', { text });
+export function sendMeetingNote(id: string, text: string, interrupt = false) {
+  return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + (interrupt ? '/interrupt' : '/note'), 'POST', { text });
 }
 
-export function fetchAgentActivity() {
-  return requestJson<ActivityView>('/api/agents/activity');
+export function fetchAgentActivity(runId?: string, summary = false) {
+  const params = new URLSearchParams();
+  if (runId) params.set('runId', runId);
+  if (summary) params.set('summary', 'true');
+  return requestJson<ActivityView>('/api/agents/activity?' + params);
+}
+
+export function fetchAgentModels(id: string, refresh = false) {
+  return operation<ModelDirectory>('/api/agents/' + encodeURIComponent(id) + '/models' + (refresh ? '?refresh=true' : ''), 'GET');
+}
+
+export function fetchModelProviders() {
+  return requestJson<ModelProvider[]>('/api/model-providers');
+}
+
+export function discoverModelProvider(settings: ModelProviderSettings) {
+  return operation<ModelDirectory>('/api/model-providers/discover', 'POST', settings);
+}
+
+export function saveModelProvider(settings: ModelProviderSettings) {
+  return operation<ModelProvider[]>('/api/model-providers', 'POST', settings);
+}
+
+export function removeModelProvider(id: string) {
+  return operation<ModelProvider[]>('/api/model-providers/' + encodeURIComponent(id), 'DELETE');
 }
 
 async function requestJson<T>(
@@ -138,6 +171,7 @@ export interface CreateRunInput {
   title: string;
   goal: string;
   specId?: string;
+  sourceMeetingId?: string;
   reviewPlan?: boolean;
   requireDeliverables?: boolean;
   specSettings?: { granularity: 'coarse' | 'medium' | 'fine'; reviewRounds: number };

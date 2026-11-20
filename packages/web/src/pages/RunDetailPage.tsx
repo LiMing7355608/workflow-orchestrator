@@ -1,6 +1,7 @@
 import { AlertTriangle, GitBranch, Loader2, MessageSquare } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { AgentActivityPanel } from '../components/agents/AgentActivityPanel';
 import { EventStream } from '../components/run/EventStream';
 import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
@@ -164,8 +165,13 @@ export function RunDetailPage() {
     ? (run.nodes.find((node) => node.id === detailNodeId) ?? null)
     : null;
 
+  const visibleView = planning && activeView !== 'monitor'
+    ? run.planDraft && !draftLogOpen ? 'plan' : 'events'
+    : activeView;
+
   return (
-    <div className="flex h-screen flex-col overflow-hidden max-[1100px]:block max-[1100px]:h-auto max-[1100px]:overflow-visible">
+    <div className="run-workspace">
+    <div className="run-surface flex min-h-0 flex-col">
       <RunHeader
         run={run}
         // 停止 / 继续成功后回读一次：状态由后端派生，前端不自己猜结果
@@ -174,17 +180,24 @@ export function RunDetailPage() {
       />
 
       <ViewBar
-        value={planning ? run.planDraft && !draftLogOpen ? 'plan' : 'events' : activeView}
+        value={visibleView}
         planning={planning}
         draft={Boolean(run.planDraft)}
-        onChange={(view) => planning ? setDraftLogOpen(view === 'events') : setActiveView(view)}
+        onChange={(view) => {
+          setActiveView(view);
+          if (planning && view !== 'monitor') setDraftLogOpen(view === 'events');
+        }}
         nodeCount={run.nodes.length}
         eventCount={run.events.length}
       />
 
-      <div className="flex min-h-0 flex-1 max-[1100px]:block">
-        <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
-          {run.planDraft && !draftLogOpen ? (
+      <div className="run-columns">
+        <div className="run-main">
+          {visibleView === 'monitor' ? (
+            <div className="h-full min-h-0 overflow-y-auto p-3 sm:p-4">
+              <AgentActivityPanel key={run.id} runId={run.id} onInspectNode={selectNode} />
+            </div>
+          ) : run.planDraft && visibleView === 'plan' ? (
             <PlanReviewPanel key={run.planDraft.revision} runId={run.id} revision={run.planDraft.revision}
               at={run.planDraft.at} paused={run.status === 'paused'} onCommit={reload} onDiscuss={() => setOrchestratorOpen(true)} />
           ) : planning ? (
@@ -208,14 +221,14 @@ export function RunDetailPage() {
                 </div>
               </div>
               <div className="min-h-0 flex-1">
-                <EventStream events={run.events} onSelectNode={selectNode} />
+                <EventStream events={run.events} nodes={run.nodes} onSelectNode={selectNode} onOpenPlanner={() => setOrchestratorOpen(true)} />
               </div>
             </div>
-          ) : activeView === 'graph' ? (
+          ) : visibleView === 'graph' ? (
             <WorkflowCanvas key={run.id} run={run} onInspectNode={selectNode} />
-          ) : activeView === 'plan' ? (
+          ) : visibleView === 'plan' ? (
             <RunPlanPanel run={run} live={source === 'live'} onSelectNode={selectNode} />
-          ) : activeView === 'board' ? (
+          ) : visibleView === 'board' ? (
             <RunBoard
               run={run}
               selectedNodeId={selectedNodeId}
@@ -224,12 +237,14 @@ export function RunDetailPage() {
           ) : (
             <EventStream
               events={run.events}
+              nodes={run.nodes}
               onSelectNode={selectNode}
+              onOpenPlanner={() => setOrchestratorOpen(true)}
             />
           )}
         </div>
 
-        <aside className="flex w-[340px] shrink-0 flex-col overflow-hidden border-l border-line bg-surface max-[1100px]:h-[520px] max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t">
+        <aside className="run-side flex flex-col overflow-hidden bg-surface">
           {/*
             「和编排器对话」是这一列里最先被看到的东西：说一句、看图上变了什么，
             是这个页面最主要的工作节奏。做成常驻按钮而不是切换页签，是因为切换
@@ -278,6 +293,7 @@ export function RunDetailPage() {
         onSelectNode={selectNode}
         onRunChanged={reload}
       />
+    </div>
     </div>
   );
 }

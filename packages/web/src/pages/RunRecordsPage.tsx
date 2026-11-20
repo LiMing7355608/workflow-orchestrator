@@ -1,3 +1,5 @@
+import { AgentActivityPanel } from '../components/agents/AgentActivityPanel';
+import { RecentInterviews } from '../components/run/RecentInterviews';
 import { Boxes, Clock, Plus, Search, SearchX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -197,6 +199,7 @@ export function RunRecordsPage() {
         </div>
       </Card>
 
+      <div className="mt-4 space-y-3"><AgentActivityPanel /><RecentInterviews /></div>
       <div className="mt-3 flex items-center justify-between text-[11px] text-muted">
         <span>共 {filteredRuns.length} 个运行</span>
         <span className="text-passive">

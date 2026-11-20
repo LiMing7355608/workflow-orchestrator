@@ -1,11 +1,11 @@
 import { buildAgentArgv, createParser, type AgentProfile, type AgentRunner } from '@orchestrator/core';
 import { z } from 'zod';
 
-export const modelIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/, '请输入客户端认识的模型 ID。');
+export const modelIdSchema = z.string().trim().min(1).max(512).refine((id) => !/[\x00-\x1f\x7f]/.test(id), '模型选择含有无效字符。');
 
 export function supportsModel(agent: AgentProfile): boolean {
   return agent.transport === 'acp' || agent.transport === 'codex-app-server' ||
-    agent.transport === 'claude-sdk' || (!agent.transport || agent.transport === 'cli') && Boolean(agent.launch.modelArgs);
+    agent.transport === 'claude-sdk' || agent.transport === 'http-model' || (!agent.transport || agent.transport === 'cli') && Boolean(agent.launch.modelArgs);
 }
 
 interface TextTurn {
@@ -24,7 +24,7 @@ export async function runTextTurn(runner: AgentRunner, agent: AgentProfile, turn
   const parser = createParser(agent.launch.parser);
   const argv = buildAgentArgv(agent, {
     prompt: turn.prompt, workdir: turn.cwd, policy,
-    model: agent.transport === 'acp' ? undefined : turn.model,
+    model: agent.transport === 'acp' || agent.transport === 'http-model' ? undefined : turn.model,
   });
   let text = '';
   let final = '';

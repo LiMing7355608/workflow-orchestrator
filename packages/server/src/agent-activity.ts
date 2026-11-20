@@ -69,7 +69,18 @@ export class AgentActivity {
             onChunk(chunk);
             for (const event of parser?.push(chunk) ?? []) {
               if (event.kind === 'session') interval.progress = '已建立会话，等待输出';
-              if (event.kind === 'text' && event.text?.trim()) interval.progress = event.text.trim().replace(/\s+/g, ' ').slice(-180);
+              if (event.kind === 'tool') {
+                const name = event.toolName ?? '';
+                interval.progress = /^[\p{L}\p{N}_./:-]{1,40}$/u.test(name) ? '正在调用 ' + name : '正在执行工具操作';
+              }
+              if (event.kind === 'text' && event.text?.trim()) {
+                const output = event.text.trim().replace(/\s+/g, ' ');
+                if (interval.role === 'plan' || interval.role === 'check' || interval.role === 'amend') {
+                  interval.progress = '正在返回任务与核对结果';
+                } else if (/\p{L}/u.test(output)) {
+                  interval.progress = output.slice(-180);
+                }
+              }
               if (event.kind === 'result') interval.progress = '已收到回复，正在校验输出';
             }
             if (interval.progress && Date.now() - lastNotice >= 600) {

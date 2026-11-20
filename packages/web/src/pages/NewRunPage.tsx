@@ -20,6 +20,8 @@ import {
 } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AgentModelField } from '../components/agents/AgentModelField';
+import { RecentInterviews } from '../components/run/RecentInterviews';
+import { SpecMeetings } from '../components/run/SpecMeetings';
 import { SpecInterviewPanel } from '../components/run/SpecInterviewPanel';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -179,6 +181,11 @@ export function NewRunPage() {
   const [mode, setMode] = useState<'interview' | 'direct'>('interview');
   const [interview, setInterview] = useState<InterviewView | null>(null);
   const [interviewBusy, setInterviewBusy] = useState(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [chosenDesigner, setDesignAgentId] = useState('');
   const [designModel, setDesignModel] = useState('');
   const [params, setParams] = useSearchParams();
@@ -209,7 +216,7 @@ export function NewRunPage() {
     if (!fromMeeting) return;
     const controller = new AbortController();
     void fetchMeeting(fromMeeting, controller.signal).then((room) => {
-      if (!room?.report || controller.signal.aborted) return;
+      if (!room?.report || room.reportStale || controller.signal.aborted) return;
       setMode('direct');
       setText((previous) => previous || room.report || '');
       setWorkspaceRoot(room.workspaceRoot);
@@ -217,27 +224,31 @@ export function NewRunPage() {
     return () => controller.abort();
   }, [fromMeeting]);
 
-  const watchInterview = Boolean(interviewId && interviewRoot && (
+  useEffect(() => {
+    if (interviewId) { setMode('interview'); setSubmitError(null); }
+  }, [interviewId]);
+
+  const watchInterview = Boolean(interviewId && (
     interview?.id !== interviewId || interview.status === 'thinking'
   ));
   useEffect(() => {
-    if (!watchInterview || !interviewId || !interviewRoot) return;
+    if (!watchInterview || !interviewId) return;
     const controller = new AbortController();
     let timer: number | undefined;
     let misses = 0;
     const poll = async () => {
-      const next = await fetchInterview(interviewRoot, interviewId, controller.signal);
+      const next = await fetchInterview(interviewId, interviewRoot, controller.signal);
       if (controller.signal.aborted) return;
       if (next) {
         misses = 0;
         setInterview(next);
         setWorkspaceRoot(next.workspaceRoot);
-        setText((previous) => previous || next.idea);
+        setText(next.idea);
+        setSubmitError(null);
       } else if (++misses >= 4) {
-        setSubmitError('暂时无法读取访谈。请刷新页面恢复，或重新开始。');
-        return;
+        setSubmitError('暂时无法读取访谈，系统会继续尝试恢复。');
       }
-      if (!next || next.status === 'thinking') timer = window.setTimeout(() => void poll(), 850);
+      if (!next || next.status === 'thinking') timer = window.setTimeout(() => void poll(), misses >= 4 ? 3000 : 850);
     };
     void poll();
     return () => {
@@ -274,7 +285,9 @@ export function NewRunPage() {
   const plannerAgentId = selectedAgent(chosenPlanner, primary);
   const designerId = selectedAgent(chosenDesigner, primary);
   const designer = usableAgents.find((agent) => agent.id === designerId);
-  const implementAgentId = selectedAgent(chosenImplementer, primary);
+  const implementers = usableAgents.filter((agent) => agent.capabilities.tools);
+  const implementAgentId = implementers.some((agent) => agent.id === chosenImplementer)
+    ? chosenImplementer : (implementers.find((agent) => agent.capabilities.structured) ?? implementers[0])?.id ?? '';
   const reviewerDefault = usableAgents.find((agent) => agent.id !== implementAgentId)?.id
     ?? implementAgentId;
   const reviewAgentId = selectedAgent(chosenReviewer, reviewerDefault);
@@ -347,7 +360,7 @@ export function NewRunPage() {
     addFiles(event.dataTransfer.files);
   }
 
-  const finalSpec = mode === 'interview' && interview?.status === 'ready' ? interview.spec : undefined;
+  const finalSpec = mode === 'interview' && interview?.id === interviewId && interview.status === 'ready' ? interview.spec : undefined;
   const canSubmit = Boolean((mode === 'direct' ? text.trim() : finalSpec) && runtime && plannerAgentId && implementAgentId && reviewAgentId);
 
   /**
@@ -367,6 +380,7 @@ export function NewRunPage() {
   function resetInterview() {
     setParams({}, { replace: true });
     setInterview(null);
+    setText('');
     setSubmitError(null);
   }
 
@@ -376,9 +390,10 @@ export function NewRunPage() {
     setSubmitError(null);
     try {
       const session = await startInterview(text.trim(), trimmedWorkspaceRoot, designerId, designModel.trim() || undefined);
+      if (!mounted.current) return;
       setInterview(session);
       setWorkspaceRoot(session.workspaceRoot);
-      setParams({ spec: session.id, project: session.workspaceRoot }, { replace: true });
+      setParams({ spec: session.id }, { replace: true });
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : '启动访谈失败。');
     } finally {
@@ -417,6 +432,7 @@ export function NewRunPage() {
       // 目录必须随创建请求带走：运行一旦建好，目标仓库就是它的事实了
       workspaceRoot: finalSpec ? interview!.workspaceRoot : trimmedWorkspaceRoot,
       specId: finalSpec ? interview!.id : undefined,
+      sourceMeetingId: mode === 'direct' && fromMeeting ? fromMeeting : undefined,
       reviewPlan,
       requireDeliverables: true,
       specSettings: { granularity, reviewRounds: Number(reviewRounds) },
@@ -472,7 +488,8 @@ export function NewRunPage() {
         </p>
       </div>
 
-      <div className="mt-6 grid grid-cols-[minmax(0,1fr)_320px] items-start gap-4 max-[1050px]:grid-cols-1">
+      {!interviewId && <div className="mt-4 empty:hidden"><RecentInterviews limit={4} /></div>}
+      <div className="new-run-grid mt-6">
         <div className="min-w-0 space-y-3">
         <Card className="overflow-hidden">
           <div className="flex items-center gap-2 border-b border-line px-5 py-3">
@@ -592,7 +609,7 @@ export function NewRunPage() {
         {mode === 'interview' && (
           <SpecInterviewPanel
             key={interviewId ?? 'new'}
-            session={interview}
+            session={interview?.id === interviewId ? interview : null}
             locating={Boolean(interviewId)}
             busy={interviewBusy}
             canStart={Boolean(text.trim() && designerId && !workspaceRootError)}
@@ -610,6 +627,7 @@ export function NewRunPage() {
             onStart={() => void beginInterview()}
             onAnswer={answerInterview}
             onReset={resetInterview}
+            related={interview?.id === interviewId && interview && <SpecMeetings session={interview} onAdopt={setInterview} />}
           />
         )}
         </div>
@@ -718,7 +736,7 @@ export function NewRunPage() {
                 hint="写代码"
                 value={implementAgentId}
                 onChange={setImplementAgentId}
-                agents={usableAgents}
+                agents={implementers}
               />
               <AgentSelect
                 label="审查"

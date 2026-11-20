@@ -135,6 +135,8 @@
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { AgentProfile } from '@orchestrator/core';
+import type { ModelDirectory } from '../model-providers.js';
 import { Readable, Writable } from 'node:stream';
 import {
   client as createClientApp,
@@ -1253,9 +1255,10 @@ export class AcpRunner implements AgentRunner {
     }
 
     const choices = option.options.flatMap((item) => 'group' in item ? item.options : [item]);
+    const matchesName = (name: string) => name.toLowerCase() === wanted.toLowerCase();
     const selected = choices.find((item) => item.value === wanted)
-      ?? choices.find((item) => item.name === wanted && item.value === option.currentValue)
-      ?? choices.find((item) => item.name === wanted);
+      ?? choices.find((item) => matchesName(item.name) && item.value === option.currentValue)
+      ?? choices.find((item) => matchesName(item.name));
     if (!selected) {
       if (request.model) {
         throw new Error('客户端未提供模型 ' + wanted + '。可选模型：' + choices.map((item) => item.name).join('、'));
@@ -1369,5 +1372,44 @@ function stopReasonFailure(reason: StopReason): string {
       // 联合是封闭的，但未来 SDK 可能加变体：未知终止原因一律当失败，
       // 绝不把一次不明不白的收场记成完成。
       return `agent 以未知原因结束（stopReason=${String(reason)}）`;
+  }
+}
+
+export async function listAcpModels(profile: AgentProfile, cwd: string): Promise<ModelDirectory> {
+  const executable = await resolveExecutable(profile.launch.bin);
+  if (!executable) throw new Error('找不到 ACP 客户端。');
+  const child = spawn(executable.command, [...executable.prefixArgs, ...profile.launch.args], {
+    cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const closed = new AbortController();
+  child.on('error', () => closed.abort());
+  child.on('exit', () => closed.abort());
+  const signal = AbortSignal.any([closed.signal, AbortSignal.timeout(15_000)]);
+  const connection = createClientApp({ name: CLIENT_INFO.name }).connect(ndJsonStream(
+    Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+    Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+  ));
+  const stop = () => connection.close();
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    const agent = connection.agent;
+    await agent.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { ...CLIENT_INFO },
+    });
+    const opened = await agent.request(methods.agent.session.new, { cwd, mcpServers: [] });
+    const option = opened.configOptions?.find((item) => item.category === 'model' || item.id === 'model');
+    const models = option?.type === 'select' ? option.options.flatMap((item) => 'group' in item
+      ? item.options.map((model) => ({ id: model.value, name: model.name, group: item.name }))
+      : [{ id: item.value, name: item.name }]) : [];
+    return {
+      models, defaultModel: option?.type === 'select' ? option.currentValue : undefined,
+      source: 'ACP 会话配置', checkedAt: new Date().toISOString(),
+      message: models.length ? undefined : '客户端没有发布可选模型。可以沿用客户端默认配置。',
+    };
+  } finally {
+    signal.removeEventListener('abort', stop);
+    connection.close();
+    child.stdin.end();
+    if (child.exitCode === null && child.signalCode === null) await killProcessTree(child.pid, { force: true, log: silentLog });
   }
 }

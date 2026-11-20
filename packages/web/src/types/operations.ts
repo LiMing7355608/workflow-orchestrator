@@ -16,7 +16,18 @@ export interface InterviewView {
   status: 'thinking' | 'question' | 'ready' | 'error';
   rounds: Array<{ questions: InterviewQuestion[]; answer?: string }>;
   spec?: string;
+  meetings?: Array<{ id: string; title: string; report: string; at: string }>;
   error?: string;
+}
+
+export interface InterviewSummary {
+  id: string;
+  title: string;
+  agentId: string;
+  model?: string;
+  status: InterviewView['status'];
+  updatedAt: string;
+  roundCount: number;
 }
 
 export interface BlackboardView {
@@ -92,6 +103,7 @@ export interface MeetingSettings {
   host: MeetingActor;
   roles: MeetingRole[];
   rounds: number;
+  roundControl?: 'manual' | 'host';
 }
 export interface MeetingSummary {
   id: string;
@@ -102,12 +114,14 @@ export interface MeetingSummary {
 }
 export interface MeetingView extends MeetingSettings, MeetingSummary {
   workspaceRoot: string;
+  sourceSpecId?: string;
+  linkedRunId?: string;
   revision: number;
   turns: Omit<AgentInterval, 'agentLabel'>[];
   messages: Array<{
     id: string;
     at: string;
-    kind: 'human' | 'agent';
+    kind: 'human' | 'agent' | 'host';
     author: string;
     text: string;
     round?: number;

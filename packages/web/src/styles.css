@@ -246,3 +246,41 @@
 @media (prefers-reduced-motion: reduce) {
   .workflow-dependency-pulse, .workflow-node[data-state='running']::after { animation: none; }
 }
+
+.new-run-grid, .meeting-room-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.run-workspace { container-type: inline-size; }
+.run-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+.run-main { min-width: 0; height: clamp(410px, 65dvh, 700px); }
+.run-side { min-width: 0; min-height: 0; border-top: 1px solid var(--color-line); }
+.run-side > :last-child { max-height: min(65dvh, 600px); }
+
+@media (min-width: 1100px) {
+  .new-run-grid { grid-template-columns: minmax(0, 1fr) minmax(275px, 30%); }
+  .meeting-room-grid { grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); }
+}
+
+@container (min-width: 850px) {
+  .run-surface { height: 100dvh; overflow: hidden; }
+  .run-columns { grid-template-columns: minmax(0, 1fr) clamp(255px, 26%, 345px); }
+  .run-main { height: auto; }
+  .run-side { border-top: 0; border-left: 1px solid var(--color-line); }
+  .run-side > :last-child { max-height: none; }
+}
+.workflow-canvas { container-type: inline-size; }
+.workflow-canvas[data-detail='minimal'] .graph-secondary { visibility: hidden; }
+@container (max-width: 580px) {
+  .workflow-minimap, .workflow-selected-overlay { display: none !important; }
+}
+.event-group[open] > summary .event-chevron { transform: rotate(90deg); }
+.event-group summary::-webkit-details-marker { display: none; }

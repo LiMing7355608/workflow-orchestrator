@@ -58,11 +58,11 @@ export async function readOptional(path: string): Promise<string | undefined> {
   }
 }
 
-export async function writeAtomic(path: string, content: string): Promise<void> {
+export async function writeAtomic(path: string, content: string, mode?: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
+    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx', mode });
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });
