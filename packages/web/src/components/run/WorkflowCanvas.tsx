@@ -1,10 +1,10 @@
 import {
   Background, BackgroundVariant, BaseEdge, MarkerType, MiniMap, Panel, ReactFlow, ReactFlowProvider,
-  getSmoothStepPath, useReactFlow, useViewport, type Edge, type EdgeProps, type EdgeTypes, type NodeTypes,
+  getNodesBounds, getSmoothStepPath, getViewportForBounds, useReactFlow, useViewport, type Edge, type EdgeProps, type EdgeTypes, type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Activity, ChevronRight, Expand, Focus, Maximize2, Minus, Plus, Shrink, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../../lib/cn';
 import { layoutDag } from '../../lib/dag-layout';
 import { formatClock, formatDateTime } from '../../lib/format';
@@ -29,7 +29,7 @@ function WorkflowDependency({ id, sourceX, sourceY, sourcePosition, targetX, tar
 }
 
 const edgeTypes = { dependency: WorkflowDependency } satisfies EdgeTypes;
-const fitted = { padding: 0.18, maxZoom: 1.1 };
+const graphZoom = { minimum: 0.12, maximum: 1.7, fitMaximum: 1.1 };
 
 interface WorkflowCanvasProps {
   run: WorkflowRunDetail;
@@ -46,7 +46,8 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
   const [compact, setCompact] = useState(run.nodes.length > 18);
   const [fullscreen, setFullscreen] = useState(false);
   const [onlyRelated, setOnlyRelated] = useState(false);
-  const { fitView, zoomIn, zoomOut, setCenter, getNode, getZoom } = useReactFlow<WorkflowFlowNode, DependencyEdge>();
+  const viewport = useRef<HTMLDivElement>(null);
+  const { setViewport, zoomIn, zoomOut, setCenter, getNode, getZoom } = useReactFlow<WorkflowFlowNode, DependencyEdge>();
   const { zoom } = useViewport();
   useEffect(() => {
     if (!fullscreen) return;
@@ -94,10 +95,6 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
     setSelected(id);
     setExpanded((previous) => previous === id ? null : id);
   }, []);
-  const fit = useCallback(() => {
-    requestAnimationFrame(() => void fitView({ ...fitted, duration: 170 }));
-  }, [fitView]);
-
   function locate(id: string) {
     const node = getNode(id);
     if (!node) return;
@@ -115,12 +112,31 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
     });
     return nodes.map((node) => ({
       id: node.id, type: 'workflow', position: positions.get(node.id) ?? { x: 0, y: 0 },
+      width, height: expanded === node.id ? EXPANDED_HEIGHT : compactHeight,
       data: { node, compact, expanded: expanded === node.id, onToggle: () => toggle(node.id), onInspect: () => onInspectNode(node.id) },
       selected: node.id === selected,
       draggable: false,
       ariaLabel: node.title + ' · ' + nodeStatusMeta[displayNodeStatus(node)].label,
     }));
   }, [nodes, edges, width, compactHeight, expanded, compact, selected, toggle, onInspectNode]);
+
+  const bounds = useRef(getNodesBounds(flowNodes));
+  bounds.current = getNodesBounds(flowNodes);
+  const fit = useCallback(() => {
+    const panel = viewport.current;
+    const currentBounds = bounds.current;
+    if (!panel?.clientWidth || !panel.clientHeight || !currentBounds.width || !currentBounds.height) return;
+    const transform = getViewportForBounds(currentBounds, panel.clientWidth, panel.clientHeight,
+      graphZoom.minimum, graphZoom.fitMaximum, 0.16);
+    void setViewport(transform);
+  }, [setViewport]);
+
+  useEffect(() => {
+    if (!viewport.current) return;
+    const observer = new ResizeObserver(fit);
+    observer.observe(viewport.current);
+    return () => observer.disconnect();
+  }, [fit]);
 
   const flowEdges = useMemo<DependencyEdge[]>(() => edges.map((edge) => {
     const source = byId.get(edge.source);
@@ -148,11 +164,11 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
       </div>
       <span className="text-[11px] tabular-nums text-muted">{completed} / {run.nodes.length} 个已完成</span>
       {run.updatedAt && <time dateTime={run.updatedAt} title={formatDateTime(run.updatedAt)} className="font-mono text-[10px] tabular-nums text-muted">更新 {formatClock(run.updatedAt)}</time>}
-      {active && <Button variant="ghost" size="sm" className="h-6 px-1.5 text-accent" onClick={() => { if (shownIds && !shownIds.has(active.id)) { setOnlyRelated(false); setSelected(active.id); fit(); } else locate(active.id); }}>
+      {active && <Button variant="ghost" size="sm" className="h-6 px-1.5 text-accent" onClick={() => { if (shownIds && !shownIds.has(active.id)) { setOnlyRelated(false); setSelected(active.id); requestAnimationFrame(fit); } else locate(active.id); }}>
         <Focus className="size-3.5" />定位{running.length ? '运行中' : '待审批'}节点
       </Button>}
     </div>
-    <div className="relative min-h-0 min-w-0 flex-1">
+    <div ref={viewport} className="relative min-h-0 min-w-0 flex-1">
       <ReactFlow<WorkflowFlowNode, DependencyEdge>
         nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodeClick={(_, node) => toggle(node.id)}
@@ -162,7 +178,7 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
           if (event.key === 'Enter' && selected) toggle(selected);
         }}
         onPaneClick={() => { setSelected(null); setExpanded(null); setOnlyRelated(false); }}
-        fitView fitViewOptions={fitted} minZoom={0.12} maxZoom={1.7}
+        onInit={fit} minZoom={graphZoom.minimum} maxZoom={graphZoom.maximum}
         nodesDraggable={false} nodesConnectable={false} elementsSelectable
         proOptions={{ hideAttribution: true }}
         onlyRenderVisibleElements={run.nodes.length > 80}
@@ -179,7 +195,7 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
             </p>
             <NodeTimes node={current} />
             <div className="mt-1.5 flex flex-wrap gap-1">
-              <Button size="sm" variant="ghost" aria-pressed={onlyRelated} onClick={() => { setOnlyRelated(!onlyRelated); fit(); }}>{onlyRelated ? '完整图' : '聚焦依赖链'}</Button>
+              <Button size="sm" variant="ghost" aria-pressed={onlyRelated} onClick={() => { setOnlyRelated(!onlyRelated); requestAnimationFrame(fit); }}>{onlyRelated ? '完整图' : '聚焦依赖链'}</Button>
               <Button size="sm" variant="secondary" onClick={() => onInspectNode(current.id)}>节点详情<ChevronRight className="size-3" /></Button>
             </div>
           </div>
@@ -191,8 +207,8 @@ function Graph({ run, onInspectNode }: WorkflowCanvasProps) {
       <span className="w-10 text-center font-mono text-[11px] tabular-nums text-muted" aria-label="画布缩放比例">{Math.round(zoom * 100)}%</span>
       <Button size="icon" variant="ghost" aria-label="放大编排图" title="放大" onClick={() => void zoomIn({ duration: 120 })}><Plus className="size-4" /></Button>
       <Button size="icon" variant="ghost" aria-label="适应画布" title="适应画布" onClick={fit}><Expand className="size-4" /></Button>
-      <Button size="sm" variant="ghost" aria-pressed={compact} onClick={() => { setCompact(!compact); fit(); }}>{compact ? '标准卡片' : '紧凑卡片'}</Button>
-      <Button size="icon" variant="ghost" aria-label={fullscreen ? '退出全屏编排图' : '全屏编排图'} title={fullscreen ? '退出全屏' : '全屏查看'} onClick={() => { setFullscreen(!fullscreen); fit(); }}>
+      <Button size="sm" variant="ghost" aria-pressed={compact} onClick={() => { setCompact(!compact); requestAnimationFrame(fit); }}>{compact ? '标准卡片' : '紧凑卡片'}</Button>
+      <Button size="icon" variant="ghost" aria-label={fullscreen ? '退出全屏编排图' : '全屏编排图'} title={fullscreen ? '退出全屏' : '全屏查看'} onClick={() => { setFullscreen(!fullscreen); }}>
         {fullscreen ? <Shrink className="size-4" /> : <Maximize2 className="size-4" />}
       </Button>
     </div>
