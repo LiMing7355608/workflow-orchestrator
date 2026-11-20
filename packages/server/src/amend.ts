@@ -51,6 +51,8 @@ function factsFromNode(node: DagNode, base?: NodeFacts): NodeFacts {
     description: node.description,
     dependsOn: node.dependsOn,
     files: node.files,
+    deliverables: node.deliverables,
+    acceptance: node.acceptance,
     agentId: node.agentId,
     executor: node.executor,
     action: node.action,
@@ -81,6 +83,8 @@ export function dagFromFacts(run: RunFacts): Dag {
       description: facts.description,
       dependsOn: [...facts.dependsOn],
       files: [...facts.files],
+      deliverables: facts.deliverables,
+      acceptance: facts.acceptance,
       agentId: facts.agentId,
       executor: facts.executor,
       maxAttempts: facts.maxAttempts,
@@ -117,6 +121,10 @@ function fieldText(field: string, node: DagNode): string | undefined {
       return clip(node.description);
     case 'files':
       return clip(node.files.join(', '));
+    case 'deliverables':
+      return clip(node.deliverables?.map((item) => item.path + (item.kind === 'remove' ? '（删除）' : '')).join(', '));
+    case 'acceptance':
+      return clip(node.acceptance?.join(' / '));
     case 'maxAttempts':
       return String(node.maxAttempts);
     default:
@@ -217,6 +225,12 @@ export function diffDag(current: Dag, next: Dag, run: RunFacts): AmendmentPlan {
         }
         continue;
       }
+      if (field === 'deliverables' || field === 'acceptance') {
+        if (JSON.stringify(before[field] ?? []) !== JSON.stringify(node[field] ?? [])) {
+          fields.push({ field, from: fieldText(field, before), to: fieldText(field, node) });
+        }
+        continue;
+      }
       if (field === 'maxAttempts') {
         if (before.maxAttempts !== node.maxAttempts) {
           fields.push({
@@ -255,6 +269,10 @@ export function diffDag(current: Dag, next: Dag, run: RunFacts): AmendmentPlan {
       }
       if (change.field === 'files') {
         merged.files = [...node.files];
+      } else if (change.field === 'deliverables') {
+        merged.deliverables = node.deliverables;
+      } else if (change.field === 'acceptance') {
+        merged.acceptance = node.acceptance;
       } else if (change.field === 'maxAttempts') {
         merged.maxAttempts = node.maxAttempts;
       } else if (change.field === 'agentId') {

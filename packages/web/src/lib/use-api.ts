@@ -31,10 +31,13 @@ export function useApiResource<T>(
   loaderRef.current = loader;
   const fallbackRef = useRef(fallback);
   fallbackRef.current = fallback;
+  const generation = useRef(0);
 
   const reload = useCallback(async () => {
+    const current = ++generation.current;
     setLoading(true);
     const result = await loaderRef.current();
+    if (current !== generation.current) return;
     if (result === null) {
       setData(fallbackRef.current);
       setSource('seed');
@@ -49,9 +52,10 @@ export function useApiResource<T>(
 
   useEffect(() => {
     void reload();
+    return () => { generation.current++; };
   }, [reload]);
 
-  return { data, source, loading, reload: () => void reload() };
+  return { data, source, loading, reload };
 }
 
 /**

@@ -63,7 +63,8 @@ export type AgentTransport =
   | 'claude-sdk'
   | 'codex-app-server'
   | 'dsh-sdk'
-  | 'acp';
+  | 'acp'
+  | 'http-model';
 
 /**
  * 原生会话 id 的来源。

@@ -1,3 +1,4 @@
+import { NodeTimes, TaskBreakdown } from './TaskBreakdown';
 import {
   GitBranch,
   Loader2,
@@ -222,7 +223,7 @@ function PanelSurface({
   }, [nodeConversation, echo]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-5">
       {/* 遮罩自己吞掉点击：浮层外的每一寸都是「关掉」，不是「点到背后的东西」 */}
       <div
         aria-hidden="true"
@@ -242,7 +243,7 @@ function PanelSurface({
         onClick={(event) => event.stopPropagation()}
         style={{
           width: 'min(880px, 92vw)',
-          height: 'min(80vh, 720px)',
+          height: 'min(92dvh, 780px)',
           // 只有这一层抬升：其余面板一律靠边框分层，浮层需要一点影子把
           // 「盖在上面」这件事说清楚
           boxShadow: '0 24px 64px -32px rgba(31, 35, 40, 0.45)',
@@ -291,55 +292,65 @@ function PanelSurface({
 
           <h2
             id={titleId}
-            className="mt-2 text-[17px] font-medium leading-6 text-ink"
+            className="mt-1.5 line-clamp-2 text-[17px] font-medium leading-6 text-ink [overflow-wrap:anywhere]"
           >
             {node.title}
           </h2>
-          {/*
-            节点描述常常是一整段任务书（产出物、验收标准都在里面），
-            折两行等于把关键要求藏起来。大面板里给三行预览 + 展开全文。
-          */}
-          <CollapsibleText
-            text={node.description}
-            lines={3}
-            threshold={60}
-            className="mt-0.5 text-[12px] leading-5 text-muted"
-          />
+          <details className="mt-2 rounded-lg border border-line bg-subtle/25 px-2.5 py-1.5">
+            <summary className="cursor-pointer text-xs font-medium text-ink">任务要求与产物</summary>
+            <div className="workspace-scroll mt-1 max-h-[min(32dvh,240px)] pr-2" role="region" aria-label="节点任务说明" tabIndex={0}>
+                <CollapsibleText
+                  text={node.description}
+                  lines={3}
+                  threshold={60}
+                  className="mt-0.5 text-[12px] leading-5 text-muted"
+                />
 
-          {/* 元信息压成一行：这是速览，主体是下面那条时间线 */}
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted">
-            <AgentChip
-              agentId={node.agentId}
-              label={node.agent}
-              textClassName="text-ink"
-              iconClassName="h-3.5 w-3.5"
-            />
-            <MetaItem label="耗时" value={formatDuration(node.durationMs)} />
-            <MetaItem label="尝试" value={`${node.attempts} 次`} />
-            <MetaItem label="上游依赖" value={`${node.dependsOn.length} 个`} />
-            <MetaItem label="文件" value={`${node.files.length} 个`} />
-          </div>
-
-          {dependencies.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {dependencies.map((dependency) => (
-                <button
-                  key={dependency.id}
-                  type="button"
-                  // 原地替换内容而不是叠一层浮层：依赖链常常要看两三跳，
-                  // 一层层叠加会把人困在退不出来的栈里
-                  onClick={() => onSelectNode(dependency.id)}
-                  className="inline-flex max-w-[240px] items-center gap-1 rounded border border-line bg-subtle/40 px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:border-line-strong hover:text-ink"
-                >
-                  <GitBranch
-                    className="h-2.5 w-2.5 shrink-0 text-passive"
-                    strokeWidth={1.8}
+                {/* 元信息压成一行：这是速览，主体是下面那条时间线 */}
+                <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted">
+                  <AgentChip
+                    agentId={node.agentId}
+                    label={node.agent}
+                    textClassName="text-ink"
+                    iconClassName="h-3.5 w-3.5"
                   />
-                  <span className="truncate">{dependency.title}</span>
-                </button>
-              ))}
+                  <MetaItem label="耗时" value={formatDuration(node.durationMs)} />
+                  <MetaItem label="尝试" value={`${node.attempts} 次`} />
+                  <MetaItem label="上游依赖" value={`${node.dependsOn.length} 个`} />
+                  <MetaItem label="文件" value={`${node.files.length} 个`} />
+                </div>
+
+                <div className="mt-2"><NodeTimes node={node} /></div>
+                {(node.delivery || node.deliverables?.length || node.acceptance?.length) && <details className="mt-2 rounded-lg border border-line bg-subtle/25 px-2.5 py-1.5">
+                  <summary className="cursor-pointer text-xs font-semibold text-ink">产物与验收</summary>
+                  <div className="mt-2">
+                    <TaskBreakdown task={node} runId={run.id} description={false}
+                      dependencies={new Map(dependencies.map((item) => [item.id, item.title]))} onSelectNode={onSelectNode} />
+                  </div>
+                </details>}
+
+                {dependencies.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {dependencies.map((dependency) => (
+                      <button
+                        key={dependency.id}
+                        type="button"
+                        // 原地替换内容而不是叠一层浮层：依赖链常常要看两三跳，
+                        // 一层层叠加会把人困在退不出来的栈里
+                        onClick={() => onSelectNode(dependency.id)}
+                        className="inline-flex max-w-[240px] items-center gap-1 rounded border border-line bg-subtle/40 px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:border-line-strong hover:text-ink"
+                      >
+                        <GitBranch
+                          className="h-2.5 w-2.5 shrink-0 text-passive"
+                          strokeWidth={1.8}
+                        />
+                        <span className="truncate">{dependency.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
             </div>
-          ) : null}
+          </details>
         </header>
 
         {/*
@@ -355,7 +366,7 @@ function PanelSurface({
           时间线仍然是唯一的原始流水（精确时间列、工具调用、产物 diff 预览），
           会话则承担「我中途改过什么要求、它因此重跑了几轮」这条叙事。
         */}
-        <section className="flex min-h-0 flex-1 flex-col px-5 pb-3 pt-3">
+        <section className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2 sm:px-5">
           <div className="flex shrink-0 items-center justify-between gap-2">
             <Segmented
               ariaLabel="节点详情视图"
@@ -498,8 +509,8 @@ function NodeConversation({
       ref={scrollerRef}
       onScroll={handleScroll}
       aria-live="polite"
-      aria-label="节点会话"
-      className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1"
+      aria-label="节点会话" tabIndex={0}
+      className="workspace-scroll mt-2 min-h-0 flex-1 pr-1"
     >
       <ul className="space-y-4">
         {entries.map((entry) => (

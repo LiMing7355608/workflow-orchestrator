@@ -1,9 +1,10 @@
-import { Boxes, ChevronRight, Clock } from 'lucide-react';
+import { Boxes, ChevronRight, Clock, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { formatRelativeTime } from '../../lib/format';
 import type { RunStage, WorkflowRunSummary } from '../../types/workflow';
 import { Progress } from '../ui/Progress';
 import { RunStatusBadge } from '../run/RunStatusBadge';
+import { Button } from '../ui/Button';
 
 const stageLabels: Record<RunStage, string> = {
   spec: '设计规格',
@@ -24,11 +25,16 @@ function progressTone(
   return 'blue';
 }
 
-export function RunRecordRow({ run }: { run: WorkflowRunSummary }) {
+export function RunRecordRow({ run, onDelete, deleting }: {
+  run: WorkflowRunSummary;
+  onDelete?: () => void;
+  deleting?: boolean;
+}) {
   return (
+    <div className="relative">
     <Link
       to={`/runs/${run.id}`}
-      className="group grid grid-cols-[minmax(0,1fr)_96px_96px_150px_64px_88px_20px] items-center gap-4 px-5 py-3.5 transition-colors duration-150 hover:bg-subtle/50 max-[1100px]:grid-cols-[minmax(0,1fr)_96px_150px_64px_88px_20px] max-[900px]:grid-cols-[minmax(0,1fr)_96px_88px_20px]"
+      className="group grid grid-cols-[minmax(0,1fr)_96px_96px_150px_64px_88px_20px] items-center gap-4 py-3.5 pl-5 pr-14 transition-colors duration-150 hover:bg-subtle/50 max-[1100px]:grid-cols-[minmax(0,1fr)_96px_150px_64px_88px_20px] max-[900px]:grid-cols-[minmax(0,1fr)_96px_88px_20px] max-[580px]:grid-cols-[minmax(0,1fr)_80px_14px] max-[580px]:gap-2"
     >
       <div className="min-w-0">
         <p className="truncate text-[13px] font-medium text-ink">
@@ -64,7 +70,7 @@ export function RunRecordRow({ run }: { run: WorkflowRunSummary }) {
         <span className="tabular-nums">{run.nodeCount}</span>
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px] text-passive">
+      <div className="flex items-center gap-1.5 text-[11px] text-passive max-[580px]:hidden">
         <Clock className="h-3.5 w-3.5" strokeWidth={1.8} />
         <span className="truncate">{formatRelativeTime(run.updatedAt)}</span>
       </div>
@@ -74,5 +80,19 @@ export function RunRecordRow({ run }: { run: WorkflowRunSummary }) {
         strokeWidth={1.8}
       />
     </Link>
+    {onDelete && (
+      <Button
+        variant="ghost"
+        size="sm"
+        className="absolute right-3 top-1/2 h-8 w-8 -translate-y-1/2 px-0 text-muted hover:text-danger"
+        aria-label={'删除运行 ' + run.title}
+        title={run.status === 'running' ? '先停止运行再删除' : '删除记录和产物'}
+        disabled={deleting || run.status === 'running'}
+        onClick={onDelete}
+      >
+        <Trash2 className="h-4 w-4" strokeWidth={1.8} />
+      </Button>
+    )}
+    </div>
   );
 }

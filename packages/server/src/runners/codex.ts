@@ -27,6 +27,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { ModelDirectory, ModelOption } from '../model-providers.js';
 import type { Readable, Writable } from 'node:stream';
 import { JsonRpcLineTransport, JsonRpcResponseError } from '@deepseek-ai/dsh-sdk-protocol';
 import { createParser } from '@orchestrator/core';
@@ -480,6 +481,28 @@ export class CodexAppServerWire {
   /** 开始读帧。 */
   start(): void {
     this.transport.start();
+  }
+
+  async models(signal: AbortSignal): Promise<Omit<ModelDirectory, 'checkedAt' | 'source'>> {
+    const models = new Map<string, ModelOption>();
+    let cursor: string | undefined;
+    let defaultModel: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const result = requireObject(await this.request('model/list', {
+        limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}),
+      }, signal, 'initialize'), 'model/list 响应');
+      if (!Array.isArray(result.data)) throw new Error('Codex 未返回有效的模型列表。');
+      for (const entry of result.data) {
+        const model = asObject(entry);
+        const id = model?.model ?? model?.id;
+        if (typeof id !== 'string' || model?.hidden === true) continue;
+        models.set(id, { id, name: typeof model?.displayName === 'string' ? model.displayName : id });
+        if (model?.isDefault === true) defaultModel = id;
+      }
+      if (typeof result.nextCursor !== 'string' || !result.nextCursor || result.nextCursor === cursor) break;
+      cursor = result.nextCursor;
+    }
+    return { models: [...models.values()], defaultModel };
   }
 
   /**
@@ -1423,7 +1446,7 @@ export class CodexAppServerRunner implements AgentRunner {
         threadParams: POLICY_THREAD_PARAMS[request.policy] ?? FALLBACK_THREAD_PARAMS,
         // profile 的 modelArgs 是 `-m {model}`，两种写法都要认：读不出来就交给
         // codex 自己的配置，绝不替运维现场选模型
-        model: argValue(request.argv, '--model') ?? argValue(request.argv, '-m'),
+        model: request.model ?? argValue(request.argv, '--model') ?? argValue(request.argv, '-m'),
         /**
          * 续跑的唯一来源是 `request.sessionId`。
          *
@@ -1555,5 +1578,28 @@ export class CodexAppServerRunner implements AgentRunner {
     if (bucket.length === 0) {
       this.active.delete(key);
     }
+  }
+}
+
+export async function listCodexModels(bin: string, cwd: string): Promise<ModelDirectory> {
+  const executable = await resolveExecutable(bin);
+  if (!executable) throw new Error('找不到 Codex 客户端。');
+  const child = spawn(executable.command, [...executable.prefixArgs, ...APP_SERVER_ARGS], {
+    cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const signal = AbortSignal.timeout(15_000);
+  const exit = new AbortController();
+  child.on('error', () => exit.abort());
+  child.on('exit', () => exit.abort());
+  const scoped = AbortSignal.any([signal, exit.signal]);
+  const wire = new CodexAppServerWire({ input: child.stdout, output: child.stdin, threadParams: {}, onLine: () => {} });
+  try {
+    wire.start();
+    await wire.initialize(scoped);
+    return { ...await wire.models(scoped), source: 'Codex App Server', checkedAt: new Date().toISOString() };
+  } finally {
+    wire.close();
+    child.stdin.end();
+    if (!await waitForExit(child, 300)) await killProcessTree(child.pid, { force: true, log: silentLog });
   }
 }

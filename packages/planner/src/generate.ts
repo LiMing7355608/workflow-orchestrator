@@ -48,6 +48,8 @@ export interface PlannerExecution {
   onOutput?: (chunk: string) => void;
   /** 回传平台解析后的输出，与任务图交付共用同一个解析器。 */
   onEvents?: (events: AgentEvent[]) => void;
+  onRetry?: (attempt: number, reason: string) => void | Promise<void>;
+  workspaceFiles?: () => Promise<string[]>;
 }
 
 export interface PlannerOptions {
@@ -57,6 +59,7 @@ export interface PlannerOptions {
   agentId?: string;
   /** Agent 产出不合格时最多重来几次 */
   maxAttempts?: number;
+  requireDeliverables?: boolean;
 }
 
 export interface GeneratedPlan {
@@ -140,6 +143,8 @@ function buildPlannerPrompt(
   goal: string,
   catalog: AgentProfile[],
   previousIssues: DagIssue[],
+  textOnly = false,
+  workspaceFiles: string[] = [],
 ): string {
   const usable = usablePlannerAgents(catalog);
   const roster = usable
@@ -150,7 +155,7 @@ function buildPlannerPrompt(
     '# 任务：把目标拆成可执行的任务图',
     '',
     // 单行目标，方便执行器与回放器精确识别，不必在整段 prompt 里猜
-    `GOAL: ${goal.trim().replace(/\s+/g, ' ')}`,
+    `GOAL: ${textOnly ? goal.trim().replace(/\s+/g, ' ').slice(0, 240) : goal.trim().replace(/\s+/g, ' ')}`,
     '',
     '## 目标原文',
     goal.trim(),
@@ -160,13 +165,19 @@ function buildPlannerPrompt(
     '',
     `可用 agentId 白名单：${usable.map((agent) => agent.id).join(', ') || '无'}`,
     '',
-    '## 交付方式（这是硬要求）',
-    `把最终的任务图 JSON 写入当前工作目录下的 ${PLAN_FILENAME} 文件，用你的写文件工具完成。`,
-    '这是唯一的交付渠道。只在回复里贴 JSON 不算交付，编排器读不到就等于你没做。',
-    '写完之后可以再简短说明一句，但文件必须存在且内容是合法 JSON。',
+    ...(workspaceFiles.length ? ['## 仓库已跟踪文件（节录）', JSON.stringify(workspaceFiles), ''] : []),
+    '## 交付方式',
+    ...(textOnly ? [
+      '只在最终回复提交完整任务图 JSON。编排器负责解析、校验和写入项目。',
+      '使用上面给出的目标、文件索引和可用 Agent。直接生成结果，严禁调用 Shell、文件工具、技能或子 Agent。',
+    ] : [
+      `把最终的任务图 JSON 写入当前工作目录下的 ${PLAN_FILENAME} 文件，用你的写文件工具完成。`,
+      '写好文件后可附一句说明。',
+    ]),
     '',
     '## 输出要求',
-    '文件内容是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
+    '任务图是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
+    '- 实现节点只可选择具备工程工具的 Agent。HTTP 文本模型可以承担规划或文本审查。',
     '结构示例：',
     '{',
     '  "title": "短标题",',
@@ -180,11 +191,24 @@ function buildPlannerPrompt(
     '      "description": "要做什么、验收标准是什么",',
     '      "dependsOn": [],',
     '      "files": ["src/core/**"],',
+    '      "deliverables": [{"path":"src/core/index.ts","description":"核心流程入口"}],',
+    '      "acceptance": ["给定参考输入，运行主流程，输出符合示例"],',
     '      "agentId": "claude",',
     '      "maxAttempts": 3',
     '    }',
     '  ]',
     '}',
+    '',
+    '## 分解方法',
+    textOnly ? '- 根据规格和已提供的路径规划。缺少工程信息时，在对应任务的验收或说明中标出需要核实的入口。'
+      : '- 先通读目标、界面流程、限制和验收条件，有既有工程时核实入口与已有模块。',
+    '- 按业务主链拆分阶段。先确定共享接口或基础约定，再展开可并行的实施任务，最后串起集成、端到端验证和交付。',
+    '- 实现任务的 files 是允许改动的边界，deliverables 是实际要落盘的文件清单。每个交付项给具体相对路径与用途，不使用通配符。若要求删除文件，声明 kind: remove。',
+    '- deliverables 仅可添加到 implement 节点。review、approval、route 节点省略 deliverables。',
+    '- 实现和审查节点各填 acceptance，写明可以重现的输入、操作与预期结果。审查任务覆盖主路径和与范围相关的失败场景。',
+    '- 所有实施任务都应能沿审查、审批或直接依赖关系追溯到最终交付节点。',
+    '- 分解粒度按用户设置。同一责任且验收不可分的工作可以合并，审批和关键验证应能在图上定位。',
+    '- 写图前逐项核对规格，关注漏项、交叉覆盖、无效并行、缺少验收和未验证的假设。不要为凑数量拆碎简单任务。',
     '',
     '## 硬性约束',
     '- 节点 id 只能用小写字母、数字与连字符，且全图唯一',
@@ -216,7 +240,7 @@ function buildPlannerPrompt(
  * thinking），第一个配平对象是事件而不是答案。所以逐个扫描配平对象，
  * 只认带 `nodes` 数组的那个——这才是任务图。
  */
-function extractJsonObject(text: string): unknown {
+export function extractJsonObject(text: string): unknown {
   const candidates = [/(?:```(?:json)?\s*)([\s\S]*?)```/i.exec(text)?.[1], text]
     .filter((item): item is string => Boolean(item));
 
@@ -254,10 +278,22 @@ function extractJsonObject(text: string): unknown {
 export async function readSubmittedPlan(cwd: string): Promise<unknown | undefined> {
   try {
     const raw = await readFile(join(cwd, PLAN_FILENAME), 'utf8');
-    return JSON.parse(raw) as unknown;
+    return JSON.parse(raw.replace(/^\uFEFF/, '')) as unknown;
   } catch {
     return undefined;
   }
+}
+
+export function replyPlan(agent: AgentProfile): boolean {
+  return agent.transport === 'acp' || agent.transport === 'http-model';
+}
+
+export function draftFromReplies(...replies: string[]): unknown {
+  for (const reply of replies) {
+    const parsed = extractJsonObject(reply);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
 }
 
 function looksLikeDag(value: unknown): boolean {
@@ -341,6 +377,9 @@ export async function generateDag(
   }
 
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const textOnly = replyPlan(agent);
+  const policy = textOnly ? 'default' : PLANNER_POLICY;
+  const files = textOnly ? await execution.workspaceFiles?.() ?? [] : [];
   const issues: DagIssue[] = [];
   const seen = new Set<string>();
 
@@ -355,7 +394,7 @@ export async function generateDag(
     .slice(2, 8)}`;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const prompt = buildPlannerPrompt(goal, catalog, issues);
+    const prompt = buildPlannerPrompt(goal, catalog, issues, textOnly, files);
     const nodeId = `attempt-${attempt}`;
     options.signal?.throwIfAborted();
 
@@ -374,7 +413,7 @@ export async function generateDag(
     const argv = buildAgentArgv(agent, {
       prompt,
       workdir: cwd,
-      policy: PLANNER_POLICY,
+      policy,
     });
 
     // 必须按平台解析，不能从裸 stdout 里捞 JSON：CLI Agent 的输出本身
@@ -382,12 +421,12 @@ export async function generateDag(
     // 事件而不是答案。只把 text 与 result 类事件拼成正文，再从正文里找 DAG。
     const parser = createParser(agent.launch.parser);
     let answer = '';
+    let final = '';
     const collect = (events: AgentEvent[]): void => {
       execution.onEvents?.(events);
       for (const event of events) {
-        if (event.kind === 'text' || event.kind === 'result') {
-          answer += event.text ?? '';
-        }
+        if (event.kind === 'text') answer += event.text ?? '';
+        if (event.kind === 'result' && event.text) final = event.text;
       }
     };
 
@@ -403,7 +442,7 @@ export async function generateDag(
         cwd,
         timeoutMs: agent.timeoutMs,
         signal: options.signal,
-        policy: PLANNER_POLICY,
+        policy,
       },
       (chunk) => {
         collect(parser.push(chunk));
@@ -412,12 +451,11 @@ export async function generateDag(
     );
     collect(parser.finish());
 
-    // 交付文件优先；读不到才退回解析 stdout（兼容不写文件的 Agent）
-    const submitted = await readSubmittedPlan(cwd);
-    const candidate = answer.trim() || result.output;
-    const raw = submitted ?? extractJsonObject(candidate);
+    const candidate = final || answer.trim() || result.output;
+    const fromReply = draftFromReplies(final, answer, result.output);
+    const raw = textOnly && fromReply !== undefined ? fromReply
+      : await readSubmittedPlan(cwd) ?? fromReply;
 
-    // 读完再释放工作区，顺序不能反
     await execution.workspace.release(workspaceRunId, nodeId).catch(() => {});
     options.signal?.throwIfAborted();
     if (result.cancelled) {
@@ -425,26 +463,17 @@ export async function generateDag(
     }
 
     if (raw === undefined) {
-      // 连文件带 stdout 都没拿到东西：此时才把失败归因到执行本身
       if (!result.ok) {
-        if (attempt === maxAttempts) {
-          throw new DagGenerationError(
-            result.timedOut
-              ? `规划 Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
-              : `规划 Agent 执行失败：${result.error ?? `退出码 ${result.exitCode ?? '未知'}`}`,
-            attempt,
-            issues,
-          );
-        }
+        const reason = result.timedOut
+          ? `规划 Agent 超时（${Math.round(agent.timeoutMs / 1000)} 秒）`
+          : `规划 Agent 执行失败：${result.error ?? `退出码 ${result.exitCode ?? '未知'}`}`;
+        if (attempt === maxAttempts) throw new DagGenerationError(reason, attempt, issues);
+        await execution.onRetry?.(attempt, truncate(reason, 450));
         continue;
       }
-      if (attempt === maxAttempts) {
-        throw new DagGenerationError(
-          `Agent 没有把任务图写入 ${PLAN_FILENAME}：${truncate(candidate, 400)}`,
-          attempt,
-          issues,
-        );
-      }
+      const reason = textOnly ? 'Agent 未返回完整的任务图 JSON' : 'Agent 未找到可读取的任务图 ' + PLAN_FILENAME;
+      if (attempt === maxAttempts) throw new DagGenerationError(reason + '：' + truncate(candidate, 400), attempt, issues);
+      await execution.onRetry?.(attempt, reason);
       continue;
     }
 
@@ -471,10 +500,13 @@ export async function generateDag(
           issues,
         );
       }
+      const issue = parsed.error.issues[0];
+      const detail = issue && (issue.path.join('.') || '根对象') + ' ' + issue.message;
+      await execution.onRetry?.(attempt, '任务图格式有误' + (detail ? ' · ' + detail : ''));
       continue;
     }
 
-    const validation = validateDag(parsed.data, catalog);
+    const validation = validateDag(parsed.data, catalog, { requireDeliverables: options.requireDeliverables });
     if (!validation.ok) {
       for (const issue of validation.issues) {
         const key = issueKey(issue);
@@ -483,9 +515,8 @@ export async function generateDag(
           issues.push(issue);
         }
       }
-      if (attempt === maxAttempts) {
-        break;
-      }
+      if (attempt === maxAttempts) break;
+      await execution.onRetry?.(attempt, validation.issues.slice(0, 2).map((issue) => issue.message).join('。'));
       continue;
     }
 

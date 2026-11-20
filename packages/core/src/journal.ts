@@ -98,6 +98,7 @@ function resetNode(run: RunFacts, nodeId: string): string[] {
       escalated: undefined,
       artifactBytes: undefined,
       artifactFiles: undefined,
+      delivery: undefined,
       mergedBranch: undefined,
       attempts: node.attempts + Number(id === nodeId),
     };
@@ -181,6 +182,12 @@ export function reduce(
   event: OrchestratorEvent,
 ): ProjectState {
   switch (event.type) {
+    case 'run.deleted': {
+      const runs = { ...state.runs };
+      delete runs[event.runId];
+      return { runs, approvals: state.approvals.filter((approval) => approval.runId !== event.runId) };
+    }
+
     case 'run.created':
       /**
        * `workspaceRoot` 在这里归一化，而不是让每个读取方自己判空。
@@ -217,6 +224,8 @@ export function reduce(
             ]),
           );
         }
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
         run.frozenAt = event.at;
         run.stage = 'execute';
       });
@@ -231,12 +240,25 @@ export function reduce(
        */
       return withRun(state, event.runId, (run) => {
         run.planFailure = undefined;
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
+      });
+
+    case 'plan.checking':
+      return withRun(state, event.runId, (run) => { run.planCheckingAt = event.at; });
+
+    case 'plan.drafted':
+      return withRun(state, event.runId, (run) => {
+        run.planDraft = { revision: event.revision, at: event.at };
+        run.planCheckingAt = undefined;
       });
 
     case 'plan.failed':
       // 失败是结论而不是噪音：它必须进事实，否则这个运行除了「创建过」
       // 之外没有任何可派生状态，界面上会永远停在「运行中」。
       return withRun(state, event.runId, (run) => {
+        run.planDraft = undefined;
+        run.planCheckingAt = undefined;
         run.planFailure = {
           at: event.at,
           message: event.message,
@@ -264,6 +286,7 @@ export function reduce(
       return withNode(next, event.runId, event.nodeId, (node) => {
         node.startedAt = event.at;
         node.finishedAt = undefined;
+        node.delivery = undefined;
         node.failureReason = undefined;
         // 重新开始意味着「待恢复」这个展示不再成立：不清掉它，看板会一直
         // 说这个节点已停止，而它正在跑
@@ -274,6 +297,7 @@ export function reduce(
     case 'node.completed':
       return withNode(state, event.runId, event.nodeId, (node) => {
         node.finishedAt = event.at;
+        node.delivery = event.delivery;
         node.failureReason = undefined;
         node.interruptedAt = undefined;
       });

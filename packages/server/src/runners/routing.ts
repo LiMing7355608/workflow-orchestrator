@@ -30,6 +30,7 @@ export class RoutingAgentRunner implements AgentRunner {
   private readonly codex: CodexAppServerRunner;
   private readonly dshSdk: DshSdkRunner;
   private readonly acp: AcpRunner;
+  private readonly http?: AgentRunner;
 
   constructor(
     /**
@@ -40,8 +41,9 @@ export class RoutingAgentRunner implements AgentRunner {
      * 平台、或目录里改了 transport，都得重启才生效。
      */
     private readonly resolveTransport: (agentId: string) => AgentTransport,
-    options: { registry?: ProcessRegistry; log?: LogSink } = {},
+    options: { registry?: ProcessRegistry; log?: LogSink; http?: AgentRunner } = {},
   ) {
+    this.http = options.http;
     this.cli = new SpawnAgentRunner(options.registry, options.log);
     this.claudeSdk = new ClaudeSdkRunner(options.log);
     this.codex = new CodexAppServerRunner(options.log);
@@ -59,6 +61,9 @@ export class RoutingAgentRunner implements AgentRunner {
         return this.codex;
       case 'dsh-sdk':
         return this.dshSdk;
+      case 'http-model':
+        if (!this.http) throw new Error('未配置 HTTP 模型执行器。');
+        return this.http;
       case 'acp':
         return this.acp;
       default:
@@ -90,6 +95,7 @@ export class RoutingAgentRunner implements AgentRunner {
       this.codex.cancel(request).catch(() => 0),
       this.dshSdk.cancel(request).catch(() => 0),
       this.acp.cancel(request).catch(() => 0),
+      this.http?.cancel?.(request).catch(() => 0) ?? Promise.resolve(0),
     ]);
     return outcomes.reduce((sum, count) => sum + count, 0);
   }

@@ -71,6 +71,22 @@ export interface WorkflowRunSummary {
    * 而不是继续推进。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
+}
+
+export interface TaskDeliverable {
+  path: string;
+  description?: string;
+  kind?: 'file' | 'remove';
+}
+
+export interface SavedTaskFiles {
+  revision: string;
+  files: Array<{ path: string; bytes: number }>;
+  fileCount: number;
+  removed: string[];
 }
 
 export interface WorkflowNode {
@@ -85,6 +101,11 @@ export interface WorkflowNode {
   agentId?: string;
   dependsOn: string[];
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
+  startedAt?: string;
+  finishedAt?: string;
   attempts: number;
   durationMs?: number;
   /**

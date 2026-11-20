@@ -7,6 +7,7 @@ import {
 import { AppShell } from '../components/layout/AppShell';
 import { AgentsPage } from '../pages/AgentsPage';
 import { HomePage } from '../pages/HomePage';
+import { MeetingsPage } from '../pages/MeetingsPage';
 import { NewRunPage } from '../pages/NewRunPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { RunDetailPage } from '../pages/RunDetailPage';
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="runs" element={<RunRecordsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="meetings/:meetingId?" element={<MeetingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

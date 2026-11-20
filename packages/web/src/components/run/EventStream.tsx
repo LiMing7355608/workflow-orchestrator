@@ -1,227 +1,123 @@
-import {
-  Bot,
-  ChevronRight,
-  GitBranch,
-  Info,
-  ScrollText,
-  ShieldCheck,
-  UserCheck,
-  type LucideIcon,
-} from 'lucide-react';
+import { ChevronRight, MessageSquare, ScrollText } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { cn } from '../../lib/cn';
 import { formatDateTime } from '../../lib/format';
-import type { AgentEventKind, WorkflowEvent } from '../../types/workflow';
-import { Badge, type BadgeTone } from '../ui/Badge';
+import { displayNodeStatus, eventToolLabel, nodeStatusMeta } from '../../lib/workflow-meta';
+import type { WorkflowEvent, WorkflowNode } from '../../types/workflow';
+import { Badge } from '../ui/Badge';
+import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Segmented } from '../ui/Segmented';
 
 type EventFilter = 'all' | WorkflowEvent['type'];
-type EventMeta = {
-  label: string;
-  icon: LucideIcon;
-  dot: string;
-  tile: string;
-  tone: BadgeTone;
+const typeLabels: Record<WorkflowEvent['type'], string> = {
+  stage: '阶段', agent: 'Agent', review: '审查', approval: '审批', system: '系统',
 };
-
-const eventMeta: Record<WorkflowEvent['type'], EventMeta> = {
-  stage: {
-    label: '阶段',
-    icon: GitBranch,
-    dot: 'bg-accent',
-    tile: 'bg-accent-soft text-accent',
-    tone: 'blue',
-  },
-  agent: {
-    label: 'Agent',
-    icon: Bot,
-    dot: 'bg-passive',
-    tile: 'bg-subtle text-muted',
-    tone: 'neutral',
-  },
-  review: {
-    label: '审查',
-    icon: ShieldCheck,
-    dot: 'bg-review',
-    tile: 'bg-review-soft text-review',
-    tone: 'violet',
-  },
-  approval: {
-    label: '审批',
-    icon: UserCheck,
-    dot: 'bg-warning',
-    tile: 'bg-warning-soft text-warning',
-    tone: 'amber',
-  },
-  system: {
-    label: '系统',
-    icon: Info,
-    dot: 'bg-passive',
-    tile: 'bg-subtle text-muted',
-    tone: 'neutral',
-  },
-};
-
-const filterOptions: Array<{ value: EventFilter; label: string }> = [
+const options: Array<{ value: EventFilter; label: string }> = [
   { value: 'all', label: '全部' },
-  { value: 'stage', label: '阶段' },
-  { value: 'agent', label: 'Agent' },
-  { value: 'review', label: '审查' },
-  { value: 'approval', label: '审批' },
-  { value: 'system', label: '系统' },
+  ...Object.entries(typeLabels).map(([value, label]) => ({ value: value as WorkflowEvent['type'], label })),
 ];
 
-/**
- * agent.output 的细分标记。
- *
- * text 故意不给标记：绝大多数行都是正文，逐行挂个「回复」只会制造噪声。
- * 这里只标注真正需要一眼分辨的几类。
- */
-const kindMeta: Partial<Record<AgentEventKind, { label: string; className: string }>> = {
-  // 思考不是回答：这里只给一个弱标记，说明这一行分量比正文轻
-  thinking: { label: '思考', className: 'text-muted' },
-  tool: { label: '工具', className: 'text-accent' },
-  result: { label: '结果', className: 'text-success' },
-  usage: { label: '用量', className: 'text-passive' },
-  error: { label: '错误', className: 'text-danger' },
-  session: { label: '会话', className: 'text-review' },
-};
-
-interface EventStreamProps {
-  events: WorkflowEvent[];
-  onSelectNode: (nodeId: string | null) => void;
+function eventLabel(event: WorkflowEvent): string {
+  switch (event.kind) {
+    case 'tool': return '调用 ' + eventToolLabel(event);
+    case 'thinking': return '过程输出';
+    case 'result': return '返回结果';
+    case 'status': return '客户端状态';
+    case 'usage': return '调用用量';
+    case 'session': return '会话信息';
+    case 'error': return '执行错误';
+    case 'text': return 'Agent 消息';
+    default: return typeLabels[event.type];
+  }
 }
 
-export function EventStream({ events, onSelectNode }: EventStreamProps) {
+function compact(event: WorkflowEvent) {
+  if (!event.kind || event.kind === 'status' || event.kind === 'error') return event.message.replace(/\s+/g, ' ').slice(0, 104);
+  return eventLabel(event);
+}
+
+interface EventGroup {
+  id: string;
+  node?: WorkflowNode;
+  entries: WorkflowEvent[];
+}
+
+export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }: {
+  events: WorkflowEvent[];
+  nodes?: WorkflowNode[];
+  onSelectNode: (nodeId: string) => void;
+  onOpenPlanner?: () => void;
+}) {
   const [filter, setFilter] = useState<EventFilter>('all');
+  const [limits, setLimits] = useState<Record<string, number>>({});
+  const { groups, count } = useMemo(() => {
+    const matched = events.filter((event) => filter === 'all' || event.type === filter);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const grouped = new Map<string, EventGroup>();
+    for (const event of matched.reverse().sort((left, right) => right.at.localeCompare(left.at))) {
+      const key = event.nodeId ? 'node:' + event.nodeId : event.agent || event.kind ? 'planner' : 'run';
+      const group = grouped.get(key) ?? { id: key, node: event.nodeId ? byId.get(event.nodeId) : undefined, entries: [] };
+      group.entries.push(event);
+      grouped.set(key, group);
+    }
+    return { groups: [...grouped.values()], count: matched.length };
+  }, [events, nodes, filter]);
 
-  const filtered = useMemo(() => {
-    const matched =
-      filter === 'all'
-        ? events
-        : events.filter((event) => event.type === filter);
-
-    return [...matched].reverse().sort(
-      (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime(),
-    );
-  }, [events, filter]);
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="shrink-0 border-b border-line px-4 py-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="max-w-full overflow-x-auto">
-            <Segmented
-              options={filterOptions}
-              value={filter}
-              onChange={setFilter}
-              ariaLabel="按事件类型筛选"
-            />
-          </div>
-          <span className="text-[10px] tabular-nums text-passive">
-            共 {filtered.length} 条
-          </span>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-4">
-        {filtered.length > 0 ? (
-          <div className="relative space-y-3 border-l border-line pl-5">
-            {filtered.map((event) => {
-              const meta = eventMeta[event.type];
-              const Icon = meta.icon;
-              const kind = event.kind ? kindMeta[event.kind] : undefined;
-              const command = event.kind === 'tool' && event.toolName &&
-                event.message !== `调用工具 ${event.toolName}` ? event.toolName : undefined;
-              const content = (
-                <>
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      'absolute -left-[24px] top-4 h-2 w-2 rounded-full ring-4 ring-canvas',
-                      meta.dot,
-                    )}
-                  />
-                  <div className="rounded-lg border border-line bg-surface p-3 transition-colors hover:border-line-strong">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={cn(
-                          'grid h-6 w-6 place-items-center rounded-md',
-                          meta.tile,
-                        )}
-                      >
-                        <Icon className="h-3 w-3" strokeWidth={1.8} />
-                      </span>
-                      <Badge tone={meta.tone} dot>
-                        {meta.label}
-                      </Badge>
-                      <span className="text-[10px] tabular-nums text-passive">
-                        {formatDateTime(event.at)}
-                      </span>
-                      {event.agent ? (
-                        <span className="text-[10px] text-muted">
-                          {event.agent}
-                        </span>
-                      ) : null}
-                      {event.nodeId ? (
-                        <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted">
-                          查看节点
-                          <ChevronRight
-                            className="h-3 w-3"
-                            strokeWidth={1.8}
-                          />
-                        </span>
-                      ) : null}
-                    </div>
-
-                    <p className="mt-2 flex items-start gap-2 text-[12px] leading-5 text-ink">
-                      {kind ? (
-                        <span
-                          className={cn(
-                            'mt-1 shrink-0 rounded border border-current/25 px-1 text-[10px] font-medium leading-4',
-                            kind.className,
-                          )}
-                        >
-                          {kind.label}
-                        </span>
-                      ) : null}
-                      <span className="min-w-0 break-words">
-                        {command ? (
-                          <code className="mb-1 block whitespace-pre-wrap text-[11px] text-muted">{command}</code>
-                        ) : null}
-                        <span className="whitespace-pre-wrap">{event.message}</span>
-                      </span>
-                    </p>
-                  </div>
-                </>
-              );
-
-              return event.nodeId ? (
-                <div key={event.id} className="relative">
-                  <button
-                    type="button"
-                    onClick={() => onSelectNode(event.nodeId ?? null)}
-                    className="block w-full text-left"
-                  >
-                    {content}
-                  </button>
+  return <div className="flex h-full min-h-0 flex-col bg-canvas">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line bg-surface px-4 py-2.5">
+      <div className="max-w-full overflow-x-auto"><Segmented options={options} value={filter} onChange={setFilter} ariaLabel="按事件类型筛选" /></div>
+      <span className="text-[11px] text-muted">{groups.length} 组 · {count} 条事件</span>
+    </div>
+    <div role="region" aria-label="事件流滚动区域" tabIndex={0} className="workspace-scroll min-h-0 flex-1 px-3 py-3 sm:px-4">
+      {!groups.length && <EmptyState icon={ScrollText} title="没有匹配的事件" description="调整事件类型筛选后再试。" />}
+      <div className="space-y-2">
+        {groups.map(({ id, node, entries }) => {
+          const latest = entries[0]!;
+          const agent = node?.agent ?? entries.find((event) => event.agent)?.agent;
+          const status = node && nodeStatusMeta[displayNodeStatus(node)];
+          const useful = entries.find((entry) => !['usage', 'session', 'thinking'].includes(entry.kind ?? '')) ?? latest;
+          const limit = limits[id] ?? 25;
+          return <details key={id} className="event-group rounded-xl border border-line bg-surface">
+            <summary className="flex cursor-pointer list-none items-start gap-2 px-3 py-3 hover:bg-subtle/40">
+              <ChevronRight aria-hidden="true" className="event-chevron mt-0.5 size-4 shrink-0 text-muted" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong className="break-words text-xs text-ink">{node?.title ?? (id === 'run' ? '运行阶段' : id === 'planner' ? 'PM 与编排器' : latest.nodeId)}</strong>
+                  {status && <Badge dot tone={status.tone}>{status.label}</Badge>}
                 </div>
-              ) : (
-                <div key={event.id} className="relative">
-                  {content}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <EmptyState
-            icon={ScrollText}
-            title="没有匹配的事件"
-            description="调整事件类型筛选后再试。"
-          />
-        )}
+                <p className="mt-1 truncate text-[11px] text-muted">{agent && agent + ' · '}{compact(useful)}</p>
+              </div>
+              <div className="min-w-0 shrink-0 text-right text-[10px] tabular-nums text-muted">
+                <time dateTime={latest.at} title={formatDateTime(latest.at)}>{new Date(latest.at).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                <p className="mt-1">{entries.length} 条</p>
+              </div>
+            </summary>
+            <div className="space-y-1.5 border-t border-line px-3 py-2.5">
+              {(node || id === 'planner' && onOpenPlanner) && <Button size="sm" variant="secondary"
+                onClick={() => node ? onSelectNode(node.id) : onOpenPlanner?.()}>
+                <MessageSquare className="size-3.5" />{node ? '打开 Agent 对话' : '和编排器对话'}
+              </Button>}
+              {entries.slice(0, limit).map((event) => {
+                const meta = <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink">
+                  {eventLabel(event)}<time className="text-[10px] text-muted" dateTime={event.at}>{formatDateTime(event.at)}</time>
+                </span>;
+                const message = <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-ink [overflow-wrap:anywhere]">
+                  {event.kind === 'tool' && event.toolName && event.toolName !== 'other' && event.toolName !== eventToolLabel(event) ? event.toolName + '\n' : ''}{event.message}
+                </p>;
+                return event.kind || event.message.length > 150
+                  ? <details className="rounded-lg border border-line bg-subtle/25" key={event.id}>
+                    <summary className="cursor-pointer px-2.5 py-1.5">{meta}</summary>
+                    <div className="border-t border-line px-2.5 py-2">{message}</div>
+                  </details>
+                  : <div className="space-y-1 px-2.5 py-1.5" key={event.id}>{meta}{message}</div>;
+              })}
+              {entries.length > limit && <Button size="sm" variant="ghost" onClick={() => setLimits((previous) => ({ ...previous, [id]: limit + 50 }))}>
+                展开更多事件
+              </Button>}
+            </div>
+          </details>;
+        })}
       </div>
     </div>
-  );
+  </div>;
 }

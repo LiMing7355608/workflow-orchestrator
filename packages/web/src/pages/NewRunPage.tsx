@@ -18,17 +18,22 @@ import {
   useState,
   type DragEvent,
 } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { AgentModelField } from '../components/agents/AgentModelField';
+import { RecentInterviews } from '../components/run/RecentInterviews';
+import { SpecMeetings } from '../components/run/SpecMeetings';
+import { SpecInterviewPanel } from '../components/run/SpecInterviewPanel';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Field } from '../components/ui/Field';
 import { Segmented } from '../components/ui/Segmented';
-import { createRun, fetchAgents, fetchRuntime, pickDirectory } from '../lib/api';
+import { createRun, fetchAgents, fetchMeeting, fetchInterview, fetchRuntime, pickDirectory, startInterview, submitInterviewAnswer } from '../lib/api';
 import { cn } from '../lib/cn';
 import { formatFileSize } from '../lib/format';
 import { useApiResource } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
 import type { AgentProfile } from '../types/agent';
+import type { InterviewView } from '../types/operations';
 
 type Granularity = 'coarse' | 'medium' | 'fine';
 /**
@@ -173,10 +178,25 @@ export function NewRunPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [mode, setMode] = useState<'interview' | 'direct'>('interview');
+  const [interview, setInterview] = useState<InterviewView | null>(null);
+  const [interviewBusy, setInterviewBusy] = useState(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const [chosenDesigner, setDesignAgentId] = useState('');
+  const [designModel, setDesignModel] = useState('');
+  const [params, setParams] = useSearchParams();
+  const interviewId = params.get('spec');
+  const interviewRoot = params.get('project');
   const navigate = useNavigate();
+  const fromMeeting = params.get('meeting');
   const [granularity, setGranularity] = useState<Granularity>('medium');
   const [parallelism, setParallelism] = useState<Parallelism>('4');
   const [reviewRounds, setReviewRounds] = useState<ReviewRounds>('2');
+  const [reviewPlan, setReviewPlan] = useState(true);
 
   // 三个角色的 Agent 在这里就定下来，而不是等 Planner 自己挑
   const [chosenPlanner, setPlannerAgentId] = useState('');
@@ -191,6 +211,51 @@ export function NewRunPage() {
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   /** 原生目录选择框正在弹（它会阻塞到用户点确定或取消） */
   const [picking, setPicking] = useState(false);
+
+  useEffect(() => {
+    if (!fromMeeting) return;
+    const controller = new AbortController();
+    void fetchMeeting(fromMeeting, controller.signal).then((room) => {
+      if (!room?.report || room.reportStale || controller.signal.aborted) return;
+      setMode('direct');
+      setText((previous) => previous || room.report || '');
+      setWorkspaceRoot(room.workspaceRoot);
+    });
+    return () => controller.abort();
+  }, [fromMeeting]);
+
+  useEffect(() => {
+    if (interviewId) { setMode('interview'); setSubmitError(null); }
+  }, [interviewId]);
+
+  const watchInterview = Boolean(interviewId && (
+    interview?.id !== interviewId || interview.status === 'thinking'
+  ));
+  useEffect(() => {
+    if (!watchInterview || !interviewId) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let misses = 0;
+    const poll = async () => {
+      const next = await fetchInterview(interviewId, interviewRoot, controller.signal);
+      if (controller.signal.aborted) return;
+      if (next) {
+        misses = 0;
+        setInterview(next);
+        setWorkspaceRoot(next.workspaceRoot);
+        setText(next.idea);
+        setSubmitError(null);
+      } else if (++misses >= 4) {
+        setSubmitError('暂时无法读取访谈，系统会继续尝试恢复。');
+      }
+      if (!next || next.status === 'thinking') timer = window.setTimeout(() => void poll(), misses >= 4 ? 3000 : 850);
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [interviewId, interviewRoot, watchInterview]);
 
   const { data: agents, loading: loadingAgents } = useApiResource(fetchAgents, []);
   const { data: runtime } = useApiResource(fetchRuntime, null);
@@ -218,7 +283,11 @@ export function NewRunPage() {
   const selectedAgent = (chosen: string, fallback?: string) =>
     usableAgents.some((agent) => agent.id === chosen) ? chosen : fallback ?? '';
   const plannerAgentId = selectedAgent(chosenPlanner, primary);
-  const implementAgentId = selectedAgent(chosenImplementer, primary);
+  const designerId = selectedAgent(chosenDesigner, primary);
+  const designer = usableAgents.find((agent) => agent.id === designerId);
+  const implementers = usableAgents.filter((agent) => agent.capabilities.tools);
+  const implementAgentId = implementers.some((agent) => agent.id === chosenImplementer)
+    ? chosenImplementer : (implementers.find((agent) => agent.capabilities.structured) ?? implementers[0])?.id ?? '';
   const reviewerDefault = usableAgents.find((agent) => agent.id !== implementAgentId)?.id
     ?? implementAgentId;
   const reviewAgentId = selectedAgent(chosenReviewer, reviewerDefault);
@@ -291,7 +360,8 @@ export function NewRunPage() {
     addFiles(event.dataTransfer.files);
   }
 
-  const canSubmit = Boolean(text.trim() && runtime && plannerAgentId && implementAgentId && reviewAgentId);
+  const finalSpec = mode === 'interview' && interview?.id === interviewId && interview.status === 'ready' ? interview.spec : undefined;
+  const canSubmit = Boolean((mode === 'direct' ? text.trim() : finalSpec) && runtime && plannerAgentId && implementAgentId && reviewAgentId);
 
   /**
    * 目标目录的就地校验结果。
@@ -307,6 +377,45 @@ export function NewRunPage() {
         ? '需要绝对路径，例如 D:\\projects\\calculator'
         : null;
 
+  function resetInterview() {
+    setParams({}, { replace: true });
+    setInterview(null);
+    setText('');
+    setSubmitError(null);
+  }
+
+  async function beginInterview() {
+    if (interviewBusy || !designerId || workspaceRootError || !text.trim()) return;
+    setInterviewBusy(true);
+    setSubmitError(null);
+    try {
+      const session = await startInterview(text.trim(), trimmedWorkspaceRoot, designerId, designModel.trim() || undefined);
+      if (!mounted.current) return;
+      setInterview(session);
+      setWorkspaceRoot(session.workspaceRoot);
+      setParams({ spec: session.id }, { replace: true });
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : '启动访谈失败。');
+    } finally {
+      setInterviewBusy(false);
+    }
+  }
+
+  async function answerInterview(answer?: string): Promise<boolean> {
+    if (!interview || interviewBusy) return false;
+    setInterviewBusy(true);
+    setSubmitError(null);
+    try {
+      setInterview(await submitInterviewAnswer(interview, answer));
+      return true;
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : '访谈未能继续。');
+      return false;
+    } finally {
+      setInterviewBusy(false);
+    }
+  }
+
   async function handleSubmit() {
     if (!canSubmit || submitting || workspaceRootError) {
       return;
@@ -314,26 +423,19 @@ export function NewRunPage() {
     setSubmitting(true);
     setSubmitError(null);
 
-    // 分解粒度和审查轮次仍然只是给 Planner 的参考（后端没有对应参数），
-    // 并行度不同：它会被落成运行事实、真的决定调度器一次派发几个节点，
-    // 所以下面单独传 `concurrency`，不再只靠这段文字。
-    const granularityLabel =
-      granularityOptions.find((option) => option.value === granularity)?.label ??
-      granularity;
-    const settings = [
-      `分解粒度：${granularityLabel}`,
-      `并行度：${parallelism}`,
-      `审查轮次：${reviewRounds} 轮`,
-    ].join('；');
-
-    const goal = `${text.trim()}\n\n补充要求：${settings}`;
-    const title = text.trim().split('\n')[0]?.slice(0, 24) || '未命名运行';
+    const goal = text.trim();
+    const title = (finalSpec || text).trim().split('\n')[0]?.replace(/^#+\s+/, '').slice(0, 48) || '未命名运行';
 
     const outcome = await createRun({
       title,
       goal,
       // 目录必须随创建请求带走：运行一旦建好，目标仓库就是它的事实了
-      workspaceRoot: trimmedWorkspaceRoot,
+      workspaceRoot: finalSpec ? interview!.workspaceRoot : trimmedWorkspaceRoot,
+      specId: finalSpec ? interview!.id : undefined,
+      sourceMeetingId: mode === 'direct' && fromMeeting ? fromMeeting : undefined,
+      reviewPlan,
+      requireDeliverables: true,
+      specSettings: { granularity, reviewRounds: Number(reviewRounds) },
       // 并行度是这次运行的属性，不是服务的属性
       concurrency: Number(parallelism),
       plannerAgentId: plannerAgentId || undefined,
@@ -382,32 +484,43 @@ export function NewRunPage() {
           新建运行
         </h1>
         <p className="mt-1.5 text-[13px] text-muted">
-          用自然语言描述产品目标，也可以附上设计规格、草图或界面截图。
+          从一个产品想法开始访谈，或提交现成规格交给 PM Agent 拆解。
         </p>
       </div>
 
-      <div className="mt-6 grid grid-cols-[minmax(0,1fr)_320px] items-start gap-4 max-[1050px]:grid-cols-1">
+      {!interviewId && <div className="mt-4 empty:hidden"><RecentInterviews limit={4} /></div>}
+      <div className="new-run-grid mt-6">
+        <div className="min-w-0 space-y-3">
         <Card className="overflow-hidden">
           <div className="flex items-center gap-2 border-b border-line px-5 py-3">
             <Sparkles className="h-4 w-4 text-accent" strokeWidth={1.8} />
             <span className="text-[12px] font-medium text-ink">
               描述你的产品与本期目标
             </span>
-            <span className="ml-auto text-[10px] text-passive">
-              自然语言 · 文件 · 图片
-            </span>
+            <div className="ml-auto">
+              <Segmented
+                ariaLabel="规格输入方式"
+                value={mode}
+                onChange={setMode}
+                options={[
+                  { value: 'interview', label: '需求访谈' },
+                  { value: 'direct', label: '直接使用规格' },
+                ]}
+              />
+            </div>
           </div>
 
           <div className="p-5">
             <textarea
               value={text}
+              readOnly={mode === 'interview' && Boolean(interviewId)}
               onChange={(event) => {
                 setText(event.target.value);
                 setSubmitError(null);
               }}
-              placeholder="例如：做一个面向大学生的二手交易平台，本期需要商品发布、搜索、站内沟通和举报处理；支持微信登录，先覆盖校内交易。"
+              placeholder={mode === 'interview' ? '例如：我想做一个让室友记账的小工具。' : '粘贴已确认的功能、约束和验收条件。'}
               aria-label="产品设计规格"
-              className="min-h-[230px] w-full resize-y border-0 bg-transparent p-0 text-[13px] leading-6 text-ink placeholder:text-passive focus:outline-none"
+              className={cn('w-full resize-y border-0 bg-transparent p-0 text-[13px] leading-6 text-ink placeholder:text-passive focus:outline-none', mode === 'interview' ? 'min-h-[110px]' : 'min-h-[230px]')}
             />
 
             {attachments.length > 0 ? (
@@ -493,6 +606,31 @@ export function NewRunPage() {
             </span>
           </div>
         </Card>
+        {mode === 'interview' && (
+          <SpecInterviewPanel
+            key={interviewId ?? 'new'}
+            session={interview?.id === interviewId ? interview : null}
+            locating={Boolean(interviewId)}
+            busy={interviewBusy}
+            canStart={Boolean(text.trim() && designerId && !workspaceRootError)}
+            settings={<div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1.5 text-[12px] font-medium text-muted">
+                <span>设计 Agent</span>
+                <select value={designerId} onChange={(event) => { setDesignAgentId(event.target.value); setDesignModel(''); }}
+                  disabled={interviewBusy} className="block h-9 w-full rounded-lg border border-line bg-surface px-2.5 text-ink">
+                  {!designerId && <option value="">暂无可用 Agent</option>}
+                  {usableAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.label}</option>)}
+                </select>
+              </label>
+              <AgentModelField agent={designer} value={designModel} onChange={setDesignModel} disabled={interviewBusy} label="规格模型" />
+            </div>}
+            onStart={() => void beginInterview()}
+            onAnswer={answerInterview}
+            onReset={resetInterview}
+            related={interview?.id === interviewId && interview && <SpecMeetings session={interview} onAdopt={setInterview} />}
+          />
+        )}
+        </div>
 
         <div className="space-y-3">
           <Card className="p-4">
@@ -501,9 +639,8 @@ export function NewRunPage() {
               目标目录
             </div>
             <p className="mt-1 text-[10px] leading-4 text-passive">
-              这是 Agent 干活的地方，成果会落在这里——不是编排器自己的仓库。
-              目录还不存在会自动创建并 git init；已存在但不是 git 仓库的也会就地
-              初始化（删掉 .git 即可回到原样）。
+              工作区、过程记录、协作记忆和交付产物会保存在这个项目目录内。
+              新目录会自动准备 Git 基线。
             </p>
 
             <div className="mt-3">
@@ -511,6 +648,7 @@ export function NewRunPage() {
                 <div className="flex gap-1.5">
                   <input
                     value={workspaceRoot}
+                    readOnly={mode === 'interview' && Boolean(interviewId)}
                     onChange={(event) => {
                       setWorkspaceRoot(event.target.value);
                       setSubmitError(null);
@@ -530,7 +668,7 @@ export function NewRunPage() {
                       type="button"
                       size="sm"
                       variant="secondary"
-                      disabled={picking}
+                      disabled={picking || (mode === 'interview' && Boolean(interviewId))}
                       onClick={() => {
                         setPicking(true);
                         setSubmitError(null);
@@ -564,7 +702,7 @@ export function NewRunPage() {
                 </p>
               ) : (
                 <p className="mt-1.5 text-[10px] leading-4 text-passive">
-                  worktree 落在编排器的 data/worktrees 下，不会写进你的仓库。
+                  规格与产物可在该目录的 .workflow-orchestrator 中查看。
                 </p>
               )}
             </div>
@@ -598,7 +736,7 @@ export function NewRunPage() {
                 hint="写代码"
                 value={implementAgentId}
                 onChange={setImplementAgentId}
-                agents={usableAgents}
+                agents={implementers}
               />
               <AgentSelect
                 label="审查"
@@ -651,18 +789,23 @@ export function NewRunPage() {
               </Field>
             </div>
 
-            <Button
+            <label className="flex items-start gap-2 rounded-lg border border-line bg-surface mt-3 px-3 py-2.5 text-[12px] text-ink">
+              <input className="mt-0.5 size-3.5 accent-accent" type="checkbox" checked={reviewPlan} onChange={(event) => setReviewPlan(event.target.checked)} />
+              <span><strong className="font-medium">先核对任务草案</strong><span className="mt-0.5 block text-[10px] text-muted">交叉核对后，由你确认是否派发。</span></span>
+            </label>
+            {(mode === 'direct' || finalSpec) && <Button
               className="mt-4 w-full"
-              disabled={!canSubmit || submitting || Boolean(workspaceRootError)}
+              disabled={!canSubmit || submitting || interviewBusy || Boolean(workspaceRootError)}
               onClick={() => void handleSubmit()}
             >
-              {submitting ? '正在创建…' : '开始拆解'}
+              {submitting ? '正在创建…' : finalSpec ? '确认规格并开始拆解' : '开始拆解'}
               <ArrowRight className="h-4 w-4" strokeWidth={1.8} />
-            </Button>
+            </Button>}
 
             <p className="mt-2 text-[10px] leading-4 text-passive">
-              点下就跳到运行详情：编排器在后台挑一个已安装的 CLI Agent 拆任务图，
-              拆完自动进入执行。拆图本身要几十秒，进度在详情页里看。
+              {mode === 'interview' && !finalSpec
+                ? '访谈使用所选设计 Agent 和规格模型。确认规格后进入 PM 分解。'
+                : '开始拆解后，任务图和执行进度会显示在运行详情。'}
             </p>
           </Card>
 
@@ -676,7 +819,7 @@ export function NewRunPage() {
             </div>
             <ul className="mt-2 space-y-1.5 text-[11px] leading-5 text-muted">
               <li>写清楚目标用户、核心场景和本期不做什么。</li>
-              <li>有设计稿或需求文档时直接作为附件补充。</li>
+              <li>把设计稿或需求文档中的关键信息写进文本框。</li>
               <li>约束越具体，任务拆分和依赖越稳定。</li>
             </ul>
           </Card>

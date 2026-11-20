@@ -17,7 +17,7 @@
  *      否则 `cmd.exe /c dsh.cmd dsh --profile acp` 会在参数解析阶段就退出。
  *   2. `initialize`：必须第一个发。我们声明 `clientCapabilities: {}`——见下文「能力」。
  *   3. `session/new`：`cwd` 传绝对路径，`mcpServers` 传空数组。
- *   4. `session/set_config_option`（可选）：调用方在 argv 里点了模型名才做，失败不阻断。
+ *   4. `session/set_config_option`（可选）：有显式模型时协商，兼容 argv 里的默认模型提示。
  *      但 argv 同时是启动命令，所以往 `modelArgs` 里写 `--model {model}` 有风险，
  *      详见 `applyModel` 的注释。
  *   5. `session/prompt`：`request.stdin ?? argv.join(' ')` 作为一个 text 内容块提交。
@@ -135,6 +135,8 @@
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { AgentProfile } from '@orchestrator/core';
+import type { ModelDirectory } from '../model-providers.js';
 import { Readable, Writable } from 'node:stream';
 import {
   client as createClientApp,
@@ -346,20 +348,53 @@ function summarizeInput(input: unknown): string | undefined {
  * 有的 agent 把 `title` 写成一句人话，有的只写工具名（dsh-acp 就是后者），
  * 两种都要能落出一条有信息的事件。
  */
-function toolEvent(call: {
+type ToolDetails = {
   title?: string | null;
   name?: string | null;
   kind?: string | null;
   rawInput?: unknown;
-  toolCallId?: string;
-}): AgentEvent {
-  const summary = summarizeInput(call.rawInput) ?? call.title ?? call.name ?? call.toolCallId;
-  return {
-    kind: 'tool',
-    toolName: call.name ?? call.kind ?? 'tool',
-    text: summary,
-  };
+};
+
+const toolLabels: Record<string, string> = {
+  pwsh: '执行命令', bash: '执行命令', execute: '执行命令',
+  read: '读取文件', write: '写入文件', edit: '修改文件', search: '搜索工程',
+  glob: '查找文件', grep: '搜索工程', skill: '加载技能',
+};
+
+function toolName(call: ToolDetails): string | undefined {
+  const name = call.name?.trim() || call.title?.trim();
+  if (name && Object.hasOwn(toolLabels, name.toLowerCase())) return toolLabels[name.toLowerCase()];
+  const input = summarizeInput(call.rawInput) ?? '';
+  if (/(?:^|[=. ·])command=/.test(input)) return '执行命令';
+  if (/(?:^|[=. ·])(?:pattern|query)=/.test(input)) return '查找资料';
+  if (/^(?:description=)?skill$/i.test(input)) return '加载技能';
+  if (call.kind && Object.hasOwn(toolLabels, call.kind)) return toolLabels[call.kind];
+  if (name && name !== 'other' && /^[\p{L}\p{N}_.-]{1,48}$/u.test(name)) return name;
+  if (/(?:^|[=. ·])(?:file_path|path)=/.test(input)) return '文件操作';
+  return undefined;
 }
+
+function toolFailure(update: Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>, denied?: boolean): string | undefined {
+  if (denied) return '需要额外权限，本次权限申请已拒绝。';
+  const raw = update.rawOutput;
+  let detail = typeof raw === 'string' ? raw : undefined;
+  if (!detail && raw && typeof raw === 'object') {
+    const fields = raw as Record<string, unknown>;
+    detail = [fields.message, fields.error, fields.stderr].find((item): item is string => typeof item === 'string' && Boolean(item.trim()));
+  }
+  if (!detail) {
+    for (const item of update.content ?? []) {
+      if (item.type !== 'content' || item.content.type !== 'text' || !item.content.text.trim()) continue;
+      detail = item.content.text;
+      break;
+    }
+  }
+  if (!detail?.trim()) return undefined;
+  if (/SetNamedSecurityInfoW failed.*Win32 5/i.test(detail)) return 'Windows 沙箱无法设置工作树访问权限（Win32 5）。';
+  return detail.trim().replace(/(Bearer\s+|api[_-]?key[=:]\s*)[^\s,"']+/gi, '$1[已隐藏]').slice(0, 420);
+}
+
+type RecordedTool = { name?: string; denied?: boolean };
 
 /* ------------------------------------------------------------------ *
  * update → AgentEvent 的翻译
@@ -377,7 +412,7 @@ function toolEvent(call: {
  * 「事件流里没有的东西 = 我们没发的东西」这条因果保持简单，而不是发出一堆
  * 注定被上层筛掉的噪声。
  */
-export function translateUpdate(update: SessionUpdate): AgentEvent[] {
+export function translateUpdate(update: SessionUpdate, previous?: RecordedTool): AgentEvent[] {
   switch (update.sessionUpdate) {
     case 'agent_message_chunk': {
       const text = contentText(update.content);
@@ -390,16 +425,14 @@ export function translateUpdate(update: SessionUpdate): AgentEvent[] {
     }
 
     case 'tool_call':
-      return [toolEvent(update)];
+      return [{ kind: 'tool', toolName: toolName(update) ?? '工具操作',
+        text: summarizeInput(update.rawInput) ?? update.title ?? undefined }];
 
     case 'tool_call_update': {
-      // 一次调用的生命周期会发好几条 update（pending → in_progress → completed）。
-      // 全发出去等于把同一次调用在时间线上重复四遍；只有失败是新事实。
-      if (update.status !== 'failed') {
-        return [];
-      }
-      const label = update.title ?? update.name ?? update.toolCallId;
-      return [{ kind: 'error', text: `工具调用失败：${label}` }];
+      if (update.status !== 'failed') return [];
+      const name = toolName(update) ?? previous?.name ?? '工具操作';
+      const detail = toolFailure(update, previous?.denied);
+      return [{ kind: 'error', text: name + '失败' + (detail ? ' · ' + detail : ' · 调用 ' + update.toolCallId) }];
     }
 
     case 'notice': {
@@ -866,6 +899,7 @@ export class AcpRunner implements AgentRunner {
       lastMessageId: undefined as string | undefined,
       usage: undefined as AgentUsage | undefined,
       permission: { count: 0, kinds: [] } as PermissionLedger,
+      calls: new Map<string, RecordedTool>(),
     };
 
     const emit = (events: AgentEvent[]): void => {
@@ -939,7 +973,15 @@ export class AcpRunner implements AgentRunner {
           state.usage = contextUsage(update.used) ?? state.usage;
         }
 
-        emit(translateUpdate(update));
+        if (update.sessionUpdate === 'tool_call') {
+          if (state.calls.size >= 128) state.calls.delete(state.calls.keys().next().value!);
+          state.calls.set(update.toolCallId, { ...state.calls.get(update.toolCallId), name: toolName(update) });
+        }
+        const prior = update.sessionUpdate === 'tool_call_update' ? state.calls.get(update.toolCallId) : undefined;
+        emit(translateUpdate(update, prior));
+        if (update.sessionUpdate === 'tool_call_update' && (update.status === 'failed' || update.status === 'completed')) {
+          state.calls.delete(update.toolCallId);
+        }
       })
       .onRequest(methods.client.session.requestPermission, ({ params }) => {
         const kind = params.toolCall.kind ?? 'unknown';
@@ -947,6 +989,10 @@ export class AcpRunner implements AgentRunner {
         state.permission.count += 1;
         if (!state.permission.kinds.includes(kind)) {
           state.permission.kinds.push(kind);
+        }
+        const id = params.toolCall.toolCallId;
+        if (state.calls.has(id)) {
+          state.calls.set(id, { name: toolName(params.toolCall) ?? state.calls.get(id)?.name, denied: true });
         }
         const response = answerPermission(params.options);
         this.log.debug('拒绝了 ACP 权限请求', {
@@ -1016,7 +1062,19 @@ export class AcpRunner implements AgentRunner {
       // 续跑时这里发出去的必须是**上游传进来的那个 id**，见 openSession 的注释。
       emit([{ kind: 'session', sessionId: opened.sessionId }]);
 
-      await this.applyModel(agent, opened, { request, argv });
+      const config = await this.applyModel(agent, opened, { request, argv });
+      if (request.reasoningEffort) {
+        const effort = config?.find((item) => item.category === 'thought_level');
+        if (effort?.type === 'select' && effort.currentValue !== request.reasoningEffort) {
+          const low = effort.options.flatMap((item) => 'group' in item ? item.options : [item])
+            .find((item) => item.value === request.reasoningEffort);
+          if (low) {
+            await agent.request(methods.agent.session.setConfigOption, {
+              sessionId: opened.sessionId, configId: effort.id, value: low.value,
+            }).catch((error: unknown) => this.log.debug('ACP 保持客户端推理设置', { runId: request.runId, error }));
+          }
+        }
+      }
 
       const response = await agent.request(methods.agent.session.prompt, {
         sessionId: opened.sessionId,
@@ -1218,10 +1276,7 @@ export class AcpRunner implements AgentRunner {
   /**
    * 按 argv 里点名的模型改会话选择。
    *
-   * 为什么做成「尽力而为」：模型是 agent 侧的配置，选不上不该让节点失败——
-   * 节点没交付是失败，模型名对不上是配置问题，两者在时间线上不该混成一句话。
-   * 拿不到 `category: 'model'` 的选择项（agent 没暴露，或只读）就说明模型由
-   * agent 自己的配置决定，这不是错误。
+   * 产品规格和会议显式传入模型时，需得到 ACP 会话确认。旧的 argv 选择保持兼容。
    *
    * 注意 argv 同时是**启动命令**：往 ACP profile 的 `modelArgs` 里写
    * `--model {model}` 会把一个 agent 未必认识的参数塞进它的命令行。真要固定
@@ -1232,67 +1287,47 @@ export class AcpRunner implements AgentRunner {
     agent: ClientContext,
     opened: OpenedSession,
     input: { request: AgentRunRequest; argv: string[] },
-  ): Promise<void> {
+  ): Promise<OpenedSession['configOptions']> {
     const { request } = input;
-    const wanted = argValue(input.argv, '--model');
-    if (wanted === undefined) {
-      return;
+    const wanted = request.model ?? argValue(input.argv, '--model');
+    if (!wanted) return opened.configOptions;
+
+    const option = opened.configOptions?.find((item) => item.category === 'model' || item.id === 'model');
+    if (option?.type !== 'select') {
+      if (request.model) throw new Error('该 ACP 客户端未提供会话模型选择，请使用客户端默认模型。');
+      return opened.configOptions;
     }
 
-    const option = (opened.configOptions ?? []).find(
-      (item) => item.category === 'model',
-    );
-    // 两段判断而不是一个谓词：`type` 是判别的唯一依据，拿它收窄之后
-    // 才谈得上读 `options` / `currentValue`，不要用一个 `as` 把这件事糊过去。
-    if (!option || option.type !== 'select') {
-      this.log.debug('ACP agent 没有暴露 model 选择项，模型交给 agent 自己的配置', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        exposed: option === undefined ? 'none' : option.type,
-      });
-      return;
-    }
-
-    // 选项可能是平铺的，也可能分组；两种都要认，否则分组型 agent 上选模型永远落空
-    const choices: { value: string; name: string }[] = [];
-    for (const item of option.options) {
-      if ('group' in item) {
-        for (const inner of item.options) {
-          choices.push(inner);
-        }
-      } else {
-        choices.push(item);
+    const choices = option.options.flatMap((item) => 'group' in item ? item.options : [item]);
+    const matchesName = (name: string) => name.toLowerCase() === wanted.toLowerCase();
+    const selected = choices.find((item) => item.value === wanted)
+      ?? choices.find((item) => matchesName(item.name) && item.value === option.currentValue)
+      ?? choices.find((item) => matchesName(item.name));
+    if (!selected) {
+      if (request.model) {
+        throw new Error('客户端未提供模型 ' + wanted + '。可选模型：' + choices.map((item) => item.name).join('、'));
       }
+      return opened.configOptions;
     }
-
-    const hit = choices.find((item) => item.value === wanted || item.name === wanted);
-    if (!hit) {
-      this.log.debug('ACP 模型选择项里没有调用方点名的模型', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        available: choices.map((item) => item.value),
-      });
-      return;
-    }
-    if (hit.value === option.currentValue) {
-      return;
-    }
+    if (selected.value === option.currentValue) return opened.configOptions;
 
     try {
-      await agent.request(methods.agent.session.setConfigOption, {
+      const changed = await agent.request(methods.agent.session.setConfigOption, {
         sessionId: opened.sessionId,
         configId: option.id,
-        value: hit.value,
+        value: selected.value,
       });
+      const resulting = changed.configOptions.find((item) => item.id === option.id);
+      if (request.model && (resulting?.type !== 'select' || resulting.currentValue !== selected.value)) {
+        throw new Error('客户端未确认该模型已生效。');
+      }
+      return changed.configOptions;
     } catch (error) {
+      if (request.model) throw error;
       this.log.warn('ACP 设置模型失败，继续用 agent 当前选择', {
-        runId: request.runId,
-        nodeId: request.nodeId,
-        requested: wanted,
-        error,
+        runId: request.runId, nodeId: request.nodeId, requested: wanted, error,
       });
+      return opened.configOptions;
     }
   }
 
@@ -1381,5 +1416,44 @@ function stopReasonFailure(reason: StopReason): string {
       // 联合是封闭的，但未来 SDK 可能加变体：未知终止原因一律当失败，
       // 绝不把一次不明不白的收场记成完成。
       return `agent 以未知原因结束（stopReason=${String(reason)}）`;
+  }
+}
+
+export async function listAcpModels(profile: AgentProfile, cwd: string): Promise<ModelDirectory> {
+  const executable = await resolveExecutable(profile.launch.bin);
+  if (!executable) throw new Error('找不到 ACP 客户端。');
+  const child = spawn(executable.command, [...executable.prefixArgs, ...profile.launch.args], {
+    cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const closed = new AbortController();
+  child.on('error', () => closed.abort());
+  child.on('exit', () => closed.abort());
+  const signal = AbortSignal.any([closed.signal, AbortSignal.timeout(15_000)]);
+  const connection = createClientApp({ name: CLIENT_INFO.name }).connect(ndJsonStream(
+    Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+    Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+  ));
+  const stop = () => connection.close();
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    const agent = connection.agent;
+    await agent.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { ...CLIENT_INFO },
+    });
+    const opened = await agent.request(methods.agent.session.new, { cwd, mcpServers: [] });
+    const option = opened.configOptions?.find((item) => item.category === 'model' || item.id === 'model');
+    const models = option?.type === 'select' ? option.options.flatMap((item) => 'group' in item
+      ? item.options.map((model) => ({ id: model.value, name: model.name, group: item.name }))
+      : [{ id: item.value, name: item.name }]) : [];
+    return {
+      models, defaultModel: option?.type === 'select' ? option.currentValue : undefined,
+      source: 'ACP 会话配置', checkedAt: new Date().toISOString(),
+      message: models.length ? undefined : '客户端没有发布可选模型。可以沿用客户端默认配置。',
+    };
+  } finally {
+    signal.removeEventListener('abort', stop);
+    connection.close();
+    child.stdin.end();
+    if (child.exitCode === null && child.signalCode === null) await killProcessTree(child.pid, { force: true, log: silentLog });
   }
 }

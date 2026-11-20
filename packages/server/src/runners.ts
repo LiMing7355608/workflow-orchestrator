@@ -393,6 +393,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '按目标写出可交付的初稿',
           dependsOn: [],
           files: ['docs/**'],
+          deliverables: [{ path: 'docs/impl-doc.md', description: '文档初稿' }],
+          acceptance: ['打开初稿，查看与需求对应的正文。'],
           agentId: primary,
           maxAttempts: 3,
         },
@@ -405,6 +407,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '按目标实现主路径并自测',
           dependsOn: [],
           files: ['src/impl-core.md'],
+          deliverables: [{ path: 'src/impl-core.md', description: '核心流程说明' }],
+          acceptance: ['打开说明文件，核对核心交付内容可读。'],
           agentId: primary,
           maxAttempts: 3,
         },
@@ -415,6 +419,7 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
           description: '独立核对正确性、边界条件与验收标准',
           dependsOn: ['impl-core'],
           files: ['src/core/**'],
+          acceptance: ['读取核心产物，核对范围和主流程。'],
           agentId: reviewer,
           maxAttempts: 3,
         },
@@ -428,6 +433,8 @@ function buildMockPlan(prompt: string, includeDelivery: boolean): string {
       description: '读取核心节点的产物并生成集成说明',
       dependsOn: ['impl-core'],
       files: ['src/impl-integration.md'],
+      deliverables: [{ path: 'src/impl-integration.md', description: '集成说明' }],
+      acceptance: ['读取集成说明，确认包含上游产物内容。'],
       agentId: primary,
       maxAttempts: 3,
     });
@@ -594,6 +601,70 @@ export class MockAgentRunner implements AgentRunner {
     // 所以整条命令都要看，不能只查 stdin
     const haystack = `${request.stdin ?? ''} ${request.argv.join(' ')}`;
 
+    const discussionPrompt = request.stdin ?? request.argv.find((arg) => arg.startsWith('WORKFLOW_'));
+    const marker = discussionPrompt?.split('\n')[0];
+    if (discussionPrompt && (marker === 'WORKFLOW_PLAN_CHECK_JSON' || marker?.startsWith('WORKFLOW_MEETING_'))) {
+      await delay(480);
+      if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');
+      const input = JSON.parse(discussionPrompt.split('\n').at(-1)!) as {
+        agents?: Array<{ id: string }>;
+        agenda?: string;
+        role?: { name: string };
+        instructions?: Array<{ text: string }>;
+      };
+      const roles = [{ name: '产品负责人', responsibility: '核对产品范围和验收', prompt: '写出用户流程、预期结果和优先级。' },
+        { name: '工程评审', responsibility: '核对依赖和实施风险', prompt: '挑战技术假设，说明验证方式。' }];
+      const latestNote = input.instructions?.at(-1)?.text;
+      const report = '# 会议方案（回放）\n\n## 会议议题\n' + input.agenda +
+        '\n\n## 决策\n先约定用户流程和验收步骤，再确定实施顺序。' +
+        (latestNote ? '\n\n## 人工补充\n' + latestNote : '');
+      const response = marker === 'WORKFLOW_PLAN_CHECK_JSON'
+        ? { summary: '核对依赖、任务范围和交付顺序的回放结果。', findings: [] }
+        : marker === 'WORKFLOW_MEETING_ROSTER_JSON'
+          ? { roles: roles.map((role, index) => ({ ...role, agentId: input.agents?.[index]?.id ?? input.agents?.[0]?.id })) }
+          : marker === 'WORKFLOW_MEETING_CONTRIBUTION_JSON'
+            ? { text: input.role?.name + '建议明确产品验收与风险。' + (latestNote ? '人工补充：' + latestNote : '') }
+            : marker === 'WORKFLOW_MEETING_MODERATE_JSON'
+              ? { action: 'summarize', feedback: '成员意见已收敛，进入方案汇总。' }
+              : { markdown: report };
+      const output = JSON.stringify(response);
+      onChunk(output + '\n');
+      return { ok: true, exitCode: 0, output };
+    }
+
+    const specMarker = 'WORKFLOW_SPEC_INTERVIEW_JSON';
+    const specPrompt = request.stdin || request.argv.find((arg) => arg.startsWith(specMarker));
+    if (specPrompt?.startsWith(specMarker)) {
+      await delay(160);
+      if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');
+      const input = JSON.parse(specPrompt.split('\n').at(-1)!) as {
+        idea: string;
+        rounds: Array<{ answer?: string }>;
+        revisions?: string[];
+        meetingDecisions?: Array<{ title: string; proposal: string }>;
+      };
+      const response = input.rounds.some((round) => round.answer) || input.meetingDecisions?.length
+        ? {
+            status: 'ready',
+            spec: '# ' + input.idea.split('\n')[0] + '\n\n## 产品目标\n' + input.idea +
+              '\n\n## 范围与验收\n' + input.rounds.map((round) => round.answer).filter(Boolean).join('\n') +
+              '\n落实首期主要操作，并用输入、操作与预期结果描述验收示例。' +
+              (input.revisions?.length ? '\n\n## 追加要求\n' + input.revisions.join('\n') : '') +
+              (input.meetingDecisions?.length ? '\n\n## 已采纳会议方案\n' + input.meetingDecisions.map((item) => item.title + '\n' + item.proposal).join('\n') : ''),
+          }
+        : {
+            status: 'question',
+            questions: [{
+              title: '首期范围',
+              question: '首期是否先覆盖一种目标用户和一个完整的使用场景？',
+              recommendation: '按建议缩小范围，并说明谁来用、通过什么操作完成什么目标。',
+            }],
+          };
+      const output = JSON.stringify(response);
+      onChunk(output);
+      return { ok: true, exitCode: 0, output };
+    }
+
     // 改图必须先于规划判定：两条链路共用「写文件交付」的约定，
     // 但交付内容与判定标准完全不同，混在一个分支里迟早会互相污染。
     if (haystack.includes(PLANNER_AMEND_MARKER)) {
@@ -638,7 +709,7 @@ export class MockAgentRunner implements AgentRunner {
       return { ok: true, exitCode: 0, output };
     }
 
-    const isReview = haystack.includes('VERDICT:');
+    const isReview = haystack.includes('\n## 审查要求\n');
 
     const lines = isReview
       ? [

@@ -14,9 +14,14 @@ export type DagIssueKind =
   | 'disabled-agent'
   | 'agent-not-installed'
   | 'missing-agent'
+  | 'agent-tools-required'
   /** 结构层错误（字段缺失、枚举越界）。也要回灌给 Agent，否则它会一直重犯 */
   | 'schema-invalid'
-  | 'action-not-allowed';
+  | 'action-not-allowed'
+  | 'missing-deliverable'
+  | 'invalid-deliverable'
+  | 'missing-acceptance'
+  | 'incomplete-delivery';
 
 export interface DagIssue {
   kind: DagIssueKind;
@@ -38,7 +43,7 @@ export interface ValidationResult {
 export function validateDag(
   dag: Dag,
   catalog: AgentProfile[],
-  options: { requireInstalled?: boolean } = {},
+  options: { requireInstalled?: boolean; requireDeliverables?: boolean } = {},
 ): ValidationResult {
   const issues: DagIssue[] = [];
   const byId = new Map<string, DagNode>();
@@ -78,6 +83,15 @@ export function validateDag(
     });
   }
 
+  const ancestry = new Map<string, Set<string>>();
+  function ancestors(id: string) {
+    const known = ancestry.get(id);
+    if (known) return known;
+    const found = findAncestors(id, byId);
+    ancestry.set(id, found);
+    return found;
+  }
+
   // 3. 并行实现节点的文件范围不得相交
   const implements_ = dag.nodes.filter((node) => node.type === 'implement');
   for (let i = 0; i < implements_.length; i += 1) {
@@ -87,11 +101,14 @@ export function validateDag(
       if (!left || !right) {
         continue;
       }
-      if (areOrdered(left, right, byId)) {
+      if (ancestors(left.id).has(right.id) || ancestors(right.id).has(left.id)) {
         // 有先后关系，允许范围重叠
         continue;
       }
-      if (filesConflict(left.files, right.files)) {
+      if (filesConflict(
+        [...left.files, ...(left.deliverables ?? []).map((item) => item.path)],
+        [...right.files, ...(right.deliverables ?? []).map((item) => item.path)],
+      )) {
         issues.push({
           kind: 'file-conflict',
           message: `并行节点 ${left.id} 与 ${right.id} 的独占文件范围相交`,
@@ -137,6 +154,13 @@ export function validateDag(
       });
       continue;
     }
+    if (node.type === 'implement' && profile.transport === 'http-model') {
+      issues.push({
+        kind: 'agent-tools-required',
+        message: '实现节点 ' + node.id + ' 需要具备工程工具的 Agent。',
+        nodeIds: [node.id],
+      });
+    }
     if (!profile.enabled) {
       issues.push({
         kind: 'disabled-agent',
@@ -149,6 +173,39 @@ export function validateDag(
         kind: 'agent-not-installed',
         message: `节点 ${node.id} 引用的 ${profile.label} 在本机未安装`,
         nodeIds: [node.id],
+      });
+    }
+  }
+
+  for (const node of dag.nodes) {
+    const declared = node.deliverables ?? [];
+    const unique = new Set(declared.map(({ path }) => path.toLowerCase()));
+    if (declared.length > 0 && (node.type !== 'implement' || unique.size !== declared.length ||
+        declared.some(({ path }) => node.files.length > 0 && !filesConflict([path], node.files)))) {
+      issues.push({ kind: 'invalid-deliverable', message: `节点 ${node.id} 的交付文件须属于实现节点，路径须唯一并落在改动范围内`, nodeIds: [node.id] });
+    }
+    if (options.requireDeliverables && node.type === 'implement' && declared.length === 0) {
+      issues.push({ kind: 'missing-deliverable', message: `节点 ${node.id} 至少需要一个具体的交付文件`, nodeIds: [node.id] });
+    }
+    if (options.requireDeliverables && (node.type === 'implement' || node.type === 'review') && !node.acceptance?.length) {
+      issues.push({ kind: 'missing-acceptance', message: `节点 ${node.id} 需要至少一个可核对的验收条件`, nodeIds: [node.id] });
+    }
+  }
+
+  if (options.requireDeliverables && implements_.length > 0 && !cycle) {
+    const mergeNodes = dag.nodes.filter((node) => node.action === 'merge');
+    const approved = new Set<string>();
+    for (const merge of mergeNodes) {
+      for (const id of ancestors(merge.id)) {
+        if (byId.get(id)?.type !== 'approval') continue;
+        for (const upstream of ancestors(id)) approved.add(upstream);
+      }
+    }
+    const missing = implements_.filter((node) => !approved.has(node.id));
+    if (missing.length > 0) {
+      issues.push({
+        kind: 'incomplete-delivery', nodeIds: missing.map((node) => node.id),
+        message: '每个实现节点都需要一条经过人工审批并进入合并交付的依赖链。',
       });
     }
   }
@@ -200,37 +257,16 @@ function findCycle(
   return undefined;
 }
 
-/** 两个节点之间是否存在祖先/后代关系（含传递）。 */
-function areOrdered(
-  left: DagNode,
-  right: DagNode,
-  byId: Map<string, DagNode>,
-): boolean {
-  const reaches = (from: string, target: string): boolean => {
-    const seen = new Set<string>();
-    const queue = [from];
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (current === undefined) {
-        break;
-      }
-      if (current === target) {
-        return true;
-      }
-      if (seen.has(current)) {
-        continue;
-      }
-      seen.add(current);
-      const node = byId.get(current);
-      if (!node) {
-        continue;
-      }
-      queue.push(...node.dependsOn);
-    }
-    return false;
-  };
-
-  return reaches(left.id, right.id) || reaches(right.id, left.id);
+function findAncestors(id: string, byId: Map<string, DagNode>): Set<string> {
+  const seen = new Set<string>();
+  const queue = [...(byId.get(id)?.dependsOn ?? [])];
+  for (let index = 0; index < queue.length; index += 1) {
+    const current = queue[index]!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    queue.push(...(byId.get(current)?.dependsOn ?? []));
+  }
+  return seen;
 }
 
 /** 供 API 层复用的可用性标签。 */

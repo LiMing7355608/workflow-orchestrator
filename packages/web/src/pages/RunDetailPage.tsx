@@ -1,11 +1,14 @@
 import { AlertTriangle, GitBranch, Loader2, MessageSquare } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { AgentActivityPanel } from '../components/agents/AgentActivityPanel';
 import { EventStream } from '../components/run/EventStream';
 import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
+import { PlanningSteps, PlanReviewPanel, RunPlanPanel } from '../components/run/PlanReviewPanel';
 import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
 import { RunBoard } from '../components/run/RunBoard';
+import { RunBlackboard } from '../components/run/RunBlackboard';
 import { RunHeader } from '../components/run/RunHeader';
 import { ViewBar, type RunView } from '../components/run/ViewBar';
 import { WorkflowCanvas } from '../components/run/WorkflowCanvas';
@@ -16,6 +19,7 @@ import { getRunDetail } from '../data/run-detail';
 import { fetchRunDetail } from '../lib/api';
 import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
+import type { AgentInterval } from '../types/operations';
 import type { PlanFailure } from '../types/workflow';
 
 /**
@@ -43,6 +47,8 @@ function failureText(failure: PlanFailure): string {
 
 export function RunDetailPage() {
   const { runId } = useParams();
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const fallback = useMemo(() => getRunDetail(runId ?? '') ?? null, [runId]);
   const {
     data: run,
@@ -71,15 +77,20 @@ export function RunDetailPage() {
   // 面板自己记住「正在看哪个节点」而不仅仅依赖 selectedNodeId：关掉面板时
   // 高亮要留在图上（用户还在看这个节点），两者的生命周期并不相同。
   const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<RunView>('graph');
+  const viewParam = params.get('view');
+  const activeView: RunView = viewParam === 'monitor' || viewParam === 'plan' || viewParam === 'board' || viewParam === 'events'
+    ? viewParam : 'graph';
+  const [focusCall, setFocusCall] = useState<AgentInterval | null>(null);
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  const [draftLogOpen, setDraftLogOpen] = useState(false);
 
   usePageTitle(run?.title ?? '运行详情');
 
   useEffect(() => {
     setSelectedNodeId(null);
     setDetailNodeId(null);
-    setActiveView('graph');
+    setFocusCall(null);
+    setDraftLogOpen(false);
     setOrchestratorOpen(false);
   }, [runId]);
 
@@ -96,6 +107,9 @@ export function RunDetailPage() {
    */
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
+  useEffect(() => {
+    setDraftLogOpen(false);
+  }, [run?.planDraft?.revision]);
   useEffect(() => {
     if (!planningActive) {
       return;
@@ -114,6 +128,19 @@ export function RunDetailPage() {
 
   // 关闭只收面板，不撤销高亮：读完了图上的选择仍然有效，再点一下就回来
   const closeDetail = () => setDetailNodeId(null);
+  function openPlanner(call: AgentInterval | null = null) {
+    setFocusCall(call);
+    setOrchestratorOpen(true);
+  }
+  function openActivity(call: AgentInterval) {
+    if (call.role === 'spec') {
+      navigate('/new?spec=' + encodeURIComponent(call.runId));
+    } else if (call.nodeId && run?.nodes.some((node) => node.id === call.nodeId)) {
+      selectNode(call.nodeId);
+    } else {
+      openPlanner(call);
+    }
+  }
 
   if (!run) {
     return (
@@ -157,8 +184,13 @@ export function RunDetailPage() {
     ? (run.nodes.find((node) => node.id === detailNodeId) ?? null)
     : null;
 
+  const visibleView = planning && activeView !== 'monitor'
+    ? run.planDraft && !draftLogOpen ? 'plan' : 'events'
+    : activeView;
+
   return (
-    <div className="flex h-screen flex-col overflow-hidden max-[1100px]:block max-[1100px]:h-auto max-[1100px]:overflow-visible">
+    <div className="run-workspace">
+    <div className="run-surface flex min-h-0 flex-col">
       <RunHeader
         run={run}
         // 停止 / 继续成功后回读一次：状态由后端派生，前端不自己猜结果
@@ -167,17 +199,33 @@ export function RunDetailPage() {
       />
 
       <ViewBar
-        value={planning ? 'events' : activeView}
+        value={visibleView}
         planning={planning}
-        onChange={setActiveView}
+        draft={Boolean(run.planDraft)}
+        onChange={(view) => {
+          const next = new URLSearchParams(params);
+          if (view === 'graph') next.delete('view');
+          else next.set('view', view);
+          setParams(next, { replace: true });
+          if (planning && view !== 'monitor') setDraftLogOpen(view === 'events');
+        }}
         nodeCount={run.nodes.length}
         eventCount={run.events.length}
       />
 
-      <div className="flex min-h-0 flex-1 max-[1100px]:block">
-        <div className="min-w-0 flex-1 max-[1100px]:h-[560px]">
-          {planning ? (
-            <div className="flex h-full flex-col bg-canvas">
+      <div className="run-columns">
+        <div className="run-main">
+          {visibleView === 'monitor' ? (
+            <div className="workspace-scroll h-full min-h-0 p-3 outline-offset-[-2px] sm:p-4"
+              tabIndex={0} role="region" aria-label="Agent 监控滚动区域">
+              <AgentActivityPanel key={run.id} runId={run.id} title={run.title} onOpen={openActivity} />
+            </div>
+          ) : run.planDraft && visibleView === 'plan' ? (
+            <PlanReviewPanel key={run.planDraft.revision} runId={run.id} revision={run.planDraft.revision}
+              at={run.planDraft.at} paused={run.status === 'paused'} onCommit={reload} onDiscuss={() => openPlanner()} />
+          ) : planning ? (
+            <div className="flex h-full min-h-0 flex-col bg-canvas">
+              {run.reviewPlan && planningActive && <PlanningSteps phase={run.planCheckingAt ? 'checking' : 'drafting'} />}
               <div className="flex shrink-0 items-start gap-3 border-b border-line bg-surface px-4 py-3">
                 {planFailure ? (
                   <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
@@ -191,21 +239,19 @@ export function RunDetailPage() {
                       ? '任务拆解已暂停。点击顶部的继续按钮重新拆解。'
                       : planFailure
                         ? failureText(planFailure)
-                        : '正在生成任务图。Agent 输出会实时出现在下方。'}
+                        : run.planCheckingAt ? '正在核对需求覆盖、依赖和验收条件。' : '正在生成任务图。Agent 输出会实时出现在下方。'}
                   </p>
                 </div>
               </div>
               <div className="min-h-0 flex-1">
-                <EventStream events={run.events} onSelectNode={selectNode} />
+                <EventStream events={run.events} nodes={run.nodes} onSelectNode={selectNode} onOpenPlanner={() => openPlanner()} />
               </div>
             </div>
-          ) : activeView === 'graph' ? (
-            <WorkflowCanvas
-              run={run}
-              selectedNodeId={selectedNodeId}
-              onSelectNode={selectNode}
-            />
-          ) : activeView === 'board' ? (
+          ) : visibleView === 'graph' ? (
+            <WorkflowCanvas key={run.id} run={run} onInspectNode={selectNode} />
+          ) : visibleView === 'plan' ? (
+            <RunPlanPanel run={run} live={source === 'live'} onSelectNode={selectNode} />
+          ) : visibleView === 'board' ? (
             <RunBoard
               run={run}
               selectedNodeId={selectedNodeId}
@@ -214,12 +260,14 @@ export function RunDetailPage() {
           ) : (
             <EventStream
               events={run.events}
+              nodes={run.nodes}
               onSelectNode={selectNode}
+              onOpenPlanner={() => openPlanner()}
             />
           )}
         </div>
 
-        <aside className="flex w-[340px] shrink-0 flex-col overflow-hidden border-l border-line bg-surface max-[1100px]:h-[520px] max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t">
+        <aside className="run-side bg-surface" aria-label="运行侧栏">
           {/*
             「和编排器对话」是这一列里最先被看到的东西：说一句、看图上变了什么，
             是这个页面最主要的工作节奏。做成常驻按钮而不是切换页签，是因为切换
@@ -229,7 +277,7 @@ export function RunDetailPage() {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => setOrchestratorOpen(true)}
+              onClick={() => openPlanner()}
               aria-haspopup="dialog"
               className="w-full justify-start gap-2 border-accent/25 bg-accent-soft/40 text-accent hover:border-accent/40 hover:bg-accent-soft hover:text-accent"
             >
@@ -241,12 +289,10 @@ export function RunDetailPage() {
             </Button>
           </div>
 
-          <NodeInspector
-            run={run}
-            node={selectedNode}
-            onSelectNode={selectNode}
-            className="min-h-0 flex-1"
-          />
+          <div className="run-context-scroll outline-offset-[-2px]" tabIndex={0} role="region" aria-label="协作黑板与运行概览">
+            <RunBlackboard key={run.id} runId={run.id} />
+            <NodeInspector run={run} node={selectedNode} onSelectNode={selectNode} />
+          </div>
         </aside>
       </div>
 
@@ -255,7 +301,8 @@ export function RunDetailPage() {
       <OrchestratorPanel
         run={run}
         open={orchestratorOpen}
-        onClose={() => setOrchestratorOpen(false)}
+        focusCall={focusCall}
+        onClose={() => { setOrchestratorOpen(false); setFocusCall(null); }}
         // 消息落库后重读：会话、图与节点状态全部由后端派生
         onRunChanged={reload}
       />
@@ -267,6 +314,7 @@ export function RunDetailPage() {
         onSelectNode={selectNode}
         onRunChanged={reload}
       />
+    </div>
     </div>
   );
 }

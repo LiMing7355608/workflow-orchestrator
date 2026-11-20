@@ -100,6 +100,7 @@ export interface AgentProfile {
   vendor: string;
   /** 厂商图标路径（public 下） */
   logo: string;
+  transport?: 'cli' | 'claude-sdk' | 'codex-app-server' | 'dsh-sdk' | 'acp' | 'http-model';
   launch: AgentLaunchSpec;
   capabilities: AgentCapabilities;
   availability: AgentAvailability;
@@ -119,3 +120,22 @@ export interface AgentProfile {
   note?: string;
   timeoutMs: number;
 }
+
+export interface ModelDirectory {
+  models: Array<{ id: string; name: string; group?: string }>;
+  defaultModel?: string;
+  source: string;
+  checkedAt: string;
+  message?: string;
+}
+
+export interface ModelProvider {
+  id: string;
+  label: string;
+  protocol: 'openai' | 'anthropic';
+  baseUrl: string;
+  model?: string;
+  hasKey: boolean;
+}
+
+export type ModelProviderSettings = Omit<ModelProvider, 'hasKey' | 'id'> & { id?: string; apiKey?: string };

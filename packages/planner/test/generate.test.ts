@@ -247,3 +247,32 @@ describe('用 Agent 生成 DAG', () => {
     expect(captured).not.toContain('trae');
   });
 });
+
+it('ACP 规划可从正文提交任务图，校验拒绝时记录重试原因', async () => {
+  const prompts: string[] = [];
+  const retries: Array<[number, string]> = [];
+  const planner = agent({ id: 'dsh-acp', transport: 'acp',
+    launch: { bin: 'dsh', args: ['--profile', 'acp'], stdin: true, parser: 'plain' } });
+  const runner: AgentRunner = {
+    async run(request, onChunk) {
+      prompts.push(request.stdin ?? '');
+      expect(request.policy).toBe('default');
+      const output = prompts.length === 1 ? invalidPlan : validPlan;
+      onChunk(output);
+      return { ok: true, exitCode: 0, output };
+    },
+  };
+
+  const result = await generateDag('做一个核心功能', [...catalog, planner], {
+    runner, workspace,
+    workspaceFiles: async () => ['src/core/index.ts'],
+    onRetry: (attempt, reason) => { retries.push([attempt, reason]); },
+  }, { agentId: planner.id });
+  expect(result.dag.nodes.map((node) => node.id)).toEqual(['impl-core', 'review-core']);
+  expect(result.attempts).toBe(2);
+  expect(prompts[0]).toContain('只在最终回复提交完整任务图 JSON');
+  expect(prompts[0]).toContain('src/core/index.ts');
+  expect(prompts[1]).toContain('ghost');
+  expect(retries).toHaveLength(1);
+  expect(retries[0]).toEqual([1, expect.stringContaining('ghost')]);
+});

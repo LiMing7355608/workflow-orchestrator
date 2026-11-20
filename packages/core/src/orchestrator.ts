@@ -1,5 +1,6 @@
 import { buildAgentArgv, type AgentProfile } from './agents.js';
 import type {
+  AgentRunResult,
   AgentRunner,
   MergeResult,
   NodeArtifact,
@@ -17,9 +18,12 @@ import type {
   OrchestratorEvent,
   ReviewVerdict,
   RunFacts,
+  SavedTaskFiles,
 } from './types.js';
 
 export interface AdvanceDeps {
+  /** Allow a pending human amendment to settle before issuing another batch. */
+  waitBeforeDispatch?: (runId: string) => Promise<void> | undefined;
   getRun(runId: string): RunFacts | undefined;
   emit(event: OrchestratorEvent): Promise<void>;
   runner: AgentRunner;
@@ -65,6 +69,12 @@ export interface AdvanceDeps {
    * 读回某节点上次落盘的 diff 文本，供审查提示词使用
    */
   loadArtifact?: (runId: string, nodeId: string) => Promise<string | undefined>;
+  saveTaskFiles?: (run: RunFacts, node: NodeFacts, cwd: string, commit?: string) => Promise<SavedTaskFiles | undefined>;
+  exportDelivery?: (run: RunFacts, node: NodeFacts, result: Extract<MergeResult, { ok: true }>) => Promise<SavedTaskFiles | undefined>;
+  memory?: {
+    context(runId: string, nodeId: string, agentId: string): Promise<string | undefined>;
+    remember(runId: string, nodeId: string, agentId: string, result: AgentRunResult, text: string): Promise<void>;
+  };
   /**
    * 中止信号。
    *
@@ -362,13 +372,21 @@ async function buildPrompt(
     }
   }
 
+  if (node.agentId && deps.memory) {
+    const context = await deps.memory.context(run.id, node.id, node.agentId).catch((error: unknown) => {
+      deps.log?.('读取协作记忆失败', error);
+      return undefined;
+    });
+    if (context) lines.push('', '## 协作记忆', context);
+  }
+
   if (node.type === 'review') {
     // 变更段落紧贴在审查要求之前：读到这里时正好把手上的东西对照着判
     lines.push(...(await reviewChangesSection(run.id, upstream, deps)));
     lines.push(
       '',
       '## 审查要求',
-      '只读审查，不要修改任何文件。检查正确性、边界条件与验收条件。',
+      '只读审查，可以运行不改动交付文件的检查。发现问题时在回复中给出证据，交由实现节点修改。',
       '最后一行必须给出裁决标记，二选一：',
       'VERDICT: APPROVED',
       'VERDICT: CHANGES_REQUESTED',
@@ -380,6 +398,17 @@ async function buildPrompt(
       `只在下列范围内改动：${node.files.join(', ') || '整个仓库'}`,
       '完成后简要说明你做了什么。',
     );
+  }
+
+  if (node.deliverables?.length) {
+    lines.push('', '## 必须落盘的交付文件');
+    for (const item of node.deliverables) {
+      lines.push(`- ${item.kind === 'remove' ? '删除' : '交付'} ${item.path}${item.description ? ' · ' + item.description : ''}`);
+    }
+    lines.push('离开前逐项核对实际工程文件。请把交付文件保存在指定路径。');
+  }
+  if (node.acceptance?.length) {
+    lines.push('', '## 验收条件', ...node.acceptance.map((criterion) => '- ' + criterion));
   }
 
   /**
@@ -646,7 +675,17 @@ async function executeMerge(
       branch: result.branch,
       merged: result.merged,
     });
-    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+    let delivery: SavedTaskFiles | undefined;
+    try {
+      delivery = await deps.exportDelivery?.(run, node, result);
+    } catch (error) {
+      await deps.emit({
+        type: 'node.failed', at: deps.now(), runId, nodeId: node.id,
+        reason: `合并已完成，交付文件落盘失败：${(error as Error).message}`,
+      });
+      return;
+    }
+    await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id, ...(delivery ? { delivery } : {}) });
     return;
   }
 
@@ -832,7 +871,15 @@ async function executeNode(
   const relay = createAgentEventRelay(deps, { runId, nodeId: node.id, agentId: agent.id });
 
   let reviewOutput = '';
+  let memoryText = '';
+  let finalMemoryText = '';
   const forward = (events: ReturnType<typeof parser.push>): void => {
+    if (deps.memory) {
+      for (const event of events) {
+        if (event.kind === 'text' && event.text) memoryText = (memoryText + event.text).slice(-8000);
+        if (event.kind === 'result' && event.text) finalMemoryText = event.text.slice(-8000);
+      }
+    }
     if (node.type === 'review') {
       for (const event of events) {
         if (event.kind === 'text' || event.kind === 'result') {
@@ -879,6 +926,10 @@ async function executeNode(
     }
     return;
   }
+
+  await deps.memory?.remember(runId, node.id, agent.id, result, [memoryText, finalMemoryText].join('\n').slice(-8000).trim()).catch((error: unknown) => {
+    deps.log?.('保存协作记忆失败', error);
+  });
   if (!result.ok) {
     // 被用户停下 ≠ 执行失败，两者必须落成不同的事件。
     //
@@ -961,9 +1012,13 @@ async function executeNode(
     return;
   }
 
+  let delivery: SavedTaskFiles | undefined;
   if (node.type === 'implement') {
     try {
-      await workspace.publish?.(runId, node.id);
+      const commit = await workspace.publish?.(runId, node.id);
+      if (node.deliverables?.length) {
+        delivery = await deps.saveTaskFiles?.(run, node, cwd, commit || undefined);
+      }
       await captureArtifact(runId, node.id, workspace, deps);
     } catch (error) {
       await deps.emit({
@@ -973,7 +1028,7 @@ async function executeNode(
       return;
     }
   }
-  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id });
+  await deps.emit({ type: 'node.completed', at: deps.now(), runId, nodeId: node.id, ...(delivery ? { delivery } : {}) });
   if (node.type !== 'implement' || !workspace.publish) {
     await workspace.release(runId, node.id).catch(() => {});
   }
@@ -1124,6 +1179,11 @@ export async function advanceRun(
     // 这里只拦「还要不要派发」：上一批已经发出去的 executeNode 仍会跑到结算，
     // 并按 runner 的结局各自落 node.interrupted（而不是 node.failed）。那些
     // 事件会把节点重新交回就绪集合，这正是「继续」能接着跑的前提。
+    let pendingAmendment = deps.waitBeforeDispatch?.(runId);
+    while (pendingAmendment && !deps.signal?.aborted) {
+      await pendingAmendment;
+      pendingAmendment = deps.waitBeforeDispatch?.(runId);
+    }
     if (deps.signal?.aborted) {
       return { executed, stopped: 'cancelled' };
     }

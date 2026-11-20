@@ -30,10 +30,11 @@ export function CollapsibleText({
 
   return (
     <div className="min-w-0">
-      <p className={cn(!expanded && clampClass, className)}>{text}</p>
+      <p className={cn('[overflow-wrap:anywhere]', expandable && !expanded && clampClass, className)}>{text}</p>
       {expandable ? (
         <button
           type="button"
+          aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
           className={cn(
             'mt-0.5 text-[11px] text-accent hover:underline focus-visible:underline',

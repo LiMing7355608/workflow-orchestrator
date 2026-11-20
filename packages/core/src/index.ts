@@ -35,9 +35,12 @@ export type {
   RunStage,
   RunStatus,
   RunView,
+  SavedTaskFiles,
+  TaskDeliverable,
 } from './types.js';
 
 export { boardLaneOrder } from './types.js';
+export { isWorkspaceFilePath } from './workspace-file.js';
 
 export {
   deriveBoard,

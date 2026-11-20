@@ -160,3 +160,127 @@
 .react-flow__edge-textbg {
   fill: var(--color-surface);
 }
+
+.activity-board { container-type: inline-size; }
+.activity-board-grid { display: grid; align-items: start; gap: 0.625rem; }
+.activity-member { border-color: var(--color-line); background: var(--color-surface); }
+.activity-member:hover, .activity-member[aria-pressed='true'] { border-color: #91adee; background: var(--color-accent-soft); }
+.activity-member[data-state='running'] { border-color: #b9d0f7; }
+.activity-member[data-state='running']::before { content: ''; flex: 0 0 5px; height: 5px; border-radius: 50%; background: var(--color-accent); }
+.activity-state { color: var(--color-muted); }
+.activity-state[data-state='running'] { color: var(--color-accent); }
+.activity-state[data-state='failed'] { color: var(--color-danger); }
+.activity-state[data-state='interrupted'] { color: var(--color-warning); }
+.activity-connection, .activity-connection-motion { fill: none; stroke: #c3ccda; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.activity-board-grid g[data-live='true'] .activity-connection { stroke: #a0baf0; }
+.activity-connection-motion { stroke: #4d72cf; stroke-dasharray: 6 94; stroke-linecap: round; animation: activity-flow 2.4s linear infinite; }
+@keyframes activity-flow { to { stroke-dashoffset: -100; } }
+@container (min-width: 565px) {
+  .activity-board-grid { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: 24px; }
+}
+.activity-timeline { overscroll-behavior-x: contain; }
+.activity-lane { display: grid; grid-template-columns: minmax(92px, 20%) minmax(0, 1fr); align-items: start; gap: 0.625rem; padding-inline: 0.625rem; }
+.activity-track {
+  background-color: #f3f5f8;
+  background-image: linear-gradient(90deg, #e8ebef 1px, transparent 1px);
+  background-size: 25% 100%;
+}
+.activity-span { background: #dce6e2; color: #264a3b; }
+.activity-span[data-state='running'] { background: #d2e0fd; color: #244999; border-right: 2px solid #557dde; }
+.activity-span[data-state='failed'] { background: #f4dadd; color: #912b40; }
+.activity-span[data-state='interrupted'] { background: #f4e5cf; color: #805323; }
+@media (prefers-reduced-motion: reduce) {
+  .activity-connection-motion { animation: none; }
+}
+
+.workflow-canvas {
+  background: linear-gradient(180deg, #f3f7fd 0%, #f9fbfe 70%, #f5f8fc 100%);
+}
+
+.workflow-dependency { --edge: #adb6c3; }
+.workflow-dependency[data-state='passed'] { --edge: #659682; }
+.workflow-dependency[data-state='running'] { --edge: #5794e8; }
+.workflow-dependency[data-state='waiting'] { --edge: #bb832e; }
+.workflow-dependency[data-state='failed'] { --edge: #ba4750; }
+.workflow-dependency[data-dim='true'] { opacity: 0.5; }
+
+.workflow-dependency .workflow-dependency-base {
+  stroke: var(--edge);
+  stroke-width: 1.6;
+  fill: none;
+}
+.workflow-dependency[data-related='true'] .workflow-dependency-base { stroke-width: 2.4; }
+.workflow-dependency[data-state='pending'] .workflow-dependency-base { stroke-dasharray: 3 4; }
+.workflow-dependency-pulse {
+  fill: none;
+  pointer-events: none;
+  stroke: #2563eb;
+  stroke-width: 2.9;
+  stroke-linecap: round;
+  stroke-dasharray: 16 84;
+  animation: dispatch-flow 1.6s linear infinite;
+}
+
+.workflow-node[data-state='running']::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, #3b82f6 50%, transparent);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: node-progress 2.2s linear infinite;
+}
+
+@keyframes dispatch-flow { to { stroke-dashoffset: -100; } }
+@keyframes node-progress { from { background-position-x: -75%; } to { background-position-x: 175%; } }
+@media (prefers-reduced-motion: reduce) {
+  .workflow-dependency-pulse, .workflow-node[data-state='running']::after { animation: none; }
+}
+
+.new-run-grid, .meeting-room-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.run-workspace { container-type: inline-size; }
+.run-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+.run-main { min-width: 0; min-height: 0; height: clamp(350px, 66dvh, 700px); }
+.run-side { min-width: 0; min-height: 0; border-top: 1px solid var(--color-line); }
+.run-context-scroll { min-width: 0; min-height: 0; }
+.workspace-scroll { overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.run-main .workspace-scroll { overscroll-behavior-y: auto; }
+
+@media (min-width: 1100px) {
+  .new-run-grid { grid-template-columns: minmax(0, 1fr) minmax(275px, 30%); }
+  .meeting-room-grid { grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); }
+}
+
+@media (min-height: 470px) {
+  @container (min-width: 850px) {
+    .run-surface { height: 100dvh; overflow: hidden; }
+    .run-columns {
+      grid-template-columns: minmax(0, 1fr) clamp(255px, 26%, 345px);
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .run-main { height: 100%; overflow: hidden; }
+    .run-main .workspace-scroll { overscroll-behavior-y: contain; }
+    .run-side { display: grid; grid-template-rows: auto minmax(0, 1fr); border-top: 0; border-left: 1px solid var(--color-line); }
+    .run-context-scroll { overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+  }
+}
+.workflow-canvas { container-type: inline-size; }
+.workflow-canvas[data-detail='minimal'] .graph-secondary { visibility: hidden; }
+@container (max-width: 580px) {
+  .workflow-minimap, .workflow-selected-overlay { display: none !important; }
+}
+.event-group[open] > summary .event-chevron { transform: rotate(90deg); }
+.event-group summary::-webkit-details-marker { display: none; }

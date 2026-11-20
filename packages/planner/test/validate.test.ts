@@ -191,3 +191,18 @@ describe('DAG 冻结校验', () => {
     ).toThrow();
   });
 });
+
+it('交付契约拒绝缺少实际文件或未经审批的计划', () => {
+  const manifest = {
+    id: 'impl', type: 'implement', title: '计数器', agentId: 'claude',
+    files: ['src/**'], deliverables: [{ path: 'src/index.html' }],
+    acceptance: ['点击加一会把结果由 0 更新到 1'],
+  };
+  const approval = { id: 'accept', type: 'approval', title: '人工确认', dependsOn: ['impl'] };
+  const merge = { id: 'merge', type: 'route', title: '交付', action: 'merge', dependsOn: ['accept'] };
+  const options = { requireDeliverables: true };
+  expect(validateDag(dag([manifest, approval, merge]), catalog, options).ok).toBe(true);
+  const missing = validateDag(dag([{ ...manifest, deliverables: [] }, { ...merge, dependsOn: ['impl'] }]), catalog, options);
+  expect(missing.issues.map((issue) => issue.kind)).toEqual(expect.arrayContaining(['missing-deliverable', 'incomplete-delivery']));
+  expect(() => dag([{ ...manifest, deliverables: [{ path: '../index.html' }] }])).toThrow();
+});

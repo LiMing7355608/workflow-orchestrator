@@ -18,7 +18,7 @@ export function RunBoard({
   const columns = useMemo(() => deriveBoard(run), [run]);
 
   return (
-    <div className="h-full overflow-auto p-4">
+    <div className="workspace-scroll h-full overflow-x-auto p-4" role="region" aria-label="任务泳道滚动区域" tabIndex={0}>
       <div className="grid min-w-[860px] grid-cols-4 gap-3">
         {columns.map((column) => (
           <section

@@ -8,6 +8,7 @@ export interface DagPosition {
 export interface DagLayoutOptions {
   nodeWidth?: number;
   nodeHeight?: number;
+  heightByNode?: ReadonlyMap<string, number>;
   horizontalGap?: number;
   verticalGap?: number;
 }
@@ -109,7 +110,8 @@ export function layoutDag(
 
   const positions = new Map<string, DagPosition>();
 
-  byLevel.forEach((group, currentLevel) => {
+  let nextY = 0;
+  for (const [, group] of [...byLevel].sort(([left], [right]) => left - right)) {
     const groupWidth =
       group.length * nodeWidth +
       Math.max(0, group.length - 1) * horizontalGap;
@@ -118,10 +120,13 @@ export function layoutDag(
     group.forEach((id, index) => {
       positions.set(id, {
         x: startX + index * (nodeWidth + horizontalGap),
-        y: currentLevel * (nodeHeight + verticalGap),
+        y: nextY,
       });
     });
-  });
+    let rowHeight = nodeHeight;
+    for (const id of group) rowHeight = Math.max(rowHeight, options.heightByNode?.get(id) ?? nodeHeight);
+    nextY += rowHeight + verticalGap;
+  }
 
   // 环或异常数据不会导致节点丢失，兜底放在最底部。
   nodes.forEach((node, index) => {

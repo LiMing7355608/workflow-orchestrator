@@ -1,290 +1,109 @@
-import {
-  CircleSlash,
-  PlugZap,
-  Power,
-  RefreshCw,
-  Search,
-  SearchX,
-} from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { ArrowUpRight, ChevronDown, Radio, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { AgentCard } from '../components/agents/AgentCard';
-import { StatCard } from '../components/home/StatCard';
+import { AgentLogo } from '../components/agents/AgentLogo';
+import { modelLabel } from '../components/agents/AgentModelField';
+import { ModelProviderPanel } from '../components/agents/ModelProviderPanel';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { EmptyState } from '../components/ui/EmptyState';
-import { Segmented } from '../components/ui/Segmented';
 import { seedAgents } from '../data/agents';
-import { fetchAgents, probeAgents } from '../lib/api';
+import { fetchAgentActivity, fetchAgents, probeAgents } from '../lib/api';
 import { cn } from '../lib/cn';
-import { useApiResource } from '../lib/use-api';
+import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
-import type { AgentAvailability } from '../types/agent';
+import type { AgentInterval } from '../types/operations';
 
-type AvailabilityFilter = 'all' | AgentAvailability;
+function activityLink(entry: AgentInterval): string {
+  const id = encodeURIComponent(entry.runId);
+  if (entry.role === 'spec') return '/new?spec=' + id;
+  if (entry.role === 'meeting') return '/meetings/' + id;
+  return '/runs/' + id + '?view=monitor';
+}
 
-const availabilityRank: Record<AgentAvailability, number> = {
-  ready: 0,
-  installed: 1,
-  missing: 2,
-};
+function WorkingAgents() {
+  const { data, loading, source, reload } = useApiResource(() => fetchAgentActivity(undefined, true), null);
+  useLiveRefresh(source === 'live', reload, { refreshIntervalMs: 600 });
+  const entries = data?.intervals ?? [];
+  const agents = new Set(entries.map((entry) => entry.agentId)).size;
+  return <Card className="overflow-hidden">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-5">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Radio className="size-4 text-accent" />正在运行的任务</h2>
+      {data && <span className="inline-flex items-center gap-1.5 rounded-full bg-subtle px-2.5 py-1 text-[11px] tabular-nums text-muted">
+        {entries.length > 0 && <span className="size-1.5 rounded-full bg-success" />}
+        {agents} 个 Agent 工作中 · {entries.length} 项任务{data.mode === 'mock' && ' · 回放'}
+      </span>}
+    </div>
+    {entries.length ? <ul className="divide-y divide-line">
+      {entries.map((entry) => <li key={entry.id}>
+        <Link to={activityLink(entry)} className="flex min-w-0 items-center gap-2.5 px-4 py-2.5 hover:bg-subtle/45 sm:px-5">
+          <AgentLogo src={entry.agentLogo} label={entry.agentLabel} className="size-7 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-semibold text-ink" title={entry.title}>{entry.title}</p>
+            <p className="mt-0.5 truncate text-[11px] text-muted" title={entry.runTitle}>{entry.runTitle}</p>
+          </div>
+          <div className="hidden min-w-0 max-w-[32%] shrink-0 text-right sm:block">
+            <p className="truncate text-[11px] font-medium text-muted" title={entry.agentLabel}>{entry.agentLabel}</p>
+            {entry.model && <p className="truncate text-[10px] text-muted">{modelLabel(entry.model)}</p>}
+          </div>
+          <ArrowUpRight className="size-3.5 shrink-0 text-accent" aria-hidden="true" />
+        </Link>
+      </li>)}
+    </ul> : <p className="px-4 py-6 text-sm text-muted sm:px-5">
+      {loading && !data ? '正在读取…' : data ? '当前没有正在运行的任务。' : '暂时无法读取运行状态。'}
+    </p>}
+  </Card>;
+}
 
 export function AgentsPage() {
   usePageTitle('Agent 管理');
-
-  const {
-    data: remoteAgents,
-    source,
-    reload,
-  } = useApiResource(fetchAgents, seedAgents);
+  const { data: profiles, source, reload } = useApiResource(fetchAgents, seedAgents);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<AvailabilityFilter>('all');
-  const [probedAt, setProbedAt] = useState('');
   const [probing, setProbing] = useState(false);
+  const [probeError, setProbeError] = useState('');
+  const [configured, setConfigured] = useState(false);
+  const keyword = query.trim().toLowerCase();
+  const filtered = profiles.filter((agent) => [agent.label, agent.launch.bin, agent.vendor].some((word) => word.toLowerCase().includes(keyword)))
+    .sort((a, b) => Number(a.availability === 'missing') - Number(b.availability === 'missing'));
 
-  const agents = useMemo(
-    () =>
-      remoteAgents.map((agent) =>
-        agent.id in overrides
-          ? { ...agent, enabled: overrides[agent.id] ?? agent.enabled }
-          : agent,
-      ),
-    [remoteAgents, overrides],
-  );
-
-  const counts = useMemo(
-    () => ({
-      all: agents.length,
-      ready: agents.filter((agent) => agent.availability === 'ready').length,
-      installed: agents.filter((agent) => agent.availability === 'installed')
-        .length,
-      missing: agents.filter((agent) => agent.availability === 'missing')
-        .length,
-      enabled: agents.filter((agent) => agent.enabled).length,
-    }),
-    [agents],
-  );
-
-  const filterOptions: Array<{
-    value: AvailabilityFilter;
-    label: string;
-  }> = [
-    { value: 'all', label: `全部 ${counts.all}` },
-    { value: 'ready', label: `可直接调用 ${counts.ready}` },
-    { value: 'installed', label: `仅安装 ${counts.installed}` },
-    { value: 'missing', label: `未安装 ${counts.missing}` },
-  ];
-
-  const visibleAgents = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-
-    return agents
-      .filter((agent) => filter === 'all' || agent.availability === filter)
-      .filter((agent) => {
-        if (!keyword) {
-          return true;
-        }
-        const haystack = [
-          agent.label,
-          agent.vendor,
-          agent.launch.bin,
-          agent.launch.parser,
-        ]
-          .join(' ')
-          .toLowerCase();
-        return haystack.includes(keyword);
-      })
-      .sort((a, b) => {
-        const byEnabled = Number(b.enabled) - Number(a.enabled);
-        if (byEnabled !== 0) {
-          return byEnabled;
-        }
-        const byAvailability =
-          availabilityRank[a.availability] - availabilityRank[b.availability];
-        if (byAvailability !== 0) {
-          return byAvailability;
-        }
-        return a.label.localeCompare(b.label);
-      });
-  }, [agents, filter, query]);
-
-  function handleToggle(id: string, enabled: boolean) {
-    setOverrides((previous) => ({ ...previous, [id]: enabled }));
-  }
-
-  async function handleProbe() {
+  async function probe() {
     setProbing(true);
-    if (source === 'live') {
-      // 后端按基线重新探测，再整体刷新目录
-      const probed = await probeAgents();
-      if (probed) {
-        reload();
-      }
-    }
-    setProbedAt(
-      new Date().toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-    );
-    setProbing(false);
+    setProbeError('');
+    try {
+      if (!await probeAgents()) { setProbeError('未能完成探测，请重试。'); return; }
+      reload();
+    } finally { setProbing(false); }
   }
 
-  function resetFilters() {
-    setQuery('');
-    setFilter('all');
-  }
-
-  return (
-    <div className="mx-auto max-w-[1180px] px-6 py-7 max-[900px]:px-4">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 text-[11px] text-muted">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-            SE Workflow Studio
-          </div>
-          <h1 className="mt-2 text-[28px] font-semibold tracking-[-0.025em] text-ink max-[700px]:text-[24px]">
-            Agent 管理
-          </h1>
-          <p className="mt-1.5 max-w-[560px] text-[13px] leading-5 text-muted">
-            编排器把每个节点交给一个外部 CLI Agent 执行。这里管理可调度的 Agent
-            池、它们的调用参数与能力边界。
-          </p>
-        </div>
-
-        <div className="flex flex-col items-end gap-1.5">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void handleProbe()}
-            disabled={probing}
-            className="max-[700px]:hidden"
-          >
-            <RefreshCw
-              className={cn('h-3.5 w-3.5', probing && 'animate-spin')}
-              strokeWidth={1.9}
-            />
-            {probing ? '探测中' : '重新探测'}
-          </Button>
-          <span className="text-[10px] text-passive max-[700px]:hidden">
-            {probedAt
-              ? `探测于 ${probedAt}`
-              : source === 'live'
-                ? '探测结果来自本机'
-                : '静态快照'}
-          </span>
-        </div>
-      </div>
-
-      <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        <StatCard
-          label="可直接调用"
-          value={counts.ready}
-          hint={`共 ${counts.all} 个预设`}
-          icon={PlugZap}
-          tone="green"
-        />
-        <StatCard
-          label="已启用"
-          value={counts.enabled}
-          hint="进入可调度池"
-          icon={Power}
-          tone="blue"
-        />
-        <StatCard
-          label="未安装"
-          value={counts.missing}
-          hint="跑到该节点才失败"
-          icon={CircleSlash}
-          tone="amber"
-        />
-      </div>
-
-      <Card className="mt-4 p-3">
+  return <div className="mx-auto max-w-[1030px] space-y-4 px-4 py-6 sm:px-6 sm:py-7">
+    <header><h1 className="text-[26px] font-semibold tracking-tight text-ink">Agent 管理</h1></header>
+    <WorkingAgents />
+    <Card className="overflow-hidden">
+      <button type="button" className="flex w-full items-center gap-2.5 px-4 py-3 text-left text-xs font-semibold text-ink hover:bg-subtle/40 sm:px-5"
+        aria-expanded={configured} onClick={() => setConfigured(!configured)}>
+        <Settings2 className="size-4 text-muted" />客户端与接口设置
+        <ChevronDown className={cn('ml-auto size-4 text-muted', configured && 'rotate-180')} />
+      </button>
+      {configured && <div className="space-y-3 border-t border-line bg-subtle/25 p-3 sm:p-4">
+        <ModelProviderPanel onChanged={reload} />
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative w-[240px] max-[700px]:w-full">
-            <Search
-              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-passive"
-              strokeWidth={1.8}
-            />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索 Agent 或命令"
-              aria-label="搜索 Agent"
-              className="h-8 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-[12px] text-ink placeholder:text-passive transition-colors focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20"
-            />
-          </div>
-
-          <div className="max-w-full overflow-x-auto">
-            <Segmented
-              options={filterOptions}
-              value={filter}
-              onChange={setFilter}
-              ariaLabel="按可用性筛选 Agent"
-            />
-          </div>
-
-          <span className="ml-auto text-[11px] text-passive max-[700px]:ml-0">
-            {visibleAgents.length === agents.length
-              ? '全部预设'
-              : `筛选出 ${visibleAgents.length} 个`}
-          </span>
+          <label className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户端" aria-label="搜索客户端"
+              className="h-8 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-xs text-ink" />
+          </label>
+          <Button variant="secondary" size="sm" disabled={probing || source !== 'live'} onClick={() => void probe()}>
+            <RefreshCw className={cn('size-3.5', probing && 'animate-spin motion-reduce:animate-none')} />{probing ? '探测中' : '重新探测'}
+          </Button>
         </div>
-      </Card>
-
-      {visibleAgents.length > 0 ? (
-        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-          {visibleAgents.map((agent) => (
-            <AgentCard
-              key={agent.id}
-              profile={agent}
-              onToggle={handleToggle}
-            />
-          ))}
+        {probeError && <p role="alert" className="text-xs text-danger">{probeError}</p>}
+        <div className="grid gap-2 lg:grid-cols-2">
+          {filtered.map((agent) => <AgentCard key={agent.id} profile={{ ...agent, enabled: overrides[agent.id] ?? agent.enabled }}
+            onToggle={(id, enabled) => setOverrides((previous) => ({ ...previous, [id]: enabled }))} />)}
         </div>
-      ) : (
-        <Card className="mt-3">
-          <EmptyState
-            icon={SearchX}
-            title="没有匹配的 Agent"
-            description="调整搜索关键词或可用性筛选后再试。"
-            action={
-              <Button variant="secondary" size="sm" onClick={resetFilters}>
-                清除筛选
-              </Button>
-            }
-          />
-        </Card>
-      )}
-
-      <Card className="mt-4 p-4">
-        <h2 className="text-[12px] font-semibold text-ink">
-          为什么只接外部 CLI Agent
-        </h2>
-        <p className="mt-1.5 max-w-[720px] text-[11px] leading-5 text-muted">
-          编排器不内置自研 Agent 循环。那套东西要跟着模型能力一起维护，用户也无法替换，
-          最后变成编排器里最难改的一块。把平台差异收敛成三件事——可执行文件、参数模板、
-          输出解析——新增一个平台就是加一条声明，而不是改调度器。
-        </p>
-        <div className="mt-3 grid gap-2 text-[11px] leading-5 text-muted sm:grid-cols-3">
-          <div className="rounded-lg border border-line bg-subtle/50 px-3 py-2">
-            <span className="block font-medium text-ink">提示词走 stdin</span>
-            Windows 上的 npm CLI 是 .cmd 包装，参数经 shell 拼接会被重新解释；stdin
-            同时解决注入与超长提示词。
-          </div>
-          <div className="rounded-lg border border-line bg-subtle/50 px-3 py-2">
-            <span className="block font-medium text-ink">解析器兼容而非严格</span>
-            官方 CLI 的事件结构会变。照旧文档写解析器，升级后会静默解析出空文本，
-            所以解析要同时兼容新旧两套。
-          </div>
-          <div className="rounded-lg border border-line bg-subtle/50 px-3 py-2">
-            <span className="block font-medium text-ink">能力在编排期就校验</span>
-            声明 streaming / structured / resume / tools，让「该节点要求结构化输出、
-            但所选 Agent 不支持」在编排期暴露，而不是跑到一半才崩。
-          </div>
-        </div>
-      </Card>
-    </div>
-  );
+        {!filtered.length && <p className="text-xs text-muted">没有匹配的客户端。</p>}
+      </div>}
+    </Card>
+  </div>;
 }

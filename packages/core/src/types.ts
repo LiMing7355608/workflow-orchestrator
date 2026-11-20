@@ -100,6 +100,7 @@ export interface RunFacts {
    * 默认根目录，见 packages/server/src/app.ts 的 workspaceFor。
    */
   workspaceRoot: string;
+  sourceMeetingId?: string;
   /**
    * 这个运行允许同时跑几个节点。
    *
@@ -130,6 +131,10 @@ export interface RunFacts {
    * 重新拆解（`plan.started`）会清掉它。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  requireDeliverables?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
   plannerAgentId?: string;
   implementAgentId?: string;
   reviewAgentId?: string;
@@ -143,6 +148,19 @@ export interface RunFacts {
   amendments?: DagAmendment[];
 }
 
+export interface TaskDeliverable {
+  path: string;
+  description?: string;
+  kind?: 'file' | 'remove';
+}
+
+export interface SavedTaskFiles {
+  revision: string;
+  files: Array<{ path: string; bytes: number }>;
+  fileCount: number;
+  removed: string[];
+}
+
 /** 单个节点的持久事实。 */
 export interface NodeFacts {
   id: string;
@@ -152,6 +170,9 @@ export interface NodeFacts {
   dependsOn: string[];
   /** 独占文件范围，串并行安全的静态保障 */
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
   /** 执行该节点的 Agent；审批与路由节点为空 */
   agentId?: string;
   /** 人类审批人与编排器节点使用的展示名 */
@@ -273,6 +294,11 @@ export interface BaseEvent {
 
 export type OrchestratorEvent =
   | (BaseEvent & { type: 'run.created'; run: RunFacts })
+  | (BaseEvent & { type: 'run.deleted' })
+  | (BaseEvent & { type: 'spec.updated' })
+  | (BaseEvent & { type: 'blackboard.updated' })
+  | (BaseEvent & { type: 'agent.activity' })
+  | (BaseEvent & { type: 'meeting.updated' })
   | (BaseEvent & {
       /**
        * 图已冻结，进入执行阶段。
@@ -286,6 +312,7 @@ export type OrchestratorEvent =
        */
       type: 'run.frozen';
       nodes?: NodeFacts[];
+      actor?: string;
     })
   | (BaseEvent & {
       /**
@@ -310,11 +337,13 @@ export type OrchestratorEvent =
       message: string;
       issues?: PlanIssue[];
     })
+  | (BaseEvent & { type: 'plan.checking'; agentId: string })
+  | (BaseEvent & { type: 'plan.drafted'; revision: string })
   | (BaseEvent & { type: 'run.paused' })
   | (BaseEvent & { type: 'run.resumed' })
   | (BaseEvent & { type: 'run.completed' })
   | (BaseEvent & { type: 'node.started'; nodeId: string })
-  | (BaseEvent & { type: 'node.completed'; nodeId: string })
+  | (BaseEvent & { type: 'node.completed'; nodeId: string; delivery?: SavedTaskFiles })
   | (BaseEvent & { type: 'node.failed'; nodeId: string; reason: string })
   | (BaseEvent & {
       /**
@@ -548,6 +577,9 @@ export interface RunView {
    * 会改；而「这个运行为什么没有图」是结构化的结论，界面要拿它渲染失败态。
    */
   planFailure?: PlanFailure;
+  reviewPlan?: boolean;
+  planCheckingAt?: string;
+  planDraft?: { revision: string; at: string };
   /** 已完成节点占比，读时算 */
   progress: number;
   nodeCount: number;
@@ -566,6 +598,11 @@ export interface NodeView {
   agentId?: string;
   dependsOn: string[];
   files: string[];
+  deliverables?: TaskDeliverable[];
+  acceptance?: string[];
+  delivery?: SavedTaskFiles;
+  startedAt?: string;
+  finishedAt?: string;
   attempts: number;
   durationMs?: number;
   escalated?: boolean;
