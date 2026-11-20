@@ -50,6 +50,7 @@ export interface AgentInterval {
   nodeId?: string;
   agentId: string;
   agentLabel: string;
+  agentLogo?: string;
   role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review' | 'meeting';
   lane?: string;
   model?: string;

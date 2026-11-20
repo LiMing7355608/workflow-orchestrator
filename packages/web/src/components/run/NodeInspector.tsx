@@ -98,7 +98,7 @@ function RunOverview({
         />
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto p-4">
+      <div className="space-y-5 p-4">
         <section>
           <div className="flex items-center justify-between text-[10px] text-passive">
             <span>总进度</span>
@@ -278,16 +278,11 @@ export function NodeInspector({
   className,
 }: NodeInspectorProps) {
   return (
-    <aside
-      className={cn(
-        'flex h-full flex-col overflow-hidden bg-surface max-[1100px]:h-auto max-[1100px]:overflow-visible',
-        className,
-      )}
-    >
+    <section className={cn('min-w-0 bg-surface', className)}>
       {node ? (
         <SelectedNodeSummary node={node} onOpen={onSelectNode} />
       ) : null}
       <RunOverview run={run} onSelectNode={onSelectNode} />
-    </aside>
+    </section>
   );
 }

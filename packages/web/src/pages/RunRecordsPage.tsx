@@ -1,4 +1,3 @@
-import { AgentActivityPanel } from '../components/agents/AgentActivityPanel';
 import { RecentInterviews } from '../components/run/RecentInterviews';
 import { Boxes, Clock, Plus, Search, SearchX } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -75,8 +74,9 @@ export function RunRecordsPage() {
       running: runs.filter((run) => run.status === 'running').length,
       waiting: runs.filter((run) => run.status === 'waiting_for_boss').length,
       completed: runs.filter((run) => run.status === 'completed').length,
-        paused: runs.filter((run) => run.status === 'paused').length,
-        failed: runs.filter((run) => run.status === 'failed').length,
+      paused: runs.filter((run) => run.status === 'paused').length,
+      failed: runs.filter((run) => run.status === 'failed').length,
+      draft: runs.filter((run) => run.status === 'draft').length,
     }),
     [runs],
   );
@@ -84,6 +84,7 @@ export function RunRecordsPage() {
   const statusOptions: Array<{ value: StatusFilter; label: string }> = [
     { value: 'failed', label: '失败 ' + counts.failed },
     { value: 'all', label: `全部 ${counts.all}` },
+    { value: 'draft', label: '草稿 ' + counts.draft },
     { value: 'running', label: `运行中 ${counts.running}` },
     { value: 'waiting_for_boss', label: `待你处理 ${counts.waiting}` },
     { value: 'completed', label: `已完成 ${counts.completed}` },
@@ -133,10 +134,6 @@ export function RunRecordsPage() {
     <div className="mx-auto max-w-[1180px] px-6 py-7 max-[900px]:px-4">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 text-[11px] text-muted">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-            SE Workflow Studio
-          </div>
           <h1 className="mt-2 text-[28px] font-semibold tracking-[-0.025em] text-ink max-[700px]:text-[24px]">
             运行记录
           </h1>
@@ -199,7 +196,7 @@ export function RunRecordsPage() {
         </div>
       </Card>
 
-      <div className="mt-4 space-y-3"><AgentActivityPanel /><RecentInterviews /></div>
+      <div className="mt-4 empty:hidden"><RecentInterviews /></div>
       <div className="mt-3 flex items-center justify-between text-[11px] text-muted">
         <span>共 {filteredRuns.length} 个运行</span>
         <span className="text-passive">

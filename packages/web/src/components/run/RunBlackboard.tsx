@@ -2,6 +2,7 @@ import { Download, MessagesSquare } from 'lucide-react';
 import { useState } from 'react';
 import { fetchBlackboard, postBlackboard } from '../../lib/api';
 import { useApiResource, useLiveRefresh } from '../../lib/use-api';
+import { CollapsibleText } from '../ui/CollapsibleText';
 import { Button } from '../ui/Button';
 
 export function RunBlackboard({ runId }: { runId: string }) {
@@ -42,7 +43,7 @@ export function RunBlackboard({ runId }: { runId: string }) {
             下载集成产物
           </a>
         )}
-        <ul className="max-h-48 space-y-1.5 overflow-y-auto" aria-label="共享消息">
+        <ul className="space-y-1.5" aria-label="共享消息">
           {data.entries.map((entry) => (
             <li key={entry.id} className="rounded-md bg-subtle/50 px-2 py-1.5 text-[11px]">
               <div className="flex flex-wrap items-center gap-1.5 font-medium text-muted">
@@ -50,7 +51,7 @@ export function RunBlackboard({ runId }: { runId: string }) {
                 {entry.nodeId && <span className="break-all font-mono text-[10px]">{entry.nodeId}</span>}
                 <time className="ml-auto text-passive" dateTime={entry.at}>{new Date(entry.at).toLocaleTimeString('zh-CN')}</time>
               </div>
-              <p className="mt-1 whitespace-pre-wrap break-words leading-4 text-ink">{entry.text}</p>
+              <CollapsibleText text={entry.text} lines={3} threshold={72} className="mt-1 whitespace-pre-wrap break-words leading-4 text-ink" />
             </li>
           ))}
           {!data.entries.length && <li className="text-[11px] text-muted">尚无共享消息。</li>}

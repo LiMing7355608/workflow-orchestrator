@@ -168,3 +168,13 @@ export const thinkingMeta: ThinkingMeta = {
   iconText: 'text-muted',
   text: 'text-muted',
 };
+
+export function eventToolLabel(event: { toolName?: string; message: string }): string {
+  const name = event.toolName;
+  if (name && name !== 'other' && /^[\p{L}\p{N}_./:-]{1,48}$/u.test(name)) return name;
+  if (/(?:^|[=. ·])command=/.test(event.message)) return '执行命令';
+  if (/(?:^|[=. ·])(?:pattern|query)=/.test(event.message)) return '查找资料';
+  if (/(?:^|[=. ·])(?:file_path|path)=/.test(event.message)) return '文件操作';
+  if (/^description=skill$/i.test(event.message)) return '加载技能';
+  return '工具操作';
+}

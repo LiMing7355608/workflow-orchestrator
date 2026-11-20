@@ -1,31 +1,26 @@
-import { Activity, ArrowRight, Clock3, FileText, FolderOutput, Radio } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { fetchAgentActivity, fetchBlackboard, fetchMeeting } from '../../lib/api';
+import { Activity, ArrowUpRight, ChevronDown, Clock3, FileText, FolderOutput, MessageCircle, Waypoints } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { fetchAgentActivity, fetchBlackboard } from '../../lib/api';
 import { cn } from '../../lib/cn';
+import { formatDuration } from '../../lib/format';
 import { useApiResource, useLiveRefresh } from '../../lib/use-api';
 import type { AgentInterval } from '../../types/operations';
+import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { modelLabel } from './AgentModelField';
 import { AgentLogo } from './AgentLogo';
 
-const roleLabel: Record<AgentInterval['role'], string> = {
-  spec: '规格访谈', plan: 'PM 分解', check: '草案核对', amend: '调整编排', implement: '实现', review: '审查', meeting: '会议',
+const roles: Record<AgentInterval['role'], string> = {
+  spec: '规格访谈', plan: 'PM 分解', check: '草案核对', amend: '调整编排',
+  implement: '实现', review: '审查', meeting: '会议',
 };
-const memberKey = (entry: AgentInterval) => entry.agentId + "/" + (entry.lane ?? entry.role);
-const statusLabel: Record<AgentInterval['status'], string> = {
+const states: Record<AgentInterval['status'], string> = {
   running: '运行中', completed: '已返回', failed: '失败', interrupted: '已中断',
 };
+const memberKey = (entry: AgentInterval) => entry.agentId + '/' + (entry.lane ?? entry.role);
 const ticks = [0, 25, 50, 75, 100];
-const formatTime = (time: number, includeDate = false) => new Intl.DateTimeFormat('zh-CN', {
-  ...(includeDate ? { month: '2-digit', day: '2-digit' } : {}),
-  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-}).format(time);
-
-function elapsed(from: number, to: number) {
-  const seconds = Math.max(0, Math.floor((to - from) / 1000));
-  return seconds < 60 ? seconds + ' 秒' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
-}
+const timeFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const dateFormat = new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 
 function useCurrentTime(running: boolean) {
   const [now, setNow] = useState(Date.now);
@@ -38,269 +33,260 @@ function useCurrentTime(running: boolean) {
   return now;
 }
 
-export function ActivityTimeline({ intervals, picked, onPick }: {
-  intervals: AgentInterval[];
-  picked: string | null;
-  onPick: (id: string) => void;
-}) {
-  const now = useCurrentTime(intervals.some((entry) => entry.status === 'running'));
-  const [focus, setFocus] = useState(true);
-  const series = intervals.map((entry) => ({
-    ...entry,
-    start: Date.parse(entry.startedAt),
-    end: entry.finishedAt ? Date.parse(entry.finishedAt) : now,
-  })).filter((entry) => Number.isFinite(entry.start) && Number.isFinite(entry.end));
-  const live = series.some((entry) => entry.status === 'running');
-  if (!series.length) return <p className="rounded-xl border border-dashed border-line p-4 text-xs text-muted">执行开始后，时间图谱会显示每次调用的起止时间。</p>;
-
-  const last = Math.max(...series.map((entry) => Math.max(entry.start, entry.end)));
-  const earliest = Math.min(...series.map((entry) => entry.start), last - 15_000);
-  const first = focus ? Math.max(earliest, last - 15 * 60_000) : earliest;
-  const duration = last - first + Math.max(600, Math.round((last - first) * 0.035));
-  const shown = series.filter((entry) => entry.end >= first);
-  const lanes = new Map<string, typeof shown>();
-  for (const entry of shown) {
-    const key = memberKey(entry);
-    const lane = lanes.get(key) ?? [];
-    lane.push(entry);
-    lanes.set(key, lane);
-  }
-  return (
-    <section aria-label="时间图谱">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink"><Clock3 className="size-4 text-muted" />时间图谱</h3>
-        <div className="flex items-center gap-2 text-[10px] text-muted">
-          <span className="hidden sm:inline">{live ? '实时推进' : '执行回看'}</span>
-          <select aria-label="时间图谱范围" value={focus ? 'recent' : 'all'} onChange={(event) => setFocus(event.target.value === 'recent')}
-            className="rounded-lg border border-line bg-surface px-2 py-1.5 text-ink">
-            <option value="recent">最近 15 分钟</option><option value="all">完整时间范围</option>
-          </select>
-        </div>
-      </div>
-      <div className="overflow-x-auto rounded-xl border border-line">
-        <div className="min-w-[550px]">
-          <div className="grid grid-cols-[142px_minmax(0,1fr)] gap-3 border-b border-line bg-subtle/40 px-3 py-2 text-[10px] font-medium text-muted">
-            <div>成员与职责</div>
-            <div className="flex justify-between gap-2 font-mono tabular-nums">
-              {ticks.map((percent) => <time key={percent}>{formatTime(first + duration * percent / 100, duration >= 86_400_000)}</time>)}
-            </div>
-          </div>
-          {[...lanes].map(([key, lane]) => (
-            <div key={key} className="grid grid-cols-[142px_minmax(0,1fr)] gap-3 border-b border-line px-3 py-2.5 last:border-b-0">
-              <div className="min-w-0 self-center">
-                <p className="truncate text-[11px] font-semibold text-ink" title={lane[0]!.agentLabel}>{lane[0]!.lane ?? roleLabel[lane[0]!.role]}</p>
-                <p className="truncate text-[10px] text-muted">{lane[0]!.agentLabel}</p>
-              </div>
-              <div className="relative space-y-1">
-                {live && <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 z-10 border-l border-accent/55" style={{ left: (last - first) / duration * 100 + '%' }} />}
-                {packIntervals(lane).map((track, index) => (
-                  <div className="relative h-7 rounded-md bg-subtle/60" key={index}>
-                    <div className="pointer-events-none absolute inset-0 flex justify-between" aria-hidden="true">
-                      {ticks.map((tick) => <span key={tick} className="border-l border-line" />)}
-                    </div>
-                    {track.map((entry) => {
-                      const left = Math.min(98, (Math.max(entry.start, first) - first) / duration * 100);
-                      const width = Math.min(100 - left, Math.max(1, (entry.end - Math.max(entry.start, first)) / duration * 100));
-                      const label = entry.title + ' · ' + statusLabel[entry.status] + ' · ' + formatTime(entry.start) + ' · ' + elapsed(entry.start, entry.end);
-                      return <button type="button" key={entry.id} aria-pressed={entry.id === picked} onClick={() => onPick(entry.id)} title={label} aria-label={label}
-                        data-state={entry.status} className={cn('activity-span absolute inset-y-1 min-w-[6px] truncate rounded-sm px-1 text-left text-[9px] font-medium text-ink hover:ring-1 hover:ring-accent', entry.id === picked && 'z-10 ring-2 ring-accent')}
-                        style={{ left: left + '%', width: width + '%' }}>{entry.title}</button>;
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function packIntervals<T extends { start: number; end: number }>(lane: T[]) {
+function packIntervals<T extends { left: number; width: number }>(lane: T[]) {
   const tracks: T[][] = [];
-  for (const entry of [...lane].sort((a, b) => a.start - b.start)) {
-    const track = tracks.find((items) => items[items.length - 1]!.end < entry.start);
+  for (const entry of [...lane].sort((a, b) => a.left - b.left)) {
+    const track = tracks.find((items) => {
+      const prior = items.at(-1)!;
+      return prior.left + prior.width <= entry.left;
+    });
     if (track) track.push(entry);
     else tracks.push([entry]);
   }
   return tracks;
 }
 
-interface FlowOutput { link: string; name: string; description: string }
-
-function FlowConnection({ live, output = false }: { live: boolean; output?: boolean }) {
-  const curve = output ? 'M1 7 C10 7 17 25 35 25' : 'M1 17 C13 17 23 17 35 17';
-  return <svg className="activity-wire" aria-hidden="true" viewBox="0 0 36 34" preserveAspectRatio="none" data-live={live}>
-    <path className="activity-wire-base" d={curve} pathLength={100} />
-    {live && <path className="activity-wire-pulse" d={curve} pathLength={100} />}
-    <circle cx="2" cy={output ? '7' : '17'} r="1.5" />
-    <circle cx="34" cy={output ? '25' : '17'} r="1.5" />
-  </svg>;
+interface TimelineProps {
+  intervals: AgentInterval[];
+  picked: string | null;
+  onPick: (id: string) => void;
 }
 
-export function ActiveFlow({ entries, picked, onPick, output, reports = [] }: {
-  entries: AgentInterval[]; picked: string | null; onPick: (id: string) => void; output?: FlowOutput; reports?: string[];
-}) {
-  const current = entries.filter((entry) => entry.status === 'running');
-  const now = useCurrentTime(current.length > 0);
-  const first = entries[0];
-  if (!first) return <div className="rounded-xl border border-dashed border-line px-4 py-4 text-xs text-muted">Agent 开始执行后，这里会显示分工和协作路径。</div>;
-  const members = new Map<string, AgentInterval[]>();
-  for (const entry of entries) {
-    const key = memberKey(entry);
-    const history = members.get(key) ?? [];
-    history.push(entry);
-    members.set(key, history);
+export function ActivityTimeline({ intervals, picked, onPick }: TimelineProps) {
+  const live = intervals.some((entry) => entry.status === 'running');
+  const now = useCurrentTime(live);
+  const [range, setRange] = useState<'recent' | 'all'>('recent');
+  const series = intervals.flatMap((entry) => {
+    const start = Date.parse(entry.startedAt);
+    const end = entry.finishedAt ? Date.parse(entry.finishedAt) : now;
+    return Number.isFinite(start) && Number.isFinite(end) ? [{ entry, start, end: Math.max(start, end) }] : [];
+  });
+  if (!series.length) return null;
+
+  const last = Math.max(...series.map(({ end }) => end));
+  const start = Math.min(...series.map((call) => call.start), last - 15_000);
+  const first = range === 'recent' ? Math.max(start, last - 900_000) : start;
+  const span = last - first;
+  const duration = span + Math.max(1_000, span * 0.03);
+  const clock = duration >= 86_400_000 ? dateFormat : timeFormat;
+  const shown = series.filter((call) => call.end >= first).map((call) => {
+    const left = (Math.max(call.start, first) - first) / duration * 100;
+    return { ...call, left, width: Math.min(100 - left, Math.max(1.35, (call.end - Math.max(call.start, first)) / duration * 100)) };
+  });
+  const lanes = new Map<string, typeof shown>();
+  for (const call of shown) {
+    const key = memberKey(call.entry);
+    const lane = lanes.get(key) ?? [];
+    lane.push(call);
+    lanes.set(key, lane);
   }
-  const group = [...members].sort(([, a], [, b]) => Number(b.some((entry) => entry.status === 'running')) - Number(a.some((entry) => entry.status === 'running')));
-  const latest = [...current, ...entries.filter((entry) => entry.status !== 'running')];
-  const workKind = first.role === 'meeting' ? '会议协调' : first.role === 'spec' ? '设计规格' : '工作流编排';
-  const coordinator = entries.find((entry) => entry.role === 'plan' || entry.lane === '主持人' || entry.role === 'spec');
-  const detailPath = first.role === 'meeting' ? '/meetings/' + first.runId : first.role === 'spec' ? undefined : '/runs/' + first.runId;
-  return <section aria-label="实时调用拓扑" className="activity-map rounded-xl border border-line p-3 sm:p-4">
-    <div className="activity-map-grid">
-      <div className="min-w-0 space-y-2">
-        <h3 className="text-[11px] font-semibold text-muted">执行成员 <span className="tabular-nums text-accent">{members.size}</span></h3>
-        {group.map(([key, history]) => {
-          const head = history[0]!;
-          const active = history.filter((entry) => entry.status === 'running');
-          const shown = [...active, ...history.filter((entry) => entry.status !== 'running').slice(0, Math.max(0, 3 - active.length))];
-          return <div key={key} className="relative rounded-lg border border-line bg-surface p-2.5" data-active={active.length > 0}>
-            <div className="mb-2 flex items-center gap-2">
-              <AgentLogo label={head.agentLabel} className="size-6 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-semibold text-ink" title={head.agentLabel}>{head.lane ?? head.agentLabel}</p>
-                <p className="truncate text-[10px] text-muted">{head.lane ? head.agentLabel : roleLabel[head.role]}{head.model && ' · ' + modelLabel(head.model)}</p>
-              </div>
-              {active.length > 0 && <span className="activity-live-dot shrink-0" title="有调用在运行" />}
+
+  return <section className="min-w-0" aria-label="时间图谱">
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink"><Clock3 className="size-4 text-muted" />时间图谱</h3>
+      <select aria-label="时间图谱范围" value={range} onChange={(event) => setRange(event.target.value === 'all' ? 'all' : 'recent')}
+        className="rounded-md border border-line bg-surface px-2 py-1 text-[11px] text-muted">
+        <option value="recent">最近 15 分钟</option><option value="all">完整时间范围</option>
+      </select>
+    </div>
+    <div className="activity-timeline overflow-x-auto rounded-xl border border-line bg-surface focus-visible:ring-2 focus-visible:ring-accent"
+      role="region" aria-label="调用时间泳道" tabIndex={0}>
+      <div className="min-w-[470px]">
+        <div className="activity-lane border-b border-line bg-subtle/40 py-2 text-[10px] text-muted">
+          <span>Agent · 职责</span>
+          <div className="flex justify-between gap-2 font-mono tabular-nums">
+            {ticks.map((tick) => {
+              const at = first + duration * tick / 100;
+              return <time key={tick} dateTime={new Date(at).toISOString()}>{clock.format(at)}</time>;
+            })}
+          </div>
+        </div>
+        {[...lanes].map(([key, lane]) => {
+          const { entry } = lane[0]!;
+          return <div key={key} className="activity-lane border-b border-line py-2 last:border-b-0">
+            <div className="min-w-0 self-center" title={entry.agentLabel}>
+              <p className="truncate text-[11px] font-medium text-ink">{entry.lane ?? roles[entry.role]}</p>
+              <p className="truncate text-[10px] text-muted">{entry.agentLabel}</p>
             </div>
-            {shown.map((entry) => <button type="button" key={entry.id} aria-pressed={entry.id === picked} onClick={() => onPick(entry.id)} className={cn('block w-full min-w-0 rounded-md px-1.5 py-1 text-left hover:bg-subtle', entry.id === picked && 'bg-accent-soft')}>
-              <div className="flex items-center justify-between gap-1">
-                <span className="truncate text-[11px] font-medium text-ink" title={entry.title}>{entry.title}</span>
-                <span className="activity-state shrink-0 text-[10px]" data-state={entry.status}>{entry.status === 'running' ? elapsed(Date.parse(entry.startedAt), now) : statusLabel[entry.status]}</span>
-              </div>
-              <p className="truncate text-[10px] text-muted" title={(entry.status === 'running' && entry.progress) || entry.description}>{(entry.status === 'running' && entry.progress) || entry.description}</p>
-            </button>)}
-            <FlowConnection live={active.length > 0} />
+            <div className="relative space-y-1">
+              {live && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 z-10 w-px bg-accent/45"
+                style={{ left: span / duration * 100 + '%' }} />}
+              {packIntervals(lane).map((track, index) => <div key={index} className="activity-track relative h-6 rounded-md">
+                {track.map((call) => {
+                  const { entry: item, left, width, start, end } = call;
+                  const label = item.title + ' · ' + states[item.status] + ' · ' + clock.format(start) + ' · ' + formatDuration(end - start);
+                  return <button type="button" key={item.id} aria-pressed={item.id === picked} aria-label={'打开对话 · ' + label}
+                    title={label} onClick={() => onPick(item.id)} data-state={item.status}
+                    className={cn('activity-span absolute inset-y-0.5 overflow-hidden truncate rounded text-left text-[10px] font-medium hover:ring-1 hover:ring-accent focus-visible:ring-2 focus-visible:ring-accent',
+                      width >= 12 && 'px-1.5', item.id === picked && 'z-20 ring-1 ring-accent')}
+                    style={{ left: left + '%', width: width + '%' }}>{width >= 12 && item.title}</button>;
+                })}
+              </div>)}
+            </div>
           </div>;
         })}
       </div>
-      <div className="activity-hub relative min-w-0 space-y-2">
-        <h3 className="text-[11px] font-semibold text-muted">调度与汇总</h3>
-        <div className="flex flex-col rounded-lg border border-blue-200/80 bg-surface/95 shadow-sm">
-          <div className="border-b border-line bg-accent-soft/35 p-3">
-            <div className="flex items-center gap-1.5 text-[10px] font-semibold text-accent"><Radio className="size-3.5" />{workKind}<span className="ml-auto whitespace-nowrap">{current.length} 个执行中</span></div>
-            <p className="mt-1.5 break-words text-sm font-semibold text-ink">{first.runTitle}</p>
-            {coordinator && <p className="mt-0.5 truncate text-[10px] text-muted" title={coordinator.agentLabel}>协调 Agent · {coordinator.agentLabel}{coordinator.model && ' · ' + modelLabel(coordinator.model)}</p>}
-          </div>
-          <div className="divide-y divide-line px-2.5" aria-label="调用进程">
-            {latest.slice(0, Math.max(6, current.length)).map((entry) => <button key={entry.id} type="button" aria-pressed={entry.id === picked} onClick={() => onPick(entry.id)}
-              className={cn('flex w-full items-center gap-1.5 px-1 py-1.5 text-left hover:bg-subtle', entry.id === picked && 'bg-accent-soft')}>
-              <span className="min-w-0 flex-1 truncate text-[11px] text-ink" title={entry.title}>{entry.title}</span>
-              <span className="activity-state shrink-0 text-[10px]" data-state={entry.status}>{statusLabel[entry.status]}</span>
-            </button>)}
-          </div>
-          {detailPath && <Link to={detailPath} className="flex items-center justify-end gap-1 border-t border-line px-3 py-2 text-[11px] font-medium text-accent">打开详情<ArrowRight className="size-3" /></Link>}
-        </div>
+    </div>
+  </section>;
+}
+
+interface FlowOutput { link: string; name: string; description: string }
+
+function useFlowPaths(ref: RefObject<HTMLDivElement | null>, layoutKey: string) {
+  const [paths, setPaths] = useState<Array<{ id: string; d: string }>>([]);
+  useLayoutEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const hub = root.querySelector('[data-flow-hub]');
+    const tiles = [...root.querySelectorAll<HTMLElement>('[data-flow-member]')];
+    if (!hub) return;
+    function measure() {
+      const frame = root!.getBoundingClientRect();
+      const target = hub!.getBoundingClientRect();
+      const lines = tiles.flatMap((tile, index) => {
+        const rect = tile.getBoundingClientRect();
+        if (target.left - rect.right < 8) return [];
+        const x1 = rect.right - frame.left;
+        const x2 = target.left - frame.left;
+        const rail = (x1 + x2) / 2;
+        const y1 = rect.top + rect.height / 2 - frame.top;
+        const y2 = target.top - frame.top + 12 + Math.min(96, target.height - 24) * (index + 1) / (tiles.length + 1);
+        return [{ id: tile.dataset.flowMember!, d: 'M' + x1 + ' ' + y1 + ' C' + rail + ' ' + y1 + ' ' + rail + ' ' + y2 + ' ' + x2 + ' ' + y2 }];
+      });
+      setPaths((previous) => previous.length === lines.length && previous.every((line, index) => line.id === lines[index]?.id && line.d === lines[index]?.d) ? previous : lines);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    observer.observe(hub);
+    for (const tile of tiles) observer.observe(tile);
+    measure();
+    return () => observer.disconnect();
+  }, [ref, layoutKey]);
+  return paths;
+}
+
+export function ActiveFlow({ entries, picked, onPick, output, reports = [], title }: {
+  entries: AgentInterval[];
+  picked: string | null;
+  onPick: (id: string) => void;
+  output?: FlowOutput;
+  reports?: string[];
+  title?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const board = useRef<HTMLDivElement>(null);
+  const active = entries.filter((entry) => entry.status === 'running');
+  const now = useCurrentTime(active.length > 0);
+  const groups = new Map<string, AgentInterval[]>();
+  for (const entry of entries) {
+    const key = memberKey(entry);
+    const history = groups.get(key) ?? [];
+    history.push(entry);
+    groups.set(key, history);
+  }
+  const rows = [...groups].map(([id, history]) => {
+    const running = history.filter((entry) => entry.status === 'running');
+    return { id, history, current: running[0] ?? history[0]!, active: running.length };
+  }).sort((a, b) => Number(b.active > 0) - Number(a.active > 0));
+  const visible = expanded ? rows : rows.slice(0, 4);
+  const paths = useFlowPaths(board, visible.map((row) => row.id).join('|'));
+  const first = entries[0];
+
+  if (!first) return <p className="rounded-lg border border-dashed border-line p-4 text-xs text-muted">暂无 Agent 调用记录。</p>;
+  return <section aria-label="实时调用拓扑" className="activity-board">
+    <div className="activity-board-grid relative" ref={board}>
+      <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
+        {paths.map((path) => {
+          const live = visible.some((row) => row.id === path.id && row.active);
+          return <g key={path.id} data-live={live}>
+            <path d={path.d} className="activity-connection" />
+            {live && <path d={path.d} pathLength={100} className="activity-connection-motion" />}
+          </g>;
+        })}
+      </svg>
+      <div className="relative min-w-0 space-y-1.5">
+        {visible.map(({ id, current, active, history }) => <button key={id} data-flow-member={id} data-state={current.status} type="button"
+          onClick={() => onPick(current.id)} aria-pressed={history.some((entry) => entry.id === picked)}
+          aria-label={'打开 ' + current.agentLabel + ' · ' + current.title + ' 的对话'}
+          className="activity-member flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left">
+          <AgentLogo src={current.agentLogo} label={current.agentLabel} className="size-7 shrink-0 rounded-lg" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[12px] font-semibold text-ink" title={current.title}>{current.lane ?? current.title}</span>
+            <span className="block truncate text-[10px] text-muted" title={current.agentLabel}>{current.agentLabel}{current.model && ' · ' + modelLabel(current.model)}</span>
+          </span>
+          <span className="min-w-0 shrink-0 text-right text-[10px]">
+            <span className="activity-state block" data-state={current.status}>{active ? formatDuration(Math.max(0, now - Date.parse(current.startedAt))) : states[current.status]}</span>
+            {history.length > 1 && <span className="block text-muted">{history.length} 次调用</span>}
+          </span>
+          <MessageCircle className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
+        </button>)}
+        {rows.length > 4 && <Button size="sm" variant="ghost" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+          <ChevronDown className={cn('size-3.5', expanded && 'rotate-180')} />{expanded ? '收起成员' : '展开另外 ' + (rows.length - 4) + ' 项'}
+        </Button>}
       </div>
-      <div className="min-w-0 space-y-2">
-        <h3 className="text-[11px] font-semibold text-muted">产物与报告</h3>
-        <div className="activity-result relative rounded-lg border border-line bg-surface p-2.5">
-          <FlowConnection live={false} output />
-          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink"><FolderOutput className="size-3.5 text-accent" />产物</h4>
-          {output ? <a className="mt-1 block break-words text-[11px] font-medium text-accent hover:underline" href={output.link}>{output.name} · {output.description}</a> :
-            <p className="mt-1 text-[11px] text-muted">暂无可下载产物</p>}
+      <div data-flow-hub className="relative min-w-0 self-start rounded-xl border border-line bg-surface">
+        <div className="border-b border-line px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-muted">
+            <span className="flex items-center gap-1.5"><Waypoints className="size-3.5 text-accent" />{first.role === 'meeting' ? '会议调度' : '调度与交付'}</span>
+            <span className={cn('shrink-0 tabular-nums', active.length > 0 && 'font-medium text-accent')}>{active.length} 项执行中</span>
+          </div>
+          <p className="mt-1 line-clamp-2 break-words text-[13px] font-semibold text-ink [overflow-wrap:anywhere]" title={title ?? first.runTitle}>{title ?? first.runTitle}</p>
         </div>
-        <div className="activity-result relative rounded-lg border border-line bg-surface p-2.5">
-          <FlowConnection live={false} output />
-          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink"><FileText className="size-3.5 text-emerald-700" />任务报告</h4>
-          {reports.length > 0 ? <ul className="mt-1 space-y-1">
-            {reports.map((report, index) => <li className="line-clamp-2 text-[11px] text-muted" key={index} title={report}>{report}</li>)}
-          </ul> : <p className="mt-1 text-[11px] text-muted">等待 Agent 回传报告</p>}
+        <div className="space-y-1.5 px-3 py-2 text-[11px]">
+          {active.length > 0 && <p className="truncate text-accent" title={active[0]?.progress ?? active[0]?.description}>
+            {active[0]?.progress ?? active[0]?.title}{active.length > 1 && ' · 另 ' + (active.length - 1) + ' 项'}
+          </p>}
+          {output ? <a href={output.link} className="flex min-w-0 items-center gap-1.5 text-accent hover:underline" title={output.description}>
+            <FolderOutput className="size-3.5 shrink-0" /><span className="truncate">{output.name}</span><ArrowUpRight className="size-3 shrink-0" />
+          </a> : <p className="flex items-center gap-1.5 text-muted"><FolderOutput className="size-3.5" />暂无产物</p>}
+          {reports.length > 0 && <details>
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 text-muted"><FileText className="size-3.5" />任务报告<ChevronDown className="size-3.5" /></summary>
+            <ul className="mt-1 space-y-1 break-words text-ink [overflow-wrap:anywhere]">{reports.map((report, index) =>
+              <li key={index} className="border-t border-line py-1">{report}</li>)}</ul>
+          </details>}
         </div>
       </div>
     </div>
   </section>;
 }
 
-function RunFlow({ entries, picked, onPick }: { entries: AgentInterval[]; picked: string | null; onPick: (id: string) => void }) {
-  const first = entries[0]!;
-  const id = first.runId;
-  const reportType = first.role === 'meeting' ? 'meeting' : first.role === 'spec' ? 'none' : 'run';
-  const { data: results, reload } = useApiResource(async () => {
-    if (reportType === 'run') {
-      const board = await fetchBlackboard(id);
-      return {
-        output: board?.hasOutput ? { link: '/api/runs/' + encodeURIComponent(id) + '/output', name: 'output.zip', description: '运行产物' } : undefined,
-        reports: board?.entries.filter((entry) => entry.source === 'agent').slice(-3).reverse().map((entry) => entry.author + ' · ' + entry.text) ?? [],
-      };
-    }
-    if (reportType === 'meeting') {
-      const room = await fetchMeeting(id);
-      return {
-        output: room?.report ? { link: '/api/meetings/' + encodeURIComponent(id) + '/report', name: 'solution.md', description: room.reportStale ? '上次方案' : '会议方案' } : undefined,
-        reports: room?.messages.filter((message) => message.kind === 'agent').slice(-3).reverse().map((message) => message.author + ' · ' + message.text) ?? [],
-      };
-    }
-    return { output: undefined, reports: [] };
-  }, null);
-  useLiveRefresh(reportType !== 'none', reload, { runId: id, refreshIntervalMs: 1000 });
-  return <ActiveFlow entries={entries} picked={picked} onPick={onPick} output={results?.output} reports={results?.reports} />;
-}
-
-export function AgentRunningCount() {
-  const { data, source, reload } = useApiResource(() => fetchAgentActivity(undefined, true), null);
-  useLiveRefresh(source === 'live', reload, { refreshIntervalMs: 650 });
-  return <div className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted">
-    <Activity className="size-4 text-accent" />
-    <span>{data ? data.active + ' 个 Agent 调用正在运行' : '暂时无法读取 Agent 状态'}</span>
-    <Link to="/runs" className="ml-auto font-medium text-accent hover:underline">打开运行记录</Link>
-  </div>;
-}
-
-export function AgentActivityPanel({ runId, onInspectNode }: { runId?: string; onInspectNode?: (nodeId: string) => void }) {
+export function AgentActivityPanel({ runId, title, onOpen }: {
+  runId: string;
+  title: string;
+  onOpen: (entry: AgentInterval) => void;
+}) {
   const { data, source, reload, loading } = useApiResource(() => fetchAgentActivity(runId), null);
-  useLiveRefresh(source === 'live', reload, { runId, refreshIntervalMs: 550 });
-  const [runFilter, setRunFilter] = useState('');
+  const { data: board, reload: reloadBoard } = useApiResource(() => fetchBlackboard(runId), null);
+  useLiveRefresh(source === 'live', reload, { runId, refreshIntervalMs: 500 });
+  useLiveRefresh(source === 'live', reloadBoard, { runId, refreshIntervalMs: 1800 });
   const [picked, setPicked] = useState<string | null>(null);
-  const intervals = useMemo(() => data?.intervals ?? [], [data]);
-  const runs = useMemo(() => new Map(intervals.map((entry) => [entry.runId, entry.runTitle])), [intervals]);
-  const scoped = (!runFilter || runs.has(runFilter)) && runFilter ? intervals.filter((entry) => entry.runId === runFilter) : intervals;
-  const running = scoped.filter((entry) => entry.status === 'running');
-  const selected = scoped.find((entry) => entry.id === picked);
-  const focusId = selected?.runId ?? running[0]?.runId ?? scoped[0]?.runId;
-  const flow = scoped.filter((entry) => entry.runId === focusId);
-  const link = selected?.role === 'meeting' ? '/meetings/' + selected.runId : selected?.role === 'spec' ? '/new?spec=' + selected.runId : '/runs/' + selected?.runId;
-  return (
-    <Card className="space-y-4 p-4 sm:p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Activity className="size-4 text-accent" />Agent 运行监控</h2>
-          <p className="mt-1 text-xs text-muted">{loading && !data ? '正在读取…' : '当前 ' + running.length + ' 个 Agent 调用正在执行'}{data?.mode === 'mock' ? ' · 回放模式' : ''}</p>
-        </div>
-        {!runId && <label className="flex items-center gap-2 text-[11px] text-muted">运行范围
-          <select aria-label="按运行筛选" value={runs.has(runFilter) ? runFilter : ''} onChange={(event) => { setRunFilter(event.target.value); setPicked(null); }}
-            className="max-w-[215px] rounded-lg border border-line bg-surface px-2 py-1.5 text-[11px] text-ink">
-            <option value="">全部运行</option>
-            {[...runs].map(([id, title]) => <option value={id} key={id}>{title}</option>)}
-          </select>
-        </label>}
+  const entries = data?.intervals ?? [];
+  const active = entries.filter((entry) => entry.status === 'running');
+  const working = new Set(active.map((entry) => entry.agentId)).size;
+  const reports = board?.entries.filter((entry) => entry.source === 'agent').slice(-3)
+    .map((entry) => entry.author + ' · ' + entry.text) ?? [];
+
+  function open(id: string) {
+    const entry = entries.find((item) => item.id === id);
+    if (!entry) return;
+    setPicked(id);
+    onOpen(entry);
+  }
+
+  return <Card className="min-w-0 overflow-hidden">
+    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Activity className="size-4 text-accent" />Agent 监控</h2>
+      <div className="flex items-center gap-2 text-[11px] tabular-nums text-muted">
+        {active.length > 0 && <span className="size-1.5 rounded-full bg-success" />}
+        <span>{loading && !data ? '读取中…' : data ? working + ' 个 Agent · ' + active.length + ' 项执行中' : '暂时无法读取'}</span>
+        {data?.mode === 'mock' && <span>回放</span>}
       </div>
-      {focusId && flow.length > 0 ? <RunFlow key={focusId} entries={flow} picked={picked} onPick={setPicked} /> :
-        <ActiveFlow entries={[]} picked={picked} onPick={setPicked} />}
-      <ActivityTimeline intervals={scoped} picked={picked} onPick={setPicked} />
-      {selected && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-subtle/35 px-3 py-2.5">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-ink">{selected.title} · {statusLabel[selected.status]}</p>
-            <p className="mt-0.5 break-words text-[11px] text-muted">{selected.description}</p>
-          </div>
-          {selected.nodeId && onInspectNode ? <button type="button" className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline"
-            onClick={() => onInspectNode(selected.nodeId!)}>打开节点对话<ArrowRight className="size-3.5" /></button> :
-            !runId && link && <Link className="flex items-center gap-1.5 text-xs font-medium text-accent" to={link}>查看{selected.role === 'meeting' ? '会议' : selected.role === 'spec' ? '访谈' : '运行'}<ArrowRight className="size-3.5" /></Link>}
-        </div>
-      )}
-    </Card>
-  );
+    </header>
+    <div className="space-y-4 p-3 sm:p-4">
+      <ActiveFlow entries={entries} title={title} picked={picked} onPick={open}
+        output={board?.hasOutput ? { link: '/api/runs/' + encodeURIComponent(runId) + '/output', name: '下载集成产物', description: '已落盘的交付文件' } : undefined}
+        reports={reports} />
+      <ActivityTimeline intervals={entries} picked={picked} onPick={open} />
+    </div>
+  </Card>;
 }

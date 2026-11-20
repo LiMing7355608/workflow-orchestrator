@@ -348,20 +348,53 @@ function summarizeInput(input: unknown): string | undefined {
  * 有的 agent 把 `title` 写成一句人话，有的只写工具名（dsh-acp 就是后者），
  * 两种都要能落出一条有信息的事件。
  */
-function toolEvent(call: {
+type ToolDetails = {
   title?: string | null;
   name?: string | null;
   kind?: string | null;
   rawInput?: unknown;
-  toolCallId?: string;
-}): AgentEvent {
-  const summary = summarizeInput(call.rawInput) ?? call.title ?? call.name ?? call.toolCallId;
-  return {
-    kind: 'tool',
-    toolName: call.name ?? call.kind ?? 'tool',
-    text: summary,
-  };
+};
+
+const toolLabels: Record<string, string> = {
+  pwsh: '执行命令', bash: '执行命令', execute: '执行命令',
+  read: '读取文件', write: '写入文件', edit: '修改文件', search: '搜索工程',
+  glob: '查找文件', grep: '搜索工程', skill: '加载技能',
+};
+
+function toolName(call: ToolDetails): string | undefined {
+  const name = call.name?.trim() || call.title?.trim();
+  if (name && Object.hasOwn(toolLabels, name.toLowerCase())) return toolLabels[name.toLowerCase()];
+  const input = summarizeInput(call.rawInput) ?? '';
+  if (/(?:^|[=. ·])command=/.test(input)) return '执行命令';
+  if (/(?:^|[=. ·])(?:pattern|query)=/.test(input)) return '查找资料';
+  if (/^(?:description=)?skill$/i.test(input)) return '加载技能';
+  if (call.kind && Object.hasOwn(toolLabels, call.kind)) return toolLabels[call.kind];
+  if (name && name !== 'other' && /^[\p{L}\p{N}_.-]{1,48}$/u.test(name)) return name;
+  if (/(?:^|[=. ·])(?:file_path|path)=/.test(input)) return '文件操作';
+  return undefined;
 }
+
+function toolFailure(update: Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>, denied?: boolean): string | undefined {
+  if (denied) return '需要额外权限，本次权限申请已拒绝。';
+  const raw = update.rawOutput;
+  let detail = typeof raw === 'string' ? raw : undefined;
+  if (!detail && raw && typeof raw === 'object') {
+    const fields = raw as Record<string, unknown>;
+    detail = [fields.message, fields.error, fields.stderr].find((item): item is string => typeof item === 'string' && Boolean(item.trim()));
+  }
+  if (!detail) {
+    for (const item of update.content ?? []) {
+      if (item.type !== 'content' || item.content.type !== 'text' || !item.content.text.trim()) continue;
+      detail = item.content.text;
+      break;
+    }
+  }
+  if (!detail?.trim()) return undefined;
+  if (/SetNamedSecurityInfoW failed.*Win32 5/i.test(detail)) return 'Windows 沙箱无法设置工作树访问权限（Win32 5）。';
+  return detail.trim().replace(/(Bearer\s+|api[_-]?key[=:]\s*)[^\s,"']+/gi, '$1[已隐藏]').slice(0, 420);
+}
+
+type RecordedTool = { name?: string; denied?: boolean };
 
 /* ------------------------------------------------------------------ *
  * update → AgentEvent 的翻译
@@ -379,7 +412,7 @@ function toolEvent(call: {
  * 「事件流里没有的东西 = 我们没发的东西」这条因果保持简单，而不是发出一堆
  * 注定被上层筛掉的噪声。
  */
-export function translateUpdate(update: SessionUpdate): AgentEvent[] {
+export function translateUpdate(update: SessionUpdate, previous?: RecordedTool): AgentEvent[] {
   switch (update.sessionUpdate) {
     case 'agent_message_chunk': {
       const text = contentText(update.content);
@@ -392,16 +425,14 @@ export function translateUpdate(update: SessionUpdate): AgentEvent[] {
     }
 
     case 'tool_call':
-      return [toolEvent(update)];
+      return [{ kind: 'tool', toolName: toolName(update) ?? '工具操作',
+        text: summarizeInput(update.rawInput) ?? update.title ?? undefined }];
 
     case 'tool_call_update': {
-      // 一次调用的生命周期会发好几条 update（pending → in_progress → completed）。
-      // 全发出去等于把同一次调用在时间线上重复四遍；只有失败是新事实。
-      if (update.status !== 'failed') {
-        return [];
-      }
-      const label = update.title ?? update.name ?? update.toolCallId;
-      return [{ kind: 'error', text: `工具调用失败：${label}` }];
+      if (update.status !== 'failed') return [];
+      const name = toolName(update) ?? previous?.name ?? '工具操作';
+      const detail = toolFailure(update, previous?.denied);
+      return [{ kind: 'error', text: name + '失败' + (detail ? ' · ' + detail : ' · 调用 ' + update.toolCallId) }];
     }
 
     case 'notice': {
@@ -868,6 +899,7 @@ export class AcpRunner implements AgentRunner {
       lastMessageId: undefined as string | undefined,
       usage: undefined as AgentUsage | undefined,
       permission: { count: 0, kinds: [] } as PermissionLedger,
+      calls: new Map<string, RecordedTool>(),
     };
 
     const emit = (events: AgentEvent[]): void => {
@@ -941,7 +973,15 @@ export class AcpRunner implements AgentRunner {
           state.usage = contextUsage(update.used) ?? state.usage;
         }
 
-        emit(translateUpdate(update));
+        if (update.sessionUpdate === 'tool_call') {
+          if (state.calls.size >= 128) state.calls.delete(state.calls.keys().next().value!);
+          state.calls.set(update.toolCallId, { ...state.calls.get(update.toolCallId), name: toolName(update) });
+        }
+        const prior = update.sessionUpdate === 'tool_call_update' ? state.calls.get(update.toolCallId) : undefined;
+        emit(translateUpdate(update, prior));
+        if (update.sessionUpdate === 'tool_call_update' && (update.status === 'failed' || update.status === 'completed')) {
+          state.calls.delete(update.toolCallId);
+        }
       })
       .onRequest(methods.client.session.requestPermission, ({ params }) => {
         const kind = params.toolCall.kind ?? 'unknown';
@@ -949,6 +989,10 @@ export class AcpRunner implements AgentRunner {
         state.permission.count += 1;
         if (!state.permission.kinds.includes(kind)) {
           state.permission.kinds.push(kind);
+        }
+        const id = params.toolCall.toolCallId;
+        if (state.calls.has(id)) {
+          state.calls.set(id, { name: toolName(params.toolCall) ?? state.calls.get(id)?.name, denied: true });
         }
         const response = answerPermission(params.options);
         this.log.debug('拒绝了 ACP 权限请求', {

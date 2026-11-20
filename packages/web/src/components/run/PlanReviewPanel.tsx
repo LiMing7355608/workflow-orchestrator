@@ -236,7 +236,7 @@ export function RunPlanPanel({ run, live, onSelectNode }: { run: WorkflowRunDeta
       setCopyNotice('请手动选中路径复制');
     }
   }
-  return <section className="h-full overflow-auto bg-canvas p-4 sm:p-5" aria-label="任务拆解">
+  return <section className="workspace-scroll h-full bg-canvas p-4 sm:p-5" aria-label="任务拆解" tabIndex={0}>
     <div className="mx-auto max-w-[980px] space-y-3">
       <h2 className="text-xl font-semibold tracking-tight text-ink">任务拆解</h2>
       {(board?.directory || board?.hasOutput) && <PlanFiles runId={run.id} directory={board?.directory} archive={board?.hasOutput} />}

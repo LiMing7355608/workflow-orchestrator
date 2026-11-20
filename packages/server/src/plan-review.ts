@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentRunner, WorkspacePort } from '@orchestrator/core';
+import type { AgentEvent, AgentProfile, AgentRunner, WorkspacePort } from '@orchestrator/core';
 import type { Dag } from '@orchestrator/planner';
 import { z } from 'zod';
 import { readTurnJson, runTextTurn } from './text-turn.js';
@@ -29,6 +29,7 @@ export async function verifyPlan(input: {
   workspace: WorkspacePort;
   runner: AgentRunner;
   signal: AbortSignal;
+  onEvents?: (events: AgentEvent[]) => void;
 }): Promise<PlanVerification> {
   const { runId, agent, workspace, signal } = input;
   const nodeId = 'check-' + Date.now().toString(36);
@@ -50,14 +51,14 @@ export async function verifyPlan(input: {
     }
     const prompt = [
       'WORKFLOW_PLAN_CHECK_JSON',
-      '你负责对开发任务草案做独立核对，只审查，不改文件。按用户语言反馈。',
+      '只使用下文的规格和任务草案进行独立核对，直接在回复提供结论。严禁调用工具或修改文件。按用户语言反馈。',
       '核对需求覆盖、依赖、并行范围和门禁。检查 implement 的交付路径是否具体、是否符合改动边界，并逐项核对验收条件可执行性。区分必改与建议，关联实际节点 ID。',
       '对于输入缺少的信息，列出具体待确认事项。若发现漏掉的需求，写出规格对应内容和建议补充的任务。',
       '只返回 JSON 对象 {"summary":"简要结论","findings":[{"severity":"required 或 suggestion","text":"问题与具体修改建议","nodeIds":[]}]}。没有发现时 findings 为空。',
       isExcerpt ? '当前输入包含节录，只核对可见信息。' : '以下是待核对的规格和任务草案。',
       JSON.stringify({ goal: input.goal.slice(0, 24_000), nodeCount: input.dag.nodes.length, nodes }),
     ].join('\n');
-    const answers = await runTextTurn(input.runner, agent, { runId, nodeId, cwd, prompt, signal });
+    const answers = await runTextTurn(input.runner, agent, { runId, nodeId, cwd, prompt, signal, onEvents: input.onEvents });
     const review = readTurnJson(answers, reviewSchema, '核对 Agent 返回的结果格式无效。');
     const ids = new Set(input.dag.nodes.map((node) => node.id));
     return {
