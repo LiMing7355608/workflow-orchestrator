@@ -5,7 +5,8 @@ import {
 } from '@orchestrator/core';
 import {
   DagGenerationError,
-  extractJsonObject,
+  draftFromReplies,
+  replyPlan,
   PLAN_FILENAME,
   pickPlannerAgent,
   readSubmittedPlan,
@@ -171,8 +172,10 @@ export function buildAmendmentPrompt(
     '- 不得修改任何节点的 type 与 dependsOn（新节点可以自己声明 dependsOn）',
     '',
     '## 交付方式（这是硬要求）',
-    ...(options.textOnly ? ['在回复中直接返回修改后的完整任务图 JSON。'] : [
-    `把修改后的**完整**任务图写入当前工作目录下的 ${PLAN_FILENAME} 文件。`,
+    ...(options.textOnly ? [
+      '直接回复修改后的完整任务图 JSON。编排器负责校验和写入项目，严禁使用 Shell、文件工具、技能或子 Agent。',
+    ] : [
+      `把修改后的**完整**任务图写入当前工作目录下的 ${PLAN_FILENAME} 文件。`,
     ]),
     '',
     '## 输出要求',
@@ -268,6 +271,8 @@ export async function amendDag(
   }
 
   const maxAttempts = options.maxAttempts ?? 3;
+  const textOnly = replyPlan(agent);
+  const policy = textOnly ? 'default' : 'accept-edits';
   const issues: DagIssue[] = [];
   const seen = new Set<string>();
 
@@ -281,7 +286,7 @@ export async function amendDag(
     const prompt = buildAmendmentPrompt(goal, currentDag, instruction, catalog, {
       lockedNodeIds: options.lockedNodeIds,
       previousIssues: issues,
-      textOnly: agent.transport === 'http-model',
+      textOnly,
     });
     const nodeId = `attempt-${attempt}`;
     options.signal?.throwIfAborted();
@@ -301,16 +306,16 @@ export async function amendDag(
     const argv = buildAgentArgv(agent, {
       prompt,
       workdir: cwd,
-      policy: 'accept-edits',
+      policy,
     });
 
     const parser = createParser(agent.launch.parser);
     let answer = '';
+    let final = '';
     const collect = (events: ReturnType<typeof parser.push>): void => {
       for (const event of events) {
-        if (event.kind === 'text' || event.kind === 'result') {
-          answer += event.text ?? '';
-        }
+        if (event.kind === 'text') answer += event.text ?? '';
+        if (event.kind === 'result' && event.text) final = event.text;
       }
     };
 
@@ -325,7 +330,7 @@ export async function amendDag(
         cwd,
         timeoutMs: agent.timeoutMs,
         signal: options.signal,
-        policy: 'accept-edits',
+        policy,
       },
       (chunk) => {
         collect(parser.push(chunk));
@@ -334,9 +339,8 @@ export async function amendDag(
     );
     collect(parser.finish());
 
-    const submitted = agent.transport === 'http-model'
-      ? (result.ok ? extractJsonObject(answer || result.output) : undefined)
-      : await readSubmittedPlan(cwd);
+    const fromReply = textOnly && result.ok ? draftFromReplies(final, answer, result.output) : undefined;
+    const submitted = fromReply ?? (agent.transport === 'http-model' ? undefined : await readSubmittedPlan(cwd));
     // 读完再释放工作区，顺序不能反
     await execution.workspace.release(workspaceRunId, nodeId).catch(() => {});
     options.signal?.throwIfAborted();
@@ -356,7 +360,7 @@ export async function amendDag(
       }
       if (attempt === maxAttempts) {
         throw new DagGenerationError(
-          agent.transport === 'http-model'
+          textOnly
             ? `Agent 未返回可解析的完整任务图：${truncate(answer || result.output, 400)}`
             : `Agent 没有把修改后的任务图写入 ${PLAN_FILENAME}：${truncate(answer || result.output, 400)}`,
           attempt,

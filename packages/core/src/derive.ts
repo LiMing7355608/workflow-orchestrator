@@ -621,6 +621,10 @@ export function deriveConversation(
         planEntry = entries[entries.length - 1];
         break;
       }
+      case 'plan.checking':
+        push({ at: event.at, role: 'system', text: '交叉核对任务草案（' + event.agentId + '）', tone: 'info', outputs: [] });
+        planEntry = entries.at(-1);
+        break;
       case 'agent.output':
         // nodeId 为空 = 编排器自己的执行输出（拆解或改图时还没有节点）。
         // 有正在进行的拆解就挂到那条行下面；否则先攥着，等这次改图的
@@ -628,7 +632,7 @@ export function deriveConversation(
         // 扔掉的话用户只能看到一个结论，没法判断该不该接受。
         if (event.nodeId === undefined) {
           const output: ConversationOutput = {
-            id: `pending-out-${pendingOutputs.length}`,
+            id: `out-${planEntry?.outputs?.length ?? pendingOutputs.length}`,
             at: event.at,
             kind: event.kind,
             text: event.chunk,

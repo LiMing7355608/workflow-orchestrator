@@ -1126,6 +1126,19 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
            */
           workspace: planningWorkspace(runId, workspaceAt(request.workspaceRoot, Boolean(store.projectWorkspace(runId)))),
           onEvents: relay.forward,
+          async workspaceFiles() {
+            try {
+              const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-files', '-z'], {
+                cwd: request.workspaceRoot, windowsHide: true, timeout: 4000, maxBuffer: 512_000, signal,
+              });
+              return stdout.split('\0').filter((item) => item && item.length <= 220).slice(0, 100);
+            } catch { return []; }
+          },
+          onRetry: async (attempt, reason) => {
+            await relay.flush();
+            await store.emit({ type: 'agent.output', at: now(), runId, agentId, kind: 'status',
+              chunk: '第 ' + attempt + ' 次拆解未通过 · ' + reason.slice(0, 430) + '。正在重试。' });
+          },
         },
         { agentId: requestedAgentId, runId, signal, requireDeliverables: store.snapshot.runs[runId]?.requireDeliverables },
       ).finally(relay.flush);
@@ -1152,8 +1165,11 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         const checker = [findAgent(run.reviewAgentId ?? '', catalog), ...catalog.filter((item) => item.id !== agentId), findAgent(agentId, catalog)]
           .find((item) => item?.enabled && item.availability !== 'missing');
         await store.emit({ type: 'plan.checking', at: now(), runId, agentId: checker?.id ?? 'orchestrator' });
+        const checkerRelay = createAgentEventRelay({ emit: (event) => store.emit(event), now },
+          { runId, agentId: checker?.id ?? 'orchestrator' });
         const verification = checker
-          ? await verifyPlan({ runId, goal: request.goal, dag, agent: checker, runner, signal, workspace: workspaceFor(run) })
+          ? await verifyPlan({ runId, goal: request.goal, dag, agent: checker, runner, signal,
+              workspace: workspaceFor(run), onEvents: checkerRelay.forward }).finally(checkerRelay.flush)
           : { status: 'unavailable' as const, agentId: 'orchestrator', summary: '没有可用的核对 Agent。', findings: [] };
         signal.throwIfAborted();
         const draft: PlanDraft = { revision: randomUUID(), dag, attempts: generated.attempts, verification };
@@ -1343,14 +1359,18 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   app.get('/api/agents', async () => catalog);
 
-  app.get<{ Querystring: { runId?: string; summary?: string } }>('/api/agents/activity', async (request) => {
+  app.get<{ Querystring: { runId?: string; summary?: string; active?: string } }>('/api/agents/activity', async (request) => {
     const intervals = [...activity.entries, ...interviews.activity, ...meetings.activity]
-      .filter((entry) => entry.agentId !== 'orchestrator' && (!request.query.runId || entry.runId === request.query.runId))
+      .filter((entry) => entry.agentId !== 'orchestrator' && (!request.query.runId || entry.runId === request.query.runId)
+        && (request.query.active !== 'true' || entry.status === 'running'))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
     return {
       mode: runnerMode,
       active: intervals.filter((entry) => entry.status === 'running').length,
-      intervals: request.query.summary === 'true' ? [] : intervals.map((entry) => ({ ...entry, agentLabel: resolveAgent(entry.agentId) ?? entry.agentId })),
+      intervals: request.query.summary === 'true' ? [] : intervals.map((entry) => {
+        const profile = findAgent(entry.agentId, catalog);
+        return { ...entry, agentLabel: profile?.label ?? entry.agentId, agentLogo: profile?.logo };
+      }),
     };
   });
 

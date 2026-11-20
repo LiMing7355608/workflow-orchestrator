@@ -1,4 +1,4 @@
-import { buildAgentArgv, createParser, type AgentProfile, type AgentRunner } from '@orchestrator/core';
+import { buildAgentArgv, createParser, type AgentEvent, type AgentProfile, type AgentRunner } from '@orchestrator/core';
 import { z } from 'zod';
 
 export const modelIdSchema = z.string().trim().min(1).max(512).refine((id) => !/[\x00-\x1f\x7f]/.test(id), '模型选择含有无效字符。');
@@ -16,6 +16,7 @@ interface TextTurn {
   model?: string;
   signal?: AbortSignal;
   onText?: (text: string) => void;
+  onEvents?: (events: AgentEvent[]) => void;
 }
 
 export async function runTextTurn(runner: AgentRunner, agent: AgentProfile, turn: TextTurn): Promise<string[]> {
@@ -28,7 +29,8 @@ export async function runTextTurn(runner: AgentRunner, agent: AgentProfile, turn
   });
   let text = '';
   let final = '';
-  function collect(events: ReturnType<typeof parser.push>) {
+  function collect(events: AgentEvent[]) {
+    turn.onEvents?.(events);
     for (const event of events) {
       if ((event.kind === 'text' || event.kind === 'result') && event.text) {
         if (event.kind === 'result') final = event.text.slice(-48_000);

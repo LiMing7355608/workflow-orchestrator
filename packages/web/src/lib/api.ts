@@ -103,10 +103,10 @@ export function sendMeetingNote(id: string, text: string, interrupt = false) {
   return operation<MeetingView>('/api/meetings/' + encodeURIComponent(id) + (interrupt ? '/interrupt' : '/note'), 'POST', { text });
 }
 
-export function fetchAgentActivity(runId?: string, summary = false) {
+export function fetchAgentActivity(runId?: string, activeOnly = false) {
   const params = new URLSearchParams();
   if (runId) params.set('runId', runId);
-  if (summary) params.set('summary', 'true');
+  if (activeOnly) params.set('active', 'true');
   return requestJson<ActivityView>('/api/agents/activity?' + params);
 }
 

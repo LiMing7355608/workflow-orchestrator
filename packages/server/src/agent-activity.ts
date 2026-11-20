@@ -22,7 +22,7 @@ function describe(run: RunFacts, nodeId?: string): Pick<AgentInterval, 'role' | 
   if (node?.type === 'implement' || node?.type === 'review') {
     return { role: node.type, title: node.title, description: node.description, nodeId };
   }
-  if (!run.frozenAt && nodeId?.startsWith('check-')) {
+  if (nodeId?.startsWith('check-')) {
     return { role: 'check', title: '任务草案交叉核对', description: '核对需求覆盖、依赖关系和验收条件' };
   }
   if (run.frozenAt && nodeId) {
@@ -73,6 +73,7 @@ export class AgentActivity {
                 const name = event.toolName ?? '';
                 interval.progress = /^[\p{L}\p{N}_./:-]{1,40}$/u.test(name) ? '正在调用 ' + name : '正在执行工具操作';
               }
+              if (event.kind === 'error' && event.text?.trim()) interval.progress = event.text.trim().slice(0, 150);
               if (event.kind === 'text' && event.text?.trim()) {
                 const output = event.text.trim().replace(/\s+/g, ' ');
                 if (interval.role === 'plan' || interval.role === 'check' || interval.role === 'amend') {

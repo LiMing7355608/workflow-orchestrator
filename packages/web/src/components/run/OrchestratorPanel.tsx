@@ -13,6 +13,8 @@ import { trapTabKey } from '../../lib/focus-trap';
 import type { BadgeTone } from '../ui/Badge';
 import { Badge } from '../ui/Badge';
 import type { WorkflowRunDetail } from '../../types/workflow';
+import type { AgentInterval } from '../../types/operations';
+import { CallTranscript } from './CallTranscript';
 import { ConversationEntryItem, QueuedHuman } from './ConversationBubbles';
 
 /**
@@ -41,6 +43,7 @@ export interface OrchestratorPanelProps {
   run: WorkflowRunDetail;
   /** 空值即关闭：与 NodeDetailPanel 用「节点为 null」表示关闭是同一个约定 */
   open: boolean;
+  focusCall?: AgentInterval | null;
   onClose: () => void;
   /**
    * 消息落库后重读运行详情。
@@ -54,6 +57,7 @@ export interface OrchestratorPanelProps {
 export function OrchestratorPanel({
   run,
   open,
+  focusCall,
   onClose,
   onRunChanged,
 }: OrchestratorPanelProps) {
@@ -63,7 +67,7 @@ export function OrchestratorPanel({
   // createPortal 在渲染期调用：面板由页面深处的按钮触发，父级链上到处是
   // `overflow-hidden`（画布、右栏、页面根容器），留在原地一定会被裁掉。
   return createPortal(
-    <PanelSurface run={run} onClose={onClose} onRunChanged={onRunChanged} />,
+    <PanelSurface key={focusCall?.id ?? 'all'} run={run} focusCall={focusCall} onClose={onClose} onRunChanged={onRunChanged} />,
     document.body,
   );
 }
@@ -128,10 +132,12 @@ function stageBanner(run: WorkflowRunDetail): { title: string; detail: string } 
 
 function PanelSurface({
   run,
+  focusCall,
   onClose,
   onRunChanged,
 }: {
   run: WorkflowRunDetail;
+  focusCall?: AgentInterval | null;
   onClose: () => void;
   onRunChanged: () => void;
 }) {
@@ -142,6 +148,7 @@ function PanelSurface({
 
   // 入场淡入：首帧透明、下一帧补上，靠 CSS transition 完成，不起动画库
   const [entered, setEntered] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   /** 乐观回显：句子已经发出、还没落库时先摆出来，别让人以为没点中 */
@@ -154,7 +161,7 @@ function PanelSurface({
    * 默认跟：这是一条对话，最新的一句必须在视野里。但人手动往上翻历史时必须
    * 让位——否则每来一条事件就把他拽回底部，读不了任何东西。
    */
-  const stick = useRef(true);
+  const stick = useRef(!focusCall);
 
   // onClose 每次渲染都是新函数。挂进 document 的监听通过 ref 取最新的那个，
   // 否则父组件一重渲染就要解绑重建一次键盘监听。
@@ -289,7 +296,7 @@ function PanelSurface({
     : '让编排器改这张图…（Enter 发送，Shift+Enter 换行）';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-5">
       {/* 遮罩自己吞掉点击：浮层外的每一寸都是「关掉」，不是「点到背后的东西」 */}
       <div
         aria-hidden="true"
@@ -309,7 +316,7 @@ function PanelSurface({
         onClick={(event) => event.stopPropagation()}
         style={{
           width: 'min(880px, 92vw)',
-          height: 'min(80vh, 720px)',
+          height: 'min(92dvh, 780px)',
           // 与节点详情同一层抬升：其余面板靠边框分层，浮层需要一点影子把
           // 「盖在上面」这件事说清楚
           boxShadow: '0 24px 64px -32px rgba(31, 35, 40, 0.45)',
@@ -377,8 +384,10 @@ function PanelSurface({
           onScroll={handleScroll}
           aria-live="polite"
           aria-label="编排器会话"
-          className="min-h-0 flex-1 overflow-y-auto px-5 py-4"
+          tabIndex={0}
+          className="workspace-scroll min-h-0 flex-1 px-4 py-4 sm:px-5"
         >
+          {focusCall && !showAll ? <CallTranscript initial={focusCall} run={run} onShowAll={() => setShowAll(true)} /> :
           <ul className="space-y-4">
             {run.conversation.map((entry) => (
               <li key={entry.id}>
@@ -395,7 +404,7 @@ function PanelSurface({
                 <QueuedHuman text={echo} />
               </li>
             ) : null}
-          </ul>
+          </ul>}
         </div>
 
         <footer className="shrink-0 border-t border-line px-5 pb-4 pt-3">

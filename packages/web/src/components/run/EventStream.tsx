@@ -1,7 +1,7 @@
 import { ChevronRight, MessageSquare, ScrollText } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { formatDateTime } from '../../lib/format';
-import { displayNodeStatus, nodeStatusMeta } from '../../lib/workflow-meta';
+import { displayNodeStatus, eventToolLabel, nodeStatusMeta } from '../../lib/workflow-meta';
 import type { WorkflowEvent, WorkflowNode } from '../../types/workflow';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -17,13 +17,9 @@ const options: Array<{ value: EventFilter; label: string }> = [
   ...Object.entries(typeLabels).map(([value, label]) => ({ value: value as WorkflowEvent['type'], label })),
 ];
 
-function toolLabel(event: WorkflowEvent) {
-  return event.toolName && /^[\p{L}\p{N}_./:-]{1,40}$/u.test(event.toolName) ? event.toolName : '工具';
-}
-
 function eventLabel(event: WorkflowEvent): string {
   switch (event.kind) {
-    case 'tool': return '调用 ' + toolLabel(event);
+    case 'tool': return '调用 ' + eventToolLabel(event);
     case 'thinking': return '过程输出';
     case 'result': return '返回结果';
     case 'status': return '客户端状态';
@@ -36,7 +32,7 @@ function eventLabel(event: WorkflowEvent): string {
 }
 
 function compact(event: WorkflowEvent) {
-  if (!event.kind) return event.message.replace(/\s+/g, ' ').slice(0, 104);
+  if (!event.kind || event.kind === 'status' || event.kind === 'error') return event.message.replace(/\s+/g, ' ').slice(0, 104);
   return eventLabel(event);
 }
 
@@ -72,7 +68,7 @@ export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }:
       <div className="max-w-full overflow-x-auto"><Segmented options={options} value={filter} onChange={setFilter} ariaLabel="按事件类型筛选" /></div>
       <span className="text-[11px] text-muted">{groups.length} 组 · {count} 条事件</span>
     </div>
-    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">
+    <div role="region" aria-label="事件流滚动区域" tabIndex={0} className="workspace-scroll min-h-0 flex-1 px-3 py-3 sm:px-4">
       {!groups.length && <EmptyState icon={ScrollText} title="没有匹配的事件" description="调整事件类型筛选后再试。" />}
       <div className="space-y-2">
         {groups.map(({ id, node, entries }) => {
@@ -106,7 +102,7 @@ export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }:
                   {eventLabel(event)}<time className="text-[10px] text-muted" dateTime={event.at}>{formatDateTime(event.at)}</time>
                 </span>;
                 const message = <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-ink [overflow-wrap:anywhere]">
-                  {event.kind === 'tool' && event.toolName && event.toolName !== toolLabel(event) ? event.toolName + '\n' : ''}{event.message}
+                  {event.kind === 'tool' && event.toolName && event.toolName !== 'other' && event.toolName !== eventToolLabel(event) ? event.toolName + '\n' : ''}{event.message}
                 </p>;
                 return event.kind || event.message.length > 150
                   ? <details className="rounded-lg border border-line bg-subtle/25" key={event.id}>
