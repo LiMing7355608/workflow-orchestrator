@@ -6,6 +6,7 @@ import { cn } from '../../lib/cn';
 import { useApiResource, useLiveRefresh } from '../../lib/use-api';
 import type { AgentInterval } from '../../types/operations';
 import { Card } from '../ui/Card';
+import { modelLabel } from './AgentModelField';
 import { AgentLogo } from './AgentLogo';
 
 const roleLabel: Record<AgentInterval['role'], string> = {
@@ -170,7 +171,7 @@ export function ActiveFlow({ entries, picked, onPick, output, reports = [] }: {
               <AgentLogo label={head.agentLabel} className="size-6 shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-semibold text-ink" title={head.agentLabel}>{head.lane ?? head.agentLabel}</p>
-                <p className="truncate text-[10px] text-muted">{head.lane ? head.agentLabel : roleLabel[head.role]}{head.model && ` · ${head.model}`}</p>
+                <p className="truncate text-[10px] text-muted">{head.lane ? head.agentLabel : roleLabel[head.role]}{head.model && ' · ' + modelLabel(head.model)}</p>
               </div>
               {active.length > 0 && <span className="activity-live-dot shrink-0" title="有调用在运行" />}
             </div>
@@ -179,7 +180,7 @@ export function ActiveFlow({ entries, picked, onPick, output, reports = [] }: {
                 <span className="truncate text-[11px] font-medium text-ink" title={entry.title}>{entry.title}</span>
                 <span className="activity-state shrink-0 text-[10px]" data-state={entry.status}>{entry.status === 'running' ? elapsed(Date.parse(entry.startedAt), now) : statusLabel[entry.status]}</span>
               </div>
-              <p className="truncate text-[10px] text-muted" title={entry.progress || entry.description}>{entry.progress || entry.description}</p>
+              <p className="truncate text-[10px] text-muted" title={(entry.status === 'running' && entry.progress) || entry.description}>{(entry.status === 'running' && entry.progress) || entry.description}</p>
             </button>)}
             <FlowConnection live={active.length > 0} />
           </div>;
@@ -191,7 +192,7 @@ export function ActiveFlow({ entries, picked, onPick, output, reports = [] }: {
           <div className="border-b border-line bg-accent-soft/35 p-3">
             <div className="flex items-center gap-1.5 text-[10px] font-semibold text-accent"><Radio className="size-3.5" />{workKind}<span className="ml-auto whitespace-nowrap">{current.length} 个执行中</span></div>
             <p className="mt-1.5 break-words text-sm font-semibold text-ink">{first.runTitle}</p>
-            {coordinator && <p className="mt-0.5 truncate text-[10px] text-muted" title={coordinator.agentLabel}>协调 Agent · {coordinator.agentLabel}{coordinator.model && ` · ${coordinator.model}`}</p>}
+            {coordinator && <p className="mt-0.5 truncate text-[10px] text-muted" title={coordinator.agentLabel}>协调 Agent · {coordinator.agentLabel}{coordinator.model && ' · ' + modelLabel(coordinator.model)}</p>}
           </div>
           <div className="divide-y divide-line px-2.5" aria-label="调用进程">
             {latest.slice(0, Math.max(6, current.length)).map((entry) => <button key={entry.id} type="button" aria-pressed={entry.id === picked} onClick={() => onPick(entry.id)}
@@ -248,9 +249,19 @@ function RunFlow({ entries, picked, onPick }: { entries: AgentInterval[]; picked
   return <ActiveFlow entries={entries} picked={picked} onPick={onPick} output={results?.output} reports={results?.reports} />;
 }
 
-export function AgentActivityPanel() {
-  const { data, source, reload, loading } = useApiResource(fetchAgentActivity, null);
-  useLiveRefresh(source === 'live', reload, { refreshIntervalMs: 550 });
+export function AgentRunningCount() {
+  const { data, source, reload } = useApiResource(() => fetchAgentActivity(undefined, true), null);
+  useLiveRefresh(source === 'live', reload, { refreshIntervalMs: 650 });
+  return <div className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted">
+    <Activity className="size-4 text-accent" />
+    <span>{data ? data.active + ' 个 Agent 调用正在运行' : '暂时无法读取 Agent 状态'}</span>
+    <Link to="/runs" className="ml-auto font-medium text-accent hover:underline">打开运行记录</Link>
+  </div>;
+}
+
+export function AgentActivityPanel({ runId, onInspectNode }: { runId?: string; onInspectNode?: (nodeId: string) => void }) {
+  const { data, source, reload, loading } = useApiResource(() => fetchAgentActivity(runId), null);
+  useLiveRefresh(source === 'live', reload, { runId, refreshIntervalMs: 550 });
   const [runFilter, setRunFilter] = useState('');
   const [picked, setPicked] = useState<string | null>(null);
   const intervals = useMemo(() => data?.intervals ?? [], [data]);
@@ -260,7 +271,7 @@ export function AgentActivityPanel() {
   const selected = scoped.find((entry) => entry.id === picked);
   const focusId = selected?.runId ?? running[0]?.runId ?? scoped[0]?.runId;
   const flow = scoped.filter((entry) => entry.runId === focusId);
-  const link = selected?.role === 'meeting' ? '/meetings/' + selected.runId : selected?.role === 'spec' ? undefined : '/runs/' + selected?.runId;
+  const link = selected?.role === 'meeting' ? '/meetings/' + selected.runId : selected?.role === 'spec' ? '/new?spec=' + selected.runId : '/runs/' + selected?.runId;
   return (
     <Card className="space-y-4 p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -268,13 +279,13 @@ export function AgentActivityPanel() {
           <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Activity className="size-4 text-accent" />Agent 运行监控</h2>
           <p className="mt-1 text-xs text-muted">{loading && !data ? '正在读取…' : '当前 ' + running.length + ' 个 Agent 调用正在执行'}{data?.mode === 'mock' ? ' · 回放模式' : ''}</p>
         </div>
-        <label className="flex items-center gap-2 text-[11px] text-muted">运行范围
+        {!runId && <label className="flex items-center gap-2 text-[11px] text-muted">运行范围
           <select aria-label="按运行筛选" value={runs.has(runFilter) ? runFilter : ''} onChange={(event) => { setRunFilter(event.target.value); setPicked(null); }}
             className="max-w-[215px] rounded-lg border border-line bg-surface px-2 py-1.5 text-[11px] text-ink">
             <option value="">全部运行</option>
             {[...runs].map(([id, title]) => <option value={id} key={id}>{title}</option>)}
           </select>
-        </label>
+        </label>}
       </div>
       {focusId && flow.length > 0 ? <RunFlow key={focusId} entries={flow} picked={picked} onPick={setPicked} /> :
         <ActiveFlow entries={[]} picked={picked} onPick={setPicked} />}
@@ -285,7 +296,9 @@ export function AgentActivityPanel() {
             <p className="text-xs font-semibold text-ink">{selected.title} · {statusLabel[selected.status]}</p>
             <p className="mt-0.5 break-words text-[11px] text-muted">{selected.description}</p>
           </div>
-          {link && <Link className="flex items-center gap-1.5 text-xs font-medium text-accent" to={link}>查看{selected.role === 'meeting' ? '会议' : '运行'}<ArrowRight className="size-3.5" /></Link>}
+          {selected.nodeId && onInspectNode ? <button type="button" className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline"
+            onClick={() => onInspectNode(selected.nodeId!)}>打开节点对话<ArrowRight className="size-3.5" /></button> :
+            !runId && link && <Link className="flex items-center gap-1.5 text-xs font-medium text-accent" to={link}>查看{selected.role === 'meeting' ? '会议' : selected.role === 'spec' ? '访谈' : '运行'}<ArrowRight className="size-3.5" /></Link>}
         </div>
       )}
     </Card>

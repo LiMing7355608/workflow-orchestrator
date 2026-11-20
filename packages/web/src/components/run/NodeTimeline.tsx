@@ -880,38 +880,18 @@ export function NodeTimeline({
         }
 
         if (item.kind === 'tool') {
-          const toolName = item.event.toolName ?? '工具调用';
-          // 摘要可能就等于工具名（解析器没取到入参），重复显示两遍没有意义
-          const summary =
-            item.event.message !== toolName ? item.event.message : undefined;
+          const rawName = item.event.toolName ?? '';
+          const name = /^[\p{L}\p{N}_./:-]{1,40}$/u.test(rawName) ? rawName : '工具调用';
           return (
-            <TimelineRow
-              key={item.key}
-              at={item.at}
-              tone="bg-review"
-              density={density}
-            >
-              {/* 一行到底：工具调用是一件事，不是一段话。输出内容不在这里展开 */}
-              <div
-                className={cn(
-                  'flex min-w-0 items-center gap-1.5',
-                  density.body,
-                )}
-              >
-                <Wrench
-                  aria-hidden="true"
-                  className="h-3 w-3 shrink-0 text-review"
-                  strokeWidth={1.8}
-                />
-                <span className="shrink-0 font-mono font-medium text-review">
-                  {toolName}
-                </span>
-                {summary ? (
-                  <span className="min-w-0 truncate font-mono text-passive">
-                    {summary}
-                  </span>
-                ) : null}
-              </div>
+            <TimelineRow key={item.key} at={item.at} tone="bg-review" density={density}>
+              <details className={density.body}>
+                <summary className="cursor-pointer text-review">
+                  <Wrench aria-hidden="true" className="mr-1 inline size-3" />{name}
+                </summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words rounded-md border border-line bg-subtle p-2 text-[11px] text-ink">
+                  {rawName !== name && rawName ? rawName + '\n' : ''}{item.event.message}
+                </pre>
+              </details>
             </TimelineRow>
           );
         }

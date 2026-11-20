@@ -624,7 +624,9 @@ export class MockAgentRunner implements AgentRunner {
           ? { roles: roles.map((role, index) => ({ ...role, agentId: input.agents?.[index]?.id ?? input.agents?.[0]?.id })) }
           : marker === 'WORKFLOW_MEETING_CONTRIBUTION_JSON'
             ? { text: input.role?.name + '建议明确产品验收与风险。' + (latestNote ? '人工补充：' + latestNote : '') }
-            : { markdown: report };
+            : marker === 'WORKFLOW_MEETING_MODERATE_JSON'
+              ? { action: 'summarize', feedback: '成员意见已收敛，进入方案汇总。' }
+              : { markdown: report };
       const output = JSON.stringify(response);
       onChunk(output + '\n');
       return { ok: true, exitCode: 0, output };
@@ -639,14 +641,16 @@ export class MockAgentRunner implements AgentRunner {
         idea: string;
         rounds: Array<{ answer?: string }>;
         revisions?: string[];
+        meetingDecisions?: Array<{ title: string; proposal: string }>;
       };
-      const response = input.rounds.some((round) => round.answer)
+      const response = input.rounds.some((round) => round.answer) || input.meetingDecisions?.length
         ? {
             status: 'ready',
             spec: '# ' + input.idea.split('\n')[0] + '\n\n## 产品目标\n' + input.idea +
               '\n\n## 范围与验收\n' + input.rounds.map((round) => round.answer).filter(Boolean).join('\n') +
               '\n落实首期主要操作，并用输入、操作与预期结果描述验收示例。' +
-              (input.revisions?.length ? '\n\n## 追加要求\n' + input.revisions.join('\n') : ''),
+              (input.revisions?.length ? '\n\n## 追加要求\n' + input.revisions.join('\n') : '') +
+              (input.meetingDecisions?.length ? '\n\n## 已采纳会议方案\n' + input.meetingDecisions.map((item) => item.title + '\n' + item.proposal).join('\n') : ''),
           }
         : {
             status: 'question',

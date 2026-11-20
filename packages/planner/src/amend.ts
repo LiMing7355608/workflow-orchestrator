@@ -5,6 +5,7 @@ import {
 } from '@orchestrator/core';
 import {
   DagGenerationError,
+  extractJsonObject,
   PLAN_FILENAME,
   pickPlannerAgent,
   readSubmittedPlan,
@@ -112,7 +113,7 @@ export function buildAmendmentPrompt(
   currentDag: Dag,
   instruction: string,
   catalog: AgentProfile[],
-  options: { lockedNodeIds?: string[]; previousIssues?: DagIssue[] } = {},
+  options: { lockedNodeIds?: string[]; previousIssues?: DagIssue[]; textOnly?: boolean } = {},
 ): string {
   const locked = new Set(options.lockedNodeIds ?? []);
   const usable = usablePlannerAgents(catalog);
@@ -170,9 +171,9 @@ export function buildAmendmentPrompt(
     '- 不得修改任何节点的 type 与 dependsOn（新节点可以自己声明 dependsOn）',
     '',
     '## 交付方式（这是硬要求）',
+    ...(options.textOnly ? ['在回复中直接返回修改后的完整任务图 JSON。'] : [
     `把修改后的**完整**任务图写入当前工作目录下的 ${PLAN_FILENAME} 文件。`,
-    '是完整的图，不是补丁或差异片段：编排器会用它整体替换当前图。',
-    '这是唯一的交付渠道。只在回复里贴 JSON 不算交付，编排器读不到就等于你没做。',
+    ]),
     '',
     '## 输出要求',
     '文件内容是一个 JSON 对象，不要包含解释文字，也不要用 Markdown 代码块包裹。',
@@ -280,6 +281,7 @@ export async function amendDag(
     const prompt = buildAmendmentPrompt(goal, currentDag, instruction, catalog, {
       lockedNodeIds: options.lockedNodeIds,
       previousIssues: issues,
+      textOnly: agent.transport === 'http-model',
     });
     const nodeId = `attempt-${attempt}`;
     options.signal?.throwIfAborted();
@@ -332,7 +334,9 @@ export async function amendDag(
     );
     collect(parser.finish());
 
-    const submitted = await readSubmittedPlan(cwd);
+    const submitted = agent.transport === 'http-model'
+      ? (result.ok ? extractJsonObject(answer || result.output) : undefined)
+      : await readSubmittedPlan(cwd);
     // 读完再释放工作区，顺序不能反
     await execution.workspace.release(workspaceRunId, nodeId).catch(() => {});
     options.signal?.throwIfAborted();
@@ -352,7 +356,9 @@ export async function amendDag(
       }
       if (attempt === maxAttempts) {
         throw new DagGenerationError(
-          `Agent 没有把修改后的任务图写入 ${PLAN_FILENAME}：${truncate(answer || result.output, 400)}`,
+          agent.transport === 'http-model'
+            ? `Agent 未返回可解析的完整任务图：${truncate(answer || result.output, 400)}`
+            : `Agent 没有把修改后的任务图写入 ${PLAN_FILENAME}：${truncate(answer || result.output, 400)}`,
           attempt,
           issues,
         );

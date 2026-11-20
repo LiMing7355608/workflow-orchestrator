@@ -1,16 +1,18 @@
 import { Check, Loader2, MessageSquare } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
+import { modelLabel } from '../agents/AgentModelField';
 import type { InterviewView } from '../../types/operations';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 
 export function SpecInterviewPanel({
-  session, busy, canStart, locating, settings, onStart, onAnswer, onReset,
+  session, busy, canStart, locating, settings, onStart, onAnswer, onReset, related,
 }: {
   session: InterviewView | null;
   busy: boolean;
   locating: boolean;
   settings: ReactNode;
+  related?: ReactNode;
   canStart: boolean;
   onStart: () => void;
   onAnswer: (answer?: string) => Promise<boolean>;
@@ -23,14 +25,14 @@ export function SpecInterviewPanel({
   }
 
   return (
-    <Card className="overflow-hidden">
+    <Card>
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
         <MessageSquare className="h-4 w-4 text-accent" strokeWidth={1.8} />
         <h2 className="text-[13px] font-semibold text-ink">设计规格 Agent</h2>
-        {session && <span className="text-[11px] text-muted">{session.agentId} · {session.model ?? '客户端默认模型'}</span>}
+        {session && <span className="text-[11px] text-muted">{session.agentId} · {session.model ? modelLabel(session.model) : '客户端默认模型'}</span>}
         {locating && (
-          <Button className="ml-auto" variant="ghost" size="sm" onClick={onReset} disabled={busy || session?.status === 'thinking'}>
-            重新开始
+          <Button className="ml-auto" variant="ghost" size="sm" onClick={onReset} disabled={busy}>
+            新开访谈
           </Button>
         )}
       </div>
@@ -47,6 +49,7 @@ export function SpecInterviewPanel({
           )
         ) : (
           <>
+            {related}
             {session.rounds.map((round, roundIndex) => (
               <section key={roundIndex} className="rounded-xl border border-line bg-subtle/30 p-3.5">
                 <h3 className="text-[12px] font-semibold text-ink">第 {roundIndex + 1} 轮</h3>

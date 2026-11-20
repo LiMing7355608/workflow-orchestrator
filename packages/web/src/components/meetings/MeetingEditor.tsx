@@ -27,16 +27,18 @@ function ActorFields({ agents, value, onChange, host = false }: {
   </div>;
 }
 
-export function MeetingEditor({ agents, initial, directory, canBrowse, busy, onSave, onCancel }: {
+export function MeetingEditor({ agents, initial, prefill, directory, fixedDirectory, canBrowse, busy, onSave, onCancel }: {
   agents: AgentProfile[];
   initial?: MeetingSettings;
+  prefill?: MeetingSettings;
+  fixedDirectory?: boolean;
   directory?: string;
   canBrowse: boolean;
   busy: boolean;
   onSave: (settings: MeetingSettings, root: string) => void;
   onCancel?: () => void;
 }) {
-  const [settings, setSettings] = useState<MeetingSettings>(initial ?? {
+  const [settings, setSettings] = useState<MeetingSettings>(initial ?? prefill ?? {
     title: '', agenda: '', mode: 'manual', host: { agentId: '' }, roles: [], rounds: 2,
   });
   const [folder, setFolder] = useState(directory ?? '');
@@ -67,11 +69,17 @@ export function MeetingEditor({ agents, initial, directory, canBrowse, busy, onS
   }
 
   return <form onSubmit={save} className="space-y-4">
-    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_130px]">
+    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,140px)_105px]">
       <label className={labelStyle}><span>会议名称</span>
         <input className={inputStyle} value={settings.title} onChange={(event) => change({ title: event.target.value })} required maxLength={100} placeholder="例如 校园活动报名方案评审" />
       </label>
-      <label className={labelStyle}><span>每次讨论轮数</span>
+      <label className={labelStyle}><span>轮次控制</span>
+        <select value={settings.roundControl ?? 'manual'} className={inputStyle}
+          onChange={(event) => change({ roundControl: event.target.value as 'manual' | 'host' })}>
+          <option value="manual">由人工设定</option><option value="host">主持人判断收敛</option>
+        </select>
+      </label>
+      <label className={labelStyle}><span>{settings.roundControl === 'host' ? '轮次上限' : '每次轮数'}</span>
         <select value={settings.rounds} className={inputStyle} onChange={(event) => change({ rounds: Number(event.target.value) })}>
           {[1, 2, 3, 4].map((rounds) => <option key={rounds} value={rounds}>{rounds} 轮</option>)}
         </select>
@@ -83,8 +91,8 @@ export function MeetingEditor({ agents, initial, directory, canBrowse, busy, onS
     </label>
     <label className={labelStyle}><span>产物目录</span>
       <div className="flex gap-2">
-        <input className={inputStyle} value={folder} onChange={(event) => setFolder(event.target.value)} required readOnly={Boolean(initial)} placeholder="选择已有目录或粘贴其绝对路径" />
-        {!initial && canBrowse && <Button variant="secondary" type="button" disabled={browsing} onClick={() => void browse()}><FolderOpen className="size-4" />浏览</Button>}
+        <input className={inputStyle} value={folder} onChange={(event) => setFolder(event.target.value)} required readOnly={Boolean(initial || fixedDirectory)} placeholder="选择已有目录或粘贴其绝对路径" />
+        {!initial && !fixedDirectory && canBrowse && <Button variant="secondary" type="button" disabled={browsing} onClick={() => void browse()}><FolderOpen className="size-4" />浏览</Button>}
       </div>
     </label>
     <fieldset className="space-y-2 rounded-xl border border-line p-3">

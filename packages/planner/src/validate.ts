@@ -14,6 +14,7 @@ export type DagIssueKind =
   | 'disabled-agent'
   | 'agent-not-installed'
   | 'missing-agent'
+  | 'agent-tools-required'
   /** 结构层错误（字段缺失、枚举越界）。也要回灌给 Agent，否则它会一直重犯 */
   | 'schema-invalid'
   | 'action-not-allowed'
@@ -152,6 +153,13 @@ export function validateDag(
         nodeIds: [node.id],
       });
       continue;
+    }
+    if (node.type === 'implement' && profile.transport === 'http-model') {
+      issues.push({
+        kind: 'agent-tools-required',
+        message: '实现节点 ' + node.id + ' 需要具备工程工具的 Agent。',
+        nodeIds: [node.id],
+      });
     }
     if (!profile.enabled) {
       issues.push({
