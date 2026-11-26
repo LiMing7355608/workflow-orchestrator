@@ -36,7 +36,8 @@ export function AgentModelField({ agent, value, onChange, disabled = false, labe
   const [failure, setFailure] = useState('');
   const available = canSelectModel(agent);
   const discovers = agent?.transport === 'acp' || agent?.transport === 'codex-app-server' || agent?.transport === 'http-model';
-  const defaultLabel = directory?.defaultModel ? '默认 · ' + modelLabel(directory.defaultModel) : '客户端默认模型';
+  const defaultModel = directory?.defaultModel ?? agent?.defaultModel;
+  const defaultLabel = defaultModel ? '默认 · ' + modelLabel(defaultModel) : '客户端默认模型';
   const selected = directory?.models.find((model) => model.id === value);
   const filter = query.trim().toLocaleLowerCase();
   const matching = directory?.models.filter((model) =>

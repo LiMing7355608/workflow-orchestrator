@@ -463,6 +463,8 @@ export function reworkTarget(run: RunFacts, node: NodeFacts): NodeFacts | undefi
  * 完整输出仍在 AgentRunResult.output 里，裁决与失败原因读的是那一份。
  */
 const OUTPUT_CHUNK_LIMIT = 2000;
+const STREAM_CHUNK_LIMIT = 8192;
+const STREAM_FLUSH_MS = 220;
 
 /** usage 事件没有正文，拼一句人能读的摘要当作 chunk。 */
 function formatUsage(usage: AgentUsage | undefined): string | undefined {
@@ -502,6 +504,8 @@ export function createAgentEventRelay(
   const failures: unknown[] = [];
   // 会话 id 会在 init 与 result 里重复出现，重复入流只是噪声
   let lastSessionId: string | undefined;
+  let buffered: { kind: 'text' | 'thinking'; at: string; chunk: string } | undefined;
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   const dispatch = (event: OrchestratorEvent): void => {
     queue = queue
@@ -511,14 +515,27 @@ export function createAgentEventRelay(
       });
   };
 
+  const drain = () => {
+    clearTimeout(flushTimer);
+    flushTimer = undefined;
+    if (!buffered) return;
+    const { kind, at, chunk } = buffered;
+    buffered = undefined;
+    for (let start = 0; start < chunk.length; start += STREAM_CHUNK_LIMIT) {
+      dispatch({ type: 'agent.output', at, runId, nodeId, agentId, kind,
+        chunk: chunk.slice(start, start + STREAM_CHUNK_LIMIT) });
+    }
+  };
+
   const forward = (events: AgentEvent[]): void => {
     for (const item of events) {
       const at = deps.now();
 
       if (item.kind === 'session') {
-        if (!nodeId || !item.sessionId || item.sessionId === lastSessionId) {
+        if (!item.sessionId || item.sessionId === lastSessionId) {
           continue;
         }
+        drain();
         lastSessionId = item.sessionId;
         dispatch({ type: 'agent.session', at, runId, nodeId, agentId, sessionId: item.sessionId });
         continue;
@@ -531,6 +548,7 @@ export function createAgentEventRelay(
         if (!usage) {
           continue;
         }
+        drain();
         dispatch({
           type: 'agent.output',
           at,
@@ -543,19 +561,33 @@ export function createAgentEventRelay(
         continue;
       }
 
+      if (item.kind === 'text' || item.kind === 'thinking') {
+        if (!item.text) continue;
+        if (buffered?.kind !== item.kind) {
+          drain();
+          buffered = { kind: item.kind, at, chunk: '' };
+        }
+        buffered!.chunk += item.text;
+        buffered!.at = at;
+        if (buffered!.chunk.length >= STREAM_CHUNK_LIMIT) drain();
+        else flushTimer ??= setTimeout(drain, STREAM_FLUSH_MS);
+        continue;
+      }
+
       // 空正文不发：`{"type":"thinking","text":""}` 这类空思考块一个字都没说，
       // 落进事实就是凭空占掉时间线的一条
       const chunk = (item.text ?? item.toolName ?? formatUsage(item.usage) ?? '').trim();
       if (!chunk) {
         continue;
       }
+      drain();
       dispatch({
         type: 'agent.output',
         at,
         runId,
         nodeId,
         agentId,
-        chunk: chunk.slice(0, OUTPUT_CHUNK_LIMIT),
+        chunk: chunk.slice(0, item.kind === 'result' ? 280_000 : OUTPUT_CHUNK_LIMIT),
         kind: item.kind,
         toolName: item.toolName?.slice(0, OUTPUT_CHUNK_LIMIT),
       });
@@ -563,6 +595,7 @@ export function createAgentEventRelay(
   };
 
   const flush = async (): Promise<void> => {
+    drain();
     await queue;
     const first = failures.shift();
     failures.length = 0;
@@ -857,10 +890,15 @@ async function executeNode(
   const startedAt = deps.now();
   await deps.emit({ type: 'node.started', at: startedAt, runId, nodeId: node.id });
 
+  const roleModel = node.type === 'review'
+    ? (agent.id === run.reviewAgentId ? run.roleModels?.review : undefined)
+    : (agent.id === run.implementAgentId ? run.roleModels?.implement : undefined);
+  const model = roleModel ?? agent.defaultModel;
   const argv = buildAgentArgv(agent, {
     prompt,
     workdir: cwd,
     policy,
+    model,
     session: session.resumable ? session.sessionId : session.plannedSessionId,
     resume: session.resumable,
   });
@@ -883,7 +921,7 @@ async function executeNode(
     if (node.type === 'review') {
       for (const event of events) {
         if (event.kind === 'text' || event.kind === 'result') {
-          reviewOutput = (reviewOutput + '\n' + (event.text ?? '')).slice(-4000);
+          reviewOutput = (event.kind === 'result' && event.text ? event.text : reviewOutput + (event.text ?? '')).slice(-4000);
         }
       }
     }
@@ -894,6 +932,7 @@ async function executeNode(
       runId,
       nodeId: node.id,
       agentId: agent.id,
+      model,
       bin: agent.launch.bin,
       argv,
       stdin: agent.launch.stdin ? prompt : undefined,

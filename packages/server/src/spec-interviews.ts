@@ -1,4 +1,4 @@
-import { mkdir, readdir, realpath } from 'node:fs/promises';
+import { mkdir, readdir, realpath, rm } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { type AgentProfile, type AgentRunner, type WorkspacePort } from '@orchestrator/core';
@@ -29,6 +29,7 @@ export interface SpecInterview {
   idea: string;
   agentId: string;
   model?: string;
+  nativeSessionIds?: string[];
   revision: number;
   status: 'thinking' | 'question' | 'ready' | 'error';
   rounds: InterviewRound[];
@@ -81,7 +82,9 @@ function buildPrompt(session: SpecInterview): string {
 }
 
 export class SpecInterviews {
-  private readonly pending = new Set<string>();
+  private readonly pending = new Map<string, { controller: AbortController; done: Promise<void> }>();
+  private readonly recovering = new Map<string, Promise<SpecInterview | undefined>>();
+  private readonly removing = new Set<string>();
   private readonly recent = new Map<string, SpecActivity>();
   private readonly records = new Map<string, SpecInterview>();
 
@@ -126,12 +129,21 @@ export class SpecInterviews {
   }
 
   async recover(root: string, id: string): Promise<SpecInterview | undefined> {
-    const session = await this.read(root, id);
-    if (session && !this.records.has(id)) {
-      await this.index(session);
-      if (!this.records.has(id)) this.records.set(id, session);
-    }
-    return session;
+    if (this.removing.has(id)) return undefined;
+    const cached = this.records.get(id);
+    if (cached) return this.current(cached);
+    const existing = this.recovering.get(id);
+    if (existing) return existing;
+    const recovery = this.read(root, id).then(async (session) => {
+      if (session) {
+        await this.index(session);
+        this.records.set(id, session);
+      }
+      return session;
+    });
+    this.recovering.set(id, recovery);
+    try { return await recovery; }
+    finally { this.recovering.delete(id); }
   }
 
   list() {
@@ -146,14 +158,43 @@ export class SpecInterviews {
     return this.records.get(id)?.workspaceRoot;
   }
 
+  sessionsOf(id: string) {
+    const session = this.records.get(id);
+    return (session?.nativeSessionIds ?? []).map((sessionId) => ({ agentId: session!.agentId, sessionId }));
+  }
+
   get activity(): SpecActivity[] {
     return [...this.recent.values()];
   }
 
-  forget(id: string): void {
+  async forget(id: string): Promise<void> {
     this.records.delete(id);
     for (const [key, interval] of this.recent) {
       if (interval.runId === id) this.recent.delete(key);
+    }
+    try {
+      await rm(await ownedPath(this.dataRoot, 'spec-interviews', id + '.json'), { force: true });
+    } catch (error) {
+      console.warn('访谈索引未能移除', error);
+    }
+    this.notify(id);
+  }
+
+  async remove<Result>(id: string, cleanup: () => Promise<Result>): Promise<Result | undefined> {
+    const session = this.records.get(id);
+    if (!session || this.removing.has(id)) return undefined;
+    this.removing.add(id);
+    try {
+      const active = this.pending.get(id);
+      active?.controller.abort();
+      await active?.done;
+      const file = await projectRunPath(session.workspaceRoot, id, 'spec-interview.json');
+      const result = await cleanup();
+      await rm(file, { force: true });
+      await this.forget(id);
+      return result;
+    } finally {
+      this.removing.delete(id);
     }
   }
 
@@ -163,8 +204,11 @@ export class SpecInterviews {
     const session = JSON.parse(raw) as SpecInterview;
     if (session.id !== id) return undefined;
     if (session.workspaceRoot !== root && await realpath(root) !== session.workspaceRoot) return undefined;
-    // The replacement file can be visible before the turn clears its in-memory lock.
-    if (this.pending.has(id)) return { ...session, status: 'thinking' };
+    return this.current(session);
+  }
+
+  private current(session: SpecInterview): SpecInterview {
+    if (this.pending.has(session.id)) return { ...session, status: 'thinking' };
     if (session.status === 'thinking') {
       return { ...session, status: 'error', error: '上次规格访谈已中断，可以从当前轮重试。' };
     }
@@ -237,7 +281,8 @@ export class SpecInterviews {
 
   private async schedule(session: SpecInterview): Promise<SpecInterview> {
     const { id } = session;
-    this.pending.add(id);
+    const task = { controller: new AbortController(), done: Promise.resolve() };
+    this.pending.set(id, task);
     this.notify(id);
     try {
       if (!this.records.has(id)) await this.index(session);
@@ -247,11 +292,11 @@ export class SpecInterviews {
       this.notify(id);
       throw error;
     }
-    void this.turn(session);
+    task.done = this.turn(session, task.controller.signal);
     return session;
   }
 
-  private async turn(session: SpecInterview): Promise<void> {
+  private async turn(session: SpecInterview, signal: AbortSignal): Promise<void> {
     const { id, workspaceRoot, agentId, revision } = session;
     const nodeId = 'spec-' + revision;
     const interval: SpecActivity = {
@@ -269,13 +314,18 @@ export class SpecInterviews {
     this.recent.set(interval.id, interval);
     this.notify(id);
     const workspace = this.workspaceFor(workspaceRoot);
+    const nativeSessionIds = new Set(session.nativeSessionIds);
     let next: SpecInterview;
     try {
       const agent = this.agentFor(agentId);
       if (!agent?.enabled || agent.availability === 'missing') throw new Error('所选设计 Agent 当前不可用。');
       const cwd = await workspace.prepare(id, nodeId);
+      signal.throwIfAborted();
       const responses = await runTextTurn(this.runner, agent, {
-        runId: id, nodeId, cwd, prompt: buildPrompt(session), model: session.model,
+        runId: id, nodeId, cwd, prompt: buildPrompt(session), model: session.model, signal,
+        onEvents(events) {
+          for (const event of events) if (event.kind === 'session' && event.sessionId) nativeSessionIds.add(event.sessionId);
+        },
       });
       const turn = readTurnJson(responses, decision, '设计 Agent 未返回有效的一轮问题或设计规格，请重试。');
       if (turn.status === 'ready') {
@@ -291,6 +341,7 @@ export class SpecInterviews {
     }
     try {
       await workspace.release(id, nodeId).catch(() => {});
+      next.nativeSessionIds = [...nativeSessionIds];
       await this.save(next);
     } catch (error) {
       interval.status = 'failed';

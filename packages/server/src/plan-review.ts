@@ -26,6 +26,7 @@ export async function verifyPlan(input: {
   goal: string;
   dag: Dag;
   agent: AgentProfile;
+  model?: string;
   workspace: WorkspacePort;
   runner: AgentRunner;
   signal: AbortSignal;
@@ -58,7 +59,8 @@ export async function verifyPlan(input: {
       isExcerpt ? '当前输入包含节录，只核对可见信息。' : '以下是待核对的规格和任务草案。',
       JSON.stringify({ goal: input.goal.slice(0, 24_000), nodeCount: input.dag.nodes.length, nodes }),
     ].join('\n');
-    const answers = await runTextTurn(input.runner, agent, { runId, nodeId, cwd, prompt, signal, onEvents: input.onEvents });
+    const answers = await runTextTurn(input.runner, agent, { runId, nodeId, cwd, prompt, signal,
+      model: input.model, onEvents: input.onEvents });
     const review = readTurnJson(answers, reviewSchema, '核对 Agent 返回的结果格式无效。');
     const ids = new Set(input.dag.nodes.map((node) => node.id));
     return {

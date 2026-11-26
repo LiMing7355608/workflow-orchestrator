@@ -1,5 +1,6 @@
 import { ChevronRight, MessageSquare, ScrollText } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { compactOutput } from '../../lib/agent-output';
 import { formatDateTime } from '../../lib/format';
 import { displayNodeStatus, eventToolLabel, nodeStatusMeta } from '../../lib/workflow-meta';
 import type { WorkflowEvent, WorkflowNode } from '../../types/workflow';
@@ -7,6 +8,7 @@ import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Segmented } from '../ui/Segmented';
+import { AgentReply } from './AgentReply';
 
 type EventFilter = 'all' | WorkflowEvent['type'];
 const typeLabels: Record<WorkflowEvent['type'], string> = {
@@ -51,7 +53,7 @@ export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }:
   const [filter, setFilter] = useState<EventFilter>('all');
   const [limits, setLimits] = useState<Record<string, number>>({});
   const { groups, count } = useMemo(() => {
-    const matched = events.filter((event) => filter === 'all' || event.type === filter);
+    const matched = compactOutput(events, 'message').filter((event) => filter === 'all' || event.type === filter);
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const grouped = new Map<string, EventGroup>();
     for (const event of matched.reverse().sort((left, right) => right.at.localeCompare(left.at))) {
@@ -101,12 +103,15 @@ export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }:
                 const meta = <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink">
                   {eventLabel(event)}<time className="text-[10px] text-muted" dateTime={event.at}>{formatDateTime(event.at)}</time>
                 </span>;
-                const message = <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-ink [overflow-wrap:anywhere]">
+                const message = event.kind === 'text' || event.kind === 'result' ? <AgentReply text={event.message} /> :
+                  <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-ink [overflow-wrap:anywhere]">
                   {event.kind === 'tool' && event.toolName && event.toolName !== 'other' && event.toolName !== eventToolLabel(event) ? event.toolName + '\n' : ''}{event.message}
                 </p>;
                 return event.kind || event.message.length > 150
                   ? <details className="rounded-lg border border-line bg-subtle/25" key={event.id}>
-                    <summary className="cursor-pointer px-2.5 py-1.5">{meta}</summary>
+                    <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5">
+                      <ChevronRight className="size-3.5 shrink-0 text-muted" aria-hidden="true" />{meta}
+                    </summary>
                     <div className="border-t border-line px-2.5 py-2">{message}</div>
                   </details>
                   : <div className="space-y-1 px-2.5 py-1.5" key={event.id}>{meta}{message}</div>;

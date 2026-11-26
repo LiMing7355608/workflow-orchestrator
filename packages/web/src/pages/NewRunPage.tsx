@@ -19,7 +19,7 @@ import {
   type DragEvent,
 } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { AgentModelField } from '../components/agents/AgentModelField';
+import { AgentModelField, canSelectModel } from '../components/agents/AgentModelField';
 import { RecentInterviews } from '../components/run/RecentInterviews';
 import { SpecMeetings } from '../components/run/SpecMeetings';
 import { SpecInterviewPanel } from '../components/run/SpecInterviewPanel';
@@ -32,8 +32,9 @@ import { cn } from '../lib/cn';
 import { formatFileSize } from '../lib/format';
 import { useApiResource } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
+import { useNewRunAgentStore } from '../lib/new-run-agent-store';
 import type { AgentProfile } from '../types/agent';
-import type { InterviewView } from '../types/operations';
+import type { AgentPreferenceRole, InterviewView } from '../types/operations';
 
 type Granularity = 'coarse' | 'medium' | 'fine';
 /**
@@ -143,14 +144,20 @@ function AgentSelect({
   value,
   onChange,
   agents,
+  model,
+  onModelChange,
 }: {
   label: string;
   hint: string;
   value: string;
   onChange: (value: string) => void;
   agents: AgentProfile[];
+  model: string;
+  onModelChange: (value: string) => void;
 }) {
+  const agent = agents.find((entry) => entry.id === value);
   return (
+    <div className="space-y-2 rounded-lg border border-line p-2.5">
     <Field label={label} hint={hint}>
       <select
         value={value}
@@ -167,6 +174,8 @@ function AgentSelect({
         ))}
       </select>
     </Field>
+    {canSelectModel(agent) && <AgentModelField agent={agent} value={model} onChange={onModelChange} label={label + '模型'} />}
+    </div>
   );
 }
 
@@ -178,6 +187,7 @@ export function NewRunPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [interviewNotice, setInterviewNotice] = useState('');
   const [mode, setMode] = useState<'interview' | 'direct'>('interview');
   const [interview, setInterview] = useState<InterviewView | null>(null);
   const [interviewBusy, setInterviewBusy] = useState(false);
@@ -186,8 +196,8 @@ export function NewRunPage() {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const [chosenDesigner, setDesignAgentId] = useState('');
-  const [designModel, setDesignModel] = useState('');
+  const { values: preferences, error: preferenceError, choose, load } = useNewRunAgentStore();
+  useEffect(() => { void load(); }, [load]);
   const [params, setParams] = useSearchParams();
   const interviewId = params.get('spec');
   const interviewRoot = params.get('project');
@@ -198,10 +208,6 @@ export function NewRunPage() {
   const [reviewRounds, setReviewRounds] = useState<ReviewRounds>('2');
   const [reviewPlan, setReviewPlan] = useState(true);
 
-  // 三个角色的 Agent 在这里就定下来，而不是等 Planner 自己挑
-  const [chosenPlanner, setPlannerAgentId] = useState('');
-  const [chosenImplementer, setImplementAgentId] = useState('');
-  const [chosenReviewer, setReviewAgentId] = useState('');
   /**
    * 目标目录：Agent 干活的地方，成果会落在这里。
    *
@@ -282,15 +288,22 @@ export function NewRunPage() {
     ?? usableAgents[0]?.id;
   const selectedAgent = (chosen: string, fallback?: string) =>
     usableAgents.some((agent) => agent.id === chosen) ? chosen : fallback ?? '';
-  const plannerAgentId = selectedAgent(chosenPlanner, primary);
-  const designerId = selectedAgent(chosenDesigner, primary);
+  const plannerAgentId = selectedAgent(preferences.plan?.agentId ?? '', primary);
+  const designerId = selectedAgent(preferences.design?.agentId ?? '', primary);
   const designer = usableAgents.find((agent) => agent.id === designerId);
   const implementers = usableAgents.filter((agent) => agent.capabilities.tools);
+  const chosenImplementer = preferences.implement?.agentId ?? '';
   const implementAgentId = implementers.some((agent) => agent.id === chosenImplementer)
     ? chosenImplementer : (implementers.find((agent) => agent.capabilities.structured) ?? implementers[0])?.id ?? '';
   const reviewerDefault = usableAgents.find((agent) => agent.id !== implementAgentId)?.id
     ?? implementAgentId;
-  const reviewAgentId = selectedAgent(chosenReviewer, reviewerDefault);
+  const reviewAgentId = selectedAgent(preferences.review?.agentId ?? '', reviewerDefault);
+  const chosenModel = (role: AgentPreferenceRole, agentId: string) =>
+    canSelectModel(usableAgents.find((entry) => entry.id === agentId)) ? preferences[role]?.models[agentId] ?? '' : '';
+  const designModel = chosenModel('design', designerId);
+  const plannerModel = chosenModel('plan', plannerAgentId);
+  const implementModel = chosenModel('implement', implementAgentId);
+  const reviewModel = chosenModel('review', reviewAgentId);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<Attachment[]>([]);
@@ -441,6 +454,7 @@ export function NewRunPage() {
       plannerAgentId: plannerAgentId || undefined,
       implementAgentId: implementAgentId || undefined,
       reviewAgentId: reviewAgentId || undefined,
+      roleModels: { plan: plannerModel || undefined, implement: implementModel || undefined, review: reviewModel || undefined },
     });
     setSubmitting(false);
 
@@ -489,6 +503,7 @@ export function NewRunPage() {
       </div>
 
       {!interviewId && <div className="mt-4 empty:hidden"><RecentInterviews limit={4} /></div>}
+      {interviewNotice && <p role="status" className="mt-3 text-xs text-muted">{interviewNotice}</p>}
       <div className="new-run-grid mt-6">
         <div className="min-w-0 space-y-3">
         <Card className="overflow-hidden">
@@ -616,17 +631,19 @@ export function NewRunPage() {
             settings={<div className="grid gap-3 sm:grid-cols-2">
               <label className="space-y-1.5 text-[12px] font-medium text-muted">
                 <span>设计 Agent</span>
-                <select value={designerId} onChange={(event) => { setDesignAgentId(event.target.value); setDesignModel(''); }}
+                <select value={designerId} onChange={(event) => choose('design', event.target.value)}
                   disabled={interviewBusy} className="block h-9 w-full rounded-lg border border-line bg-surface px-2.5 text-ink">
                   {!designerId && <option value="">暂无可用 Agent</option>}
                   {usableAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.label}</option>)}
                 </select>
               </label>
-              <AgentModelField agent={designer} value={designModel} onChange={setDesignModel} disabled={interviewBusy} label="规格模型" />
+              <AgentModelField agent={designer} value={designModel} onChange={(model) => choose('design', designerId, model)}
+                disabled={interviewBusy} label="规格模型" />
             </div>}
             onStart={() => void beginInterview()}
             onAnswer={answerInterview}
             onReset={resetInterview}
+            onDeleted={(notice) => { resetInterview(); setInterviewNotice(notice || '访谈已删除。'); }}
             related={interview?.id === interviewId && interview && <SpecMeetings session={interview} onAdopt={setInterview} />}
           />
         )}
@@ -728,23 +745,30 @@ export function NewRunPage() {
                 label="编排器"
                 hint="拆解任务图"
                 value={plannerAgentId}
-                onChange={setPlannerAgentId}
+                onChange={(agentId) => choose('plan', agentId)}
+                model={plannerModel}
+                onModelChange={(model) => choose('plan', plannerAgentId, model)}
                 agents={usableAgents}
               />
               <AgentSelect
                 label="实现"
                 hint="写代码"
                 value={implementAgentId}
-                onChange={setImplementAgentId}
+                onChange={(agentId) => choose('implement', agentId)}
+                model={implementModel}
+                onModelChange={(model) => choose('implement', implementAgentId, model)}
                 agents={implementers}
               />
               <AgentSelect
                 label="审查"
                 hint="独立核对"
                 value={reviewAgentId}
-                onChange={setReviewAgentId}
+                onChange={(agentId) => choose('review', agentId)}
+                model={reviewModel}
+                onModelChange={(model) => choose('review', reviewAgentId, model)}
                 agents={usableAgents}
               />
+              {preferenceError && <p role="status" className="text-[11px] text-warning">{preferenceError}</p>}
             </div>
           </Card>
 

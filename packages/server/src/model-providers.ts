@@ -128,8 +128,9 @@ export class ModelProviders {
   get(id: string) { return this.items.find((item) => item.id === id); }
 
   profiles(): AgentProfile[] {
-    return this.items.map(({ id, label }) => ({
+    return this.items.map(({ id, label, model }) => ({
       id, label, vendor: '自定义模型', logo: '', transport: 'http-model',
+      defaultModel: model,
       launch: { bin: 'http-model', args: [], stdin: true, parser: 'plain' },
       capabilities: { structured: true, tools: false, resume: false, streaming: true },
       availability: 'ready', enabled: true, session: { derive: 'none', resumeArgs: [] },

@@ -86,6 +86,8 @@ function stageMeta(run: WorkflowRunDetail): StageMeta {
     if (run.status === 'paused') {
       return { label: '拆解已暂停', tone: 'amber' };
     }
+    if (run.planDraft) return { label: '草案待确认', tone: 'amber' };
+    if (run.planCheckingAt) return { label: '核对中', tone: 'blue' };
     return { label: '拆解中', tone: 'blue' };
   }
   if (run.status === 'completed') {

@@ -57,6 +57,7 @@ export interface PlannerOptions {
   signal?: AbortSignal;
   /** 指定用哪个 Agent 规划；留空则按能力与可用性自动挑 */
   agentId?: string;
+  model?: string;
   /** Agent 产出不合格时最多重来几次 */
   maxAttempts?: number;
   requireDeliverables?: boolean;
@@ -414,6 +415,7 @@ export async function generateDag(
       prompt,
       workdir: cwd,
       policy,
+      model: options.model,
     });
 
     // 必须按平台解析，不能从裸 stdout 里捞 JSON：CLI Agent 的输出本身
@@ -435,6 +437,7 @@ export async function generateDag(
         runId: options.runId ?? workspaceRunId,
         nodeId,
         agentId: agent.id,
+        model: options.model,
         bin: agent.launch.bin,
         argv,
         // Agent 从 stdin 读提示词时才有这一项，否则走 argv 里的位置参数
