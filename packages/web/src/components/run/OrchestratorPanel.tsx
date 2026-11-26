@@ -13,9 +13,11 @@ import { trapTabKey } from '../../lib/focus-trap';
 import type { BadgeTone } from '../ui/Badge';
 import { Badge } from '../ui/Badge';
 import type { WorkflowRunDetail } from '../../types/workflow';
-import type { AgentInterval } from '../../types/operations';
+import type { AgentInterval, RunRole } from '../../types/operations';
+import { Button } from '../ui/Button';
 import { CallTranscript } from './CallTranscript';
 import { ConversationEntryItem, QueuedHuman } from './ConversationBubbles';
+import { RoleDialogue, roleLabels, roleScopes } from './RoleDialogue';
 
 /**
  * 编排器大面板：本次运行贯穿始终的那条对话。
@@ -44,6 +46,7 @@ export interface OrchestratorPanelProps {
   /** 空值即关闭：与 NodeDetailPanel 用「节点为 null」表示关闭是同一个约定 */
   open: boolean;
   focusCall?: AgentInterval | null;
+  initialScope?: RunRole;
   onClose: () => void;
   /**
    * 消息落库后重读运行详情。
@@ -58,6 +61,7 @@ export function OrchestratorPanel({
   run,
   open,
   focusCall,
+  initialScope,
   onClose,
   onRunChanged,
 }: OrchestratorPanelProps) {
@@ -67,7 +71,8 @@ export function OrchestratorPanel({
   // createPortal 在渲染期调用：面板由页面深处的按钮触发，父级链上到处是
   // `overflow-hidden`（画布、右栏、页面根容器），留在原地一定会被裁掉。
   return createPortal(
-    <PanelSurface key={focusCall?.id ?? 'all'} run={run} focusCall={focusCall} onClose={onClose} onRunChanged={onRunChanged} />,
+    <PanelSurface key={focusCall?.id ?? initialScope ?? 'control'} run={run} focusCall={focusCall} initialScope={initialScope}
+      onClose={onClose} onRunChanged={onRunChanged} />,
     document.body,
   );
 }
@@ -135,11 +140,13 @@ function stageBanner(run: WorkflowRunDetail): { title: string; detail: string } 
 function PanelSurface({
   run,
   focusCall,
+  initialScope,
   onClose,
   onRunChanged,
 }: {
   run: WorkflowRunDetail;
   focusCall?: AgentInterval | null;
+  initialScope?: RunRole;
   onClose: () => void;
   onRunChanged: () => void;
 }) {
@@ -151,6 +158,7 @@ function PanelSurface({
   // 入场淡入：首帧透明、下一帧补上，靠 CSS transition 完成，不起动画库
   const [entered, setEntered] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [scope, setScope] = useState<RunRole | 'control'>(initialScope ?? 'control');
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   /** 乐观回显：句子已经发出、还没落库时先摆出来，别让人以为没点中 */
@@ -336,13 +344,13 @@ function PanelSurface({
             >
               <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.8} />
             </span>
-            <span className="text-[11px] text-muted">编排器</span>
+            <span className="text-[11px] text-muted">流程对话</span>
             <Badge tone={stage.tone} dot>
               {stage.label}
             </Badge>
             <button
               type="button"
-              aria-label="关闭编排器"
+              aria-label="关闭流程对话"
               title="关闭（Esc）"
               onClick={onClose}
               className="ml-auto grid h-7 w-7 shrink-0 place-items-center rounded-md text-passive transition-colors hover:bg-subtle hover:text-ink"
@@ -357,11 +365,16 @@ function PanelSurface({
           >
             {run.title}
           </h2>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted">
-            从最初的目标到现在：你说过的每一句话都在这里，随时可以插话。
-          </p>
+          <nav aria-label="流程对话层级" className="mt-2 flex flex-wrap items-center gap-1">
+            <Button size="sm" variant={scope === 'control' ? 'secondary' : 'ghost'} aria-pressed={scope === 'control'}
+              onClick={() => setScope('control')}>总控</Button>
+            <span className="mx-1 h-4 w-px bg-line" aria-hidden="true" />
+            {roleScopes.map((role) => <Button key={role} size="sm" variant={role === scope ? 'secondary' : 'ghost'}
+              aria-pressed={role === scope} onClick={() => setScope(role)}>{roleLabels[role]}</Button>)}
+          </nav>
         </header>
 
+        {scope === 'control' ? <>
         {banner ? (
           <div
             role="status"
@@ -385,11 +398,11 @@ function PanelSurface({
           ref={scrollerRef}
           onScroll={handleScroll}
           aria-live="polite"
-          aria-label="编排器会话"
+          aria-label="总控会话"
           tabIndex={0}
           className="workspace-scroll min-h-0 flex-1 px-4 py-4 sm:px-5"
         >
-          {focusCall && !showAll ? <CallTranscript initial={focusCall} run={run} onShowAll={() => setShowAll(true)} /> :
+          {focusCall && !initialScope && !showAll ? <CallTranscript initial={focusCall} run={run} onShowAll={() => setShowAll(true)} /> :
           <ul className="space-y-4">
             {run.conversation.map((entry) => (
               <li key={entry.id}>
@@ -466,6 +479,13 @@ function PanelSurface({
             ) : null}
           </div>
         </footer>
+        </> : <RoleDialogue key={scope} run={run} scope={scope} initialCall={scope === initialScope ? focusCall : null} onForward={(text) => {
+          const suggestion = '请根据以下' + roleLabels[scope] + '的建议调整任务流程，并核对受影响的依赖。\n\n' + text;
+          setDraft((current) => current.trim() ? current + '\n\n' + suggestion : suggestion);
+          setShowAll(true);
+          setScope('control');
+          requestAnimationFrame(() => inputRef.current?.focus());
+        }} />}
       </div>
     </div>
   );

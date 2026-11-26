@@ -16,7 +16,6 @@ import {
   deriveBoard,
   deriveEdges,
   deriveEvents,
-  deriveNodeConversation,
   deriveNodeStatus,
   deriveRunDetail,
   deriveRunStatus,
@@ -33,6 +32,7 @@ import {
   type NodeFacts,
   type OrchestratorEvent,
   type RunFacts,
+  type RunRole,
   type WorkspacePort,
 } from '@orchestrator/core';
 import {
@@ -69,7 +69,7 @@ import { buildSeedEvents } from './seed.js';
 import { SESSION_NAMESPACE, createSessionIdDeriver } from './session-id.js';
 import { InterviewConflict, SpecInterviews } from './spec-interviews.js';
 import { RunStore } from './store.js';
-import { modelIdSchema, supportsModel } from './text-turn.js';
+import { modelIdSchema, runTextTurn, supportsModel } from './text-turn.js';
 import { GitWorktreeWorkspace, TempDirWorkspace, isGitWorkTree } from './workspace.js';
 
 const execFileAsync = promisify(execFile);
@@ -182,17 +182,12 @@ const runMessageBodySchema = z.object({
   actor: z.string().min(1).optional(),
 });
 
-/**
- * 节点会话：对这个节点说一句话。
- *
- * 与编排器对话同一形状（text + 可选 actor），刻意不复用同一个 schema：两者的
- * 语义完全不同——一句是「改这张图」，一句是「这一次执行按我说的改」。共用一个
- * schema 之后，任何一边加字段都会悄悄变成对另一边的承诺。
- */
-const nodeMessageBodySchema = z.object({
-  text: z.string().min(1),
+const roleScopeSchema = z.enum(['product', 'engineering', 'review']);
+const roleMessageSchema = z.object({
+  text: z.string().trim().min(1).max(8000),
   actor: z.string().min(1).optional(),
 });
+const roleLabels: Record<RunRole, string> = { product: '产品经理', engineering: '工程师', review: '审查员' };
 
 /**
  * 会话里的用户/编排器消息事件。
@@ -1059,6 +1054,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
    */
   const amendChains = new Map<string, Promise<void>>();
   const planControls = new Set<string>();
+  const roleTurns = new Map<string, { runId: string; controller: AbortController }>();
 
   /**
    * 排到该运行的改图队尾，返回释放函数。
@@ -1272,13 +1268,67 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       .send(createReadStream(path));
   });
 
+  app.post<{ Params: { id: string } }>('/api/runs/:id/plan-review/edit', async (request, reply) => {
+    const runId = request.params.id;
+    const body = z.object({
+      revision: z.string().uuid(),
+      nodes: z.array(z.object({
+        id: z.string().min(1),
+        title: z.string().trim().min(1).optional(),
+        description: z.string().optional(),
+        dependsOn: z.array(z.string().min(1)).refine((ids) => new Set(ids).size === ids.length).optional(),
+      })).min(1),
+    }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ message: '草案改动格式有误。' });
+    const run = store.snapshot.runs[runId];
+    if (!run) return reply.code(404).send({ message: '未找到该运行。' });
+    if (run.frozenAt || run.planDraft?.revision !== body.data.revision || run.pausedAt ||
+        deletingRuns.has(runId) || planControls.has(runId) || planning.has(runId)) {
+      return reply.code(409).send({ message: '草案正在更新、已确认或已暂停，请查看最新版本。' });
+    }
+    planControls.add(runId);
+    try {
+      const draft = await readPlanDraft(run);
+      const root = store.projectWorkspace(runId);
+      if (!draft || !root) return reply.code(409).send({ message: '草案文件已更新，请刷新。' });
+      const edits = new Map(body.data.nodes.map(({ id, ...changes }) => [id, changes]));
+      const nodeIds = new Set(draft.dag.nodes.map((node) => node.id));
+      if (edits.size !== body.data.nodes.length || [...edits.keys()].some((id) => !nodeIds.has(id))) {
+        return reply.code(422).send({ message: '编辑的节点有重复或已经不存在。' });
+      }
+      const parsed = safeParseDag({ ...draft.dag, nodes: draft.dag.nodes.map((node) => ({ ...node, ...edits.get(node.id) })) });
+      if (!parsed.success) return reply.code(422).send({ message: '草案内容无效，请重新拆解或恢复草案文件。' });
+      const dag = parsed.data;
+      const validation = validateDag(dag, catalog, { requireDeliverables: run.requireDeliverables });
+      if (!validation.ok) return reply.code(422).send({ message: validation.issues.map((issue) => issue.message).join('；') });
+      const updated: PlanDraft = {
+        ...draft, dag, revision: randomUUID(),
+        verification: { status: 'manual', agentId: 'orchestrator', findings: [],
+          summary: '人工编辑后已重新校验结构和依赖。请确认修改后的任务和验收条件。' },
+      };
+      const file = await projectRunPath(root, runId, 'plan-draft.json');
+      await writeAtomic(file, JSON.stringify(updated, null, 2) + '\n');
+      try {
+        await store.emit({ type: 'plan.drafted', at: now(), runId, revision: updated.revision });
+      } catch (error) {
+        if (store.snapshot.runs[runId]?.planDraft?.revision === draft.revision) {
+          await writeAtomic(file, JSON.stringify(draft, null, 2) + '\n');
+        }
+        throw error;
+      }
+      return updated;
+    } finally {
+      planControls.delete(runId);
+    }
+  });
+
   app.post<{ Params: { id: string } }>('/api/runs/:id/plan-review/approve', async (request, reply) => {
     const runId = request.params.id;
     const revision = z.object({ revision: z.string().uuid() }).safeParse(request.body);
     const run = store.snapshot.runs[runId];
     if (!run) return reply.code(404).send({ message: '未找到该运行。' });
     if (!revision.success || !run.planDraft || run.planDraft.revision !== revision.data.revision || run.pausedAt ||
-        deletingRuns.has(runId) || planControls.has(runId)) {
+        deletingRuns.has(runId) || planControls.has(runId) || planning.has(runId)) {
       return reply.code(409).send({ message: '草案正在更新或已暂停，请查看最新版本。' });
     }
     planControls.add(runId);
@@ -1296,6 +1346,102 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     } finally {
       planControls.delete(runId);
     }
+  });
+
+  function roleDialogue(run: RunFacts, scope: RunRole) {
+    const role = scope === 'product' ? 'plan' : scope === 'engineering' ? 'implement' : 'review';
+    const configured = role === 'plan' ? run.plannerAgentId
+      : role === 'implement' ? run.implementAgentId : run.reviewAgentId;
+    const assigned = role === 'plan' ? pickPlannerAgent(catalog)?.id
+      : Object.values(run.nodes).find((node) => node.type === role && node.agentId)?.agentId;
+    const agent = findAgent(configured ?? assigned ?? '', catalog);
+    const model = (agent?.id === configured || role === 'plan' ? run.roleModels?.[role] : undefined) ?? agent?.defaultModel;
+    const messages = store.eventsForRun(run.id).filter(
+      (event): event is Extract<OrchestratorEvent, { type: 'role.message' }> => event.type === 'role.message' && event.scope === scope,
+    );
+    const key = run.id + ':' + scope;
+    return {
+      agent, model, key, messages,
+      view: {
+        agent: agent && { id: agent.id, label: agent.label, model },
+        available: Boolean(agent?.enabled && agent.availability !== 'missing'),
+        pending: roleTurns.has(key),
+        messages: messages.map(({ id, at, role, author, text, model }) => ({ id, at, role, author, text, model })),
+      },
+    };
+  }
+
+  app.get<{ Params: { id: string; scope: string } }>('/api/runs/:id/roles/:scope/messages', async (request, reply) => {
+    const run = store.snapshot.runs[request.params.id];
+    const scope = roleScopeSchema.safeParse(request.params.scope);
+    if (!run || !scope.success) return reply.code(404).send({ message: '未找到该运行或角色。' });
+    return roleDialogue(run, scope.data).view;
+  });
+
+  app.post<{ Params: { id: string; scope: string } }>('/api/runs/:id/roles/:scope/messages', async (request, reply) => {
+    const { id: runId } = request.params;
+    const run = store.snapshot.runs[runId];
+    const scope = roleScopeSchema.safeParse(request.params.scope);
+    if (!run || !scope.success) return reply.code(404).send({ message: '未找到该运行或角色。' });
+    const body = roleMessageSchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ message: '请输入 1 至 8000 个字符。' });
+    const { key, agent, model, messages, view } = roleDialogue(run, scope.data);
+    if (!agent || !view.available) return reply.code(409).send({ message: '该角色没有可用的 Agent。' });
+    if (roleTurns.has(key) || deletingRuns.has(runId)) return reply.code(409).send({ message: '该角色正在回复，请稍后再发。' });
+    const controller = new AbortController();
+    roleTurns.set(key, { runId, controller });
+    const nodeId = 'role-' + scope.data + '-' + randomUUID();
+    const relay = createAgentEventRelay({ emit: (event) => store.emit(event), now }, { runId, nodeId, agentId: agent.id });
+    const emit = (role: 'user' | 'agent' | 'system', text: string) => store.emit({
+      type: 'role.message', id: randomUUID(), at: now(), runId, scope: scope.data, role, text,
+      author: role === 'user' ? resolveActor(request.headers, body.data.actor) : role === 'agent' ? agent.label : '系统',
+      model: role === 'agent' ? model : undefined,
+    });
+    let workspace: WorkspacePort | undefined;
+    let prepared = false;
+    try {
+      await emit('user', body.data.text);
+      const draft = await readPlanDraft(run);
+      const tasks = (draft?.dag.nodes ?? run.nodeOrder.map((id) => run.nodes[id]!)).slice(0, 100)
+        .map(({ id, title, type, dependsOn, description }) => ({ id, title, type, dependsOn, description: description.slice(0, 280) }));
+      const root = store.projectWorkspace(runId);
+      workspace = new TempDirWorkspace(root ? worktreeRootFor(root, true) : scratchRoot);
+      const cwd = await workspace.prepare(runId, nodeId);
+      prepared = true;
+      controller.signal.throwIfAborted();
+      const prompt = [
+        'WORKFLOW_ROLE_DIALOGUE',
+        `你是本项目的${roleLabels[scope.data]}。根据规格、任务和既有对话回答用户。用中文给出简短结论和可执行的建议，涉及流程改动时列出受影响的任务和依赖。只提供文字答复，不调用工具或修改文件；计划改动由用户提交给总控。`,
+        JSON.stringify({
+          goal: run.goal.slice(0, 24000), tasks,
+          history: messages.filter((message) => message.role !== 'system').slice(-12)
+            .map(({ role, text }) => ({ role, text: text.slice(0, 2400) })),
+          question: body.data.text,
+        }),
+      ].join('\n');
+      const replies = await runTextTurn(runner, agent, {
+        runId, nodeId, cwd, model, prompt, signal: controller.signal,
+        onEvents: (events) => relay.forward(events.filter((event) => event.kind === 'session')),
+      });
+      const text = replies.find((value) => value.trim())?.trim();
+      if (!text) throw new Error('Agent 没有返回文字答复。');
+      await emit('agent', text.slice(0, 48000));
+    } catch (error) {
+      await emit('system', controller.signal.aborted ? '本次角色调用已停止。'
+        : (error instanceof Error ? error.message.slice(0, 500) : 'Agent 调用未完成，请检查配置后重试。'));
+    } finally {
+      try {
+        await relay.flush();
+      } finally {
+        try {
+          if (prepared) await workspace?.release(runId, nodeId);
+        } finally {
+          roleTurns.delete(key);
+          store.bus.publish({ type: 'agent.activity', runId, at: now() });
+        }
+      }
+    }
+    return roleDialogue(run, scope.data).view;
   });
 
   /** 发起一次拆解。已经在拆的直接复用：不排队，也不重复调 Agent。 */
@@ -2028,6 +2174,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       // 「停止」对用户来说是幂等的，不是「必须先有活跃链路」。
       const task = advancing.get(runId) ?? planning.get(runId);
       task?.controller.abort();
+      for (const turn of roleTurns.values()) {
+        if (turn.runId === runId) turn.controller.abort();
+      }
 
       // 先落暂停事实，再去做清理。
       //
@@ -2157,15 +2306,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
   );
 
   /* ---------------------------------------------------------------- *
-   * 节点级控制：单跑 / 停止 / 重置 / 对话
+   * 节点级控制：单跑 / 停止 / 重置
    *
    * 粒度细到单个节点，是因为「整轮跑完再看」和「先跑这一个看看」是两种
    * 完全不同的工作节奏。为了重跑一个节点去新建一次运行，代价是把前面
    * 所有的执行事实一起丢掉。
    *
-   * 四个动作都不是「运行级」的：单跑不触发整轮推进，停止不写 run.paused，
-   * 重置不动图结构，对话只落消息（在跑时额外打断并重跑这一个节点）。要动
-   * 整轮，仍然走 /advance 与 /stop。
+   * 单跑只执行一个节点，节点停止不暂停整轮。
+   * 重置保留图结构。整轮推进和停止分别走 /advance 与 /stop。
    * ---------------------------------------------------------------- */
 
   /**
@@ -2182,257 +2330,6 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     const node = run.nodes[nodeId];
     return node?.startedAt !== undefined && node.finishedAt === undefined;
   };
-
-  /**
-   * 立刻执行一次节点打断之后，等它让位的上限。
-   *
-   * 为什么必须等：自动重跑走的是 `runNode`，而它看到 `nodeInFlight` 里还有这个
-   * 节点就会直接回「已有一条派发在跑」。不等，这条要求就变成了一句「已打断，
-   * 但没重跑」——用户还得自己再点一次运行。
-   *
-   * 为什么不能无限等：一个不肯退出的 CLI 进程不能把用户刚下达的要求永久挂起。
-   * 超时之后放弃自动重跑，回复里明说「点运行此节点」——那一步同样会带上这条
-   * 要求，因为它读的是同一份事件历史。
-   */
-  const NODE_INTERRUPT_SETTLE_TIMEOUT_MS = 5_000;
-
-  /** 等这个节点的派发标记被撤掉。返回是否等到了。 */
-  async function settleNodeInterrupt(runId: string, nodeId: string): Promise<boolean> {
-    const key = nodeInFlightKey(runId, nodeId);
-    const deadline = Date.now() + NODE_INTERRUPT_SETTLE_TIMEOUT_MS;
-    while (nodeInFlight.has(key)) {
-      if (Date.now() >= deadline) {
-        return false;
-      }
-      // 20ms 一拍：这里只是等一个内存标记消失，不需要更细的精度，
-      // 而更密的轮询会让「一句话打断」在整个等待期里占满一个核
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 20);
-      });
-    }
-    return true;
-  }
-
-  /**
-   * 发一次取消意图，不负责它成功。
-   *
-   * `runner.cancel` 的返回值是**确认终止**的数量，不是结论：进程可能还没起来
-   * （返回 0），可能收到了信号但还要几秒才退。所以调用方判的是「派发标记消失」
-   * 这个可观测事实，而不是这个返回值。
-   */
-  async function cancelNodeProcess(runId: string, nodeId: string): Promise<void> {
-    if (!runner.cancel) {
-      return;
-    }
-    try {
-      const cancelled = await runner.cancel({ runId, nodeId });
-      if (cancelled === 0) {
-        // 没有确认终止不等于停下来了：登记表里有、进程表里没有，说明还在启动
-        // 路上。这条日志是排查「为什么打断慢了一拍」的唯一线索。
-        app.log.debug({ runId, nodeId }, '节点打断请求没有命中任何进程');
-      }
-    } catch (error) {
-      // 终止出错不能让整个请求失败，但也不能假装停掉了什么
-      app.log.warn({ err: error, runId, nodeId }, '终止节点 Agent 时出错');
-    }
-  }
-
-  /**
-   * 等一条被取消的执行彻底让位，必要时补发一次取消。
-   *
-   * 补发是因为 `cancel` 与 `runner.run` 之间有窗口：cancel 发出去时进程可能
-   * 还没登记进进程表（返回 0），那一拍之后再发一次才命中真的进程。
-   */
-  async function settleAfterInterrupt(runId: string, nodeId: string): Promise<boolean> {
-    if (await settleNodeInterrupt(runId, nodeId)) {
-      return true;
-    }
-    await cancelNodeProcess(runId, nodeId);
-    return settleNodeInterrupt(runId, nodeId);
-  }
-
-  /** 把一句人话压成能进事件 `reason` 的短句：那条事实要出现在时间线上，不能是一整段。 */
-  function briefReason(text: string): string {
-    const oneLine = text.replace(/\s+/g, ' ').trim();
-    return oneLine.length > 40 ? `${oneLine.slice(0, 40)}…` : oneLine;
-  }
-
-  /**
-   * 对某个节点说一句话。
-   *
-   * 这是「节点也能被打断、也能对话」的落点，两条分支的语义在事实层完全不同，
-   * 靠「这个节点现在有没有在跑」区分：
-   *
-   * - **在跑**：这句话是「停下手里的活，按我说的改」。所以先终止进程、再落
-   *   消息、再落打断事实，最后自动重跑这个节点——新要求进提示词（见
-   *   core 的 buildPrompt），Agent 真的会看到它。
-   * - **没在跑**（pending / completed / failed / 等审批）：这句话是留言。
-   *   只落消息，**不自动重跑**。人可能只是想先记下来、想先看看上一轮的产物，
-   *   或者根本还在权衡；替他起一次执行，花的是钱和一段没人要的改动。回复里
-   *   明说这条要求会在下次运行该节点时生效，不让人以为「它已经照做了」。
-   *
-   * 顺序不能反的地方写在各步注释里，核心只有一条：**先杀进程，再落消息**。
-   * 反过来会出现「消息说打断了、进程其实还在跑」的窗口，而这个窗口里 Agent
-   * 写下的每一个字都还是按旧要求来的。
-   */
-  app.post<{ Params: { id: string; nodeId: string } }>(
-    '/api/runs/:id/nodes/:nodeId/messages',
-    async (request, reply) => {
-      const { id: runId, nodeId } = request.params;
-      const run = store.snapshot.runs[runId];
-      if (!run) {
-        return reply.code(404).send({ error: 'run_not_found' });
-      }
-      const node = run.nodes[nodeId];
-      if (!node) {
-        return reply.code(404).send({ error: 'node_not_found' });
-      }
-
-      const body = nodeMessageBodySchema.safeParse(request.body);
-      if (!body.success) {
-        return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
-      }
-      const text = body.data.text.trim();
-      if (!text) {
-        return reply.code(400).send({ error: 'invalid_body' });
-      }
-
-      /**
-       * 「正在跑」必须在任何 await 之前判定。
-       *
-       * 这是个快照问题：一旦 emit 出去，事件落盘与归约要让出若干个微任务，
-       * 那一刻读到的运行事实可能已经是「刚结束」。而这条消息要不要带
-       * `interrupt: true` 是它自身的属性——事件写下去就改不了，靠随后补一条
-       * 更正事件只会让重放多出一份需要互相解释的记录。
-       */
-      const running = nodeIsRunning(run, nodeId);
-      /**
-       * 等人工审批的节点也算「在跑」（它有 startedAt、没有 finishedAt），
-       * 但它头上悬着一条审批记录，没有任何 Agent 进程。对它执行打断会把
-       * `startedAt` 清掉，节点当场从「待你审批」变成「就绪」——审批还在，
-       * 界面却不再问人了。所以这一类只算留言。
-       */
-      const awaitingApproval = deriveNodeStatus(run, node) === 'waiting_approval';
-      const at = now();
-
-      const detailOf = () =>
-        deriveRunDetail(store.snapshot.runs[runId]!, runEvents(runId), resolveAgent);
-      /** 这个节点此刻的会话，随响应带给前端（省掉一次往返）。 */
-      const nodeConversation = () =>
-        detailOf().nodeConversations[nodeId] ?? [];
-
-      if (!running || awaitingApproval) {
-        // ---- 一、没在跑：只记录，不重跑 ----
-        await store.emit({
-          type: 'node.message',
-          at,
-          runId,
-          nodeId,
-          role: 'user',
-          text,
-        });
-
-        const replyText = awaitingApproval
-          ? '已记录。这个节点正在等人工审批，不会自动重跑；审批通过后再次运行它时会带上这条要求。'
-          : '已记录。这条要求会在下次运行该节点时带上它——点「运行此节点」即可。';
-        await store.emit({
-          type: 'node.message',
-          at: now(),
-          runId,
-          nodeId,
-          role: 'agent',
-          text: replyText,
-        });
-
-        return {
-          ok: true,
-          // 界面据此说「这次只记下了」，而不是「这次打断了它」
-          interrupted: false,
-          reply: replyText,
-          run: detailOf(),
-          conversation: nodeConversation(),
-        };
-      }
-
-      // ---- 二、在跑：打断 + 自动重跑 ----
-
-      // 第一步：杀进程。放在落消息之前，所以「消息说打断了」这个时刻，
-      // 终止意图已经发出去了。
-      await cancelNodeProcess(runId, nodeId);
-
-      // 第二步：把这句话落成事实，并标上「它打断了正在进行的执行」
-      await store.emit({
-        type: 'node.message',
-        at: now(),
-        runId,
-        nodeId,
-        role: 'user',
-        text,
-        interrupt: true,
-      });
-
-      // 第三步：落打断事实。这一步同时把 startedAt / finishedAt / failureReason
-      // 清干净（见 journal 里 node.interrupted 的归约），于是这个节点回到可派发
-      // 状态——没有它，下面的 runNode 会以「该节点正在执行」直接拒绝。
-      //
-      // 必须紧挨着消息落，不能等进程退干净再落：正在收尾的那次执行自己也会在
-      // `cancelled` 分支里落一条 node.interrupted（「运行被用户停止」）。它的
-      // 幂等判据是「事实里已经记过打断」——我们把事实先写下去，它就只退不再记，
-      // 会话里才不会出现两条「被停止」。等它退完再写，这两条就都会落下。
-      //
-      // reason 带出原话：排障时要能回答「哪句话打断了这一次执行」。
-      await store.emit({
-        type: 'node.interrupted',
-        at: now(),
-        runId,
-        nodeId,
-        reason: `用户打断并给出了新要求：${briefReason(text)}`,
-      });
-
-      // 第四步：等那条执行彻底让位。不 await 它，重跑会撞上「已有一条派发在跑」。
-      const settled = await settleAfterInterrupt(runId, nodeId);
-
-      // 第五步：按新要求重跑。提示词会带上这条要求，所以这是「真的照做了」，
-      // 不是「记下了」。没让位成功时按留言处理并说清原因。
-      const rerun = settled
-        ? await runNode(runId, nodeId, buildAdvanceDeps())
-        : { ok: false, reason: '上一次执行还没能停下来' };
-
-      // 重跑跑完了，下游就该接着走。
-      //
-      // 这一脚是必须的：`/nodes/:nodeId/run`（手动单跑）刻意不推进整轮，
-      // 那是「我只想看看这个节点」；但打断对话的语义是「这一轮按新要求重来，
-      // 然后继续往下」，不推进的话下游会永远卡在等它完成——用户看到的就是
-      // 「说完了，图也改了，可后面不动」。
-      if (rerun.ok) {
-        void advance(runId);
-      }
-
-      const replyText = rerun.ok
-        ? '已打断当前这轮，并按你这条要求重新开始执行。下游会接着往下走。'
-        : `已打断当前这轮，但没能自动重启：${rerun.reason}。点「运行此节点」会带上这条要求。`;
-
-      // 第六步：回执落库。与编排器对话同一约定——回复和用户消息走同一条通道，
-      // 界面只有一个来源。
-      await store.emit({
-        type: 'node.message',
-        at: now(),
-        runId,
-        nodeId,
-        role: 'agent',
-        text: replyText,
-      });
-
-      return {
-        ok: true,
-        interrupted: true,
-        reply: replyText,
-        run: detailOf(),
-        conversation: nodeConversation(),
-      };
-    },
-  );
-
 
   app.post<{ Params: { id: string; nodeId: string } }>(
     '/api/runs/:id/nodes/:nodeId/run',

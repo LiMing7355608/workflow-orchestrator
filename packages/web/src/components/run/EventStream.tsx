@@ -97,7 +97,7 @@ export function EventStream({ events, nodes = [], onSelectNode, onOpenPlanner }:
             <div className="space-y-1.5 border-t border-line px-3 py-2.5">
               {(node || id === 'planner' && onOpenPlanner) && <Button size="sm" variant="secondary"
                 onClick={() => node ? onSelectNode(node.id) : onOpenPlanner?.()}>
-                <MessageSquare className="size-3.5" />{node ? '打开 Agent 对话' : '和编排器对话'}
+                <MessageSquare className="size-3.5" />{node ? '打开节点记录' : '和总控对话'}
               </Button>}
               {entries.slice(0, limit).map((event) => {
                 const meta = <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink">

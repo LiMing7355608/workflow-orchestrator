@@ -127,16 +127,11 @@ async function createFixture(): Promise<{
 }
 
 describe('人类补充要求进入提示词', () => {
-  it('节点留言会出现在这个节点真正发出的 probe 里', async () => {
+  it('旧版本保存的节点留言仍进入执行提示词', async () => {
     const { app, store, runner } = await createFixture();
 
-    // 节点没在跑：只记录，不触发执行
-    const recorded = await app.inject({
-      method: 'POST',
-      url: `/api/runs/${RUN_ID}/nodes/impl-a/messages`,
-      payload: { text: '别用 vue，改成 react' },
-    });
-    expect(recorded.statusCode, recorded.body).toBe(200);
+    await store.emit({ type: 'node.message', runId: RUN_ID, nodeId: 'impl-a', at: AT,
+      role: 'user', text: '别用 vue，改成 react' });
     expect(runner.prompts).toHaveLength(0);
 
     // 现在手动跑这个节点：提示词里必须带上刚才那句话

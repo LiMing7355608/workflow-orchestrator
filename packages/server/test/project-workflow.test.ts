@@ -116,6 +116,12 @@ describe('项目级运行与规格访谈', () => {
         } else if (prompt.includes('WORKFLOW_PLAN_CHECK_JSON')) {
           checkCalls++;
           output = JSON.stringify({ summary: '规格和验收已核对。', findings: [] });
+        } else if (request.nodeId.startsWith('role-')) {
+          expect(prompt).toContain('WORKFLOW_ROLE_DIALOGUE');
+          expect(prompt).toContain('核对公告边界');
+          expect(request.policy).toBe('default');
+          expect(request.model).toBe('planner-model');
+          output = '## 产品建议\n先确认离线范围。';
         } else if (request.nodeId === 'implement') {
           implementationCalls++;
           await writeFile(join(request.cwd, 'index.html'), '<html lang="zh"><title>公告</title></html>');
@@ -203,7 +209,29 @@ describe('项目级运行与规格访谈', () => {
     const approveDraft = (revision: string) => app.inject({ method: 'POST', url: draftUrl + '/approve', payload: { revision } });
     expect((await approveDraft(draft.revision)).statusCode).toBe(409);
     expect(implementationCalls).toBe(0);
-    expect((await approveDraft(store.snapshot.runs[runId]!.planDraft!.revision)).statusCode).toBe(200);
+    const revision = store.snapshot.runs[runId]!.planDraft!.revision;
+    const roleUrl = runUrl + '/roles/product/messages';
+    const ask = await app.inject({ method: 'POST', url: roleUrl, payload: { text: '核对公告边界' } });
+    expect(ask.statusCode, ask.body).toBe(200);
+    expect((await app.inject(roleUrl)).json()).toMatchObject({
+      pending: false,
+      messages: [{ role: 'user', text: '核对公告边界' }, { role: 'agent', text: '## 产品建议\n先确认离线范围。' }],
+    });
+    expect((await app.inject(runUrl + '/roles/engineering/messages')).json().messages).toEqual([]);
+    expect(store.snapshot.runs[runId]?.planDraft?.revision).toBe(revision);
+    expect((await app.inject({ method: 'POST', url: runUrl + '/nodes/implement/messages', payload: { text: '旧接口' } })).statusCode).toBe(404);
+
+    const edit = (nodes: unknown[]) => app.inject({ method: 'POST', url: draftUrl + '/edit', payload: { revision, nodes } });
+    expect((await edit([{ id: 'implement', dependsOn: ['review'] }])).statusCode).toBe(422);
+    expect(store.snapshot.runs[runId]?.planDraft?.revision).toBe(revision);
+    const edited = await edit([{ id: 'implement', title: '实现并保存公告' }]);
+    expect(edited.statusCode, edited.body).toBe(200);
+    expect(edited.json()).toMatchObject({ verification: { status: 'manual' } });
+    expect((await approveDraft(revision)).statusCode).toBe(409);
+    expect(implementationCalls).toBe(0);
+    expect((await approveDraft(edited.json().revision)).statusCode).toBe(200);
+    expect(store.snapshot.runs[runId]?.nodes.implement?.title).toBe('实现并保存公告');
+    expect((await edit([{ id: 'implement', title: '不应覆盖确认后的任务' }])).statusCode).toBe(409);
     expect(plannerPrompt).toContain('标题栏中文');
     await vi.waitFor(() => {
       expect(store.snapshot.approvals.some((approval) => approval.runId === runId && approval.status === 'pending')).toBe(true);

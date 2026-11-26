@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createParser, type AgentProfile, type AgentRunner, type OrchestratorEvent, type RunFacts } from '@orchestrator/core';
+import { createParser, type AgentProfile, type AgentRunner, type OrchestratorEvent, type RunFacts, type RunRole } from '@orchestrator/core';
 
 export interface AgentInterval {
   id: string;
@@ -7,7 +7,9 @@ export interface AgentInterval {
   runTitle: string;
   nodeId?: string;
   agentId: string;
-  role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review';
+  role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review' | 'dialogue';
+  roleScope?: RunRole;
+  lane?: string;
   model?: string;
   progress?: string;
   title: string;
@@ -17,10 +19,15 @@ export interface AgentInterval {
   status: 'running' | 'completed' | 'failed' | 'interrupted';
 }
 
-function describe(run: RunFacts, nodeId?: string): Pick<AgentInterval, 'role' | 'title' | 'description' | 'nodeId'> {
+function describe(run: RunFacts, nodeId?: string): Pick<AgentInterval, 'role' | 'roleScope' | 'lane' | 'title' | 'description' | 'nodeId'> {
   const node = nodeId ? run.nodes[nodeId] : undefined;
   if (node?.type === 'implement' || node?.type === 'review') {
     return { role: node.type, title: node.title, description: node.description, nodeId };
+  }
+  const scope = /^role-(product|engineering|review)-/.exec(nodeId ?? '')?.[1] as RunRole | undefined;
+  if (scope) {
+    const label = { product: '产品经理', engineering: '工程师', review: '审查员' }[scope];
+    return { role: 'dialogue', roleScope: scope, lane: label, title: label + '对话', description: '根据规格和当前流程给出建议', nodeId };
   }
   if (nodeId?.startsWith('check-')) {
     return { role: 'check', title: '任务草案交叉核对', description: '核对需求覆盖、依赖关系和验收条件' };

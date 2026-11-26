@@ -1,5 +1,5 @@
 import type { AgentProfile, ModelDirectory, ModelProvider, ModelProviderSettings } from '../types/agent';
-import type { ActivityView, AgentPreferenceRole, AgentPreferences, BlackboardView, InterviewSummary, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView, SessionCleanup } from '../types/operations';
+import type { ActivityView, AgentPreferenceRole, AgentPreferences, BlackboardView, InterviewSummary, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView, RoleDialogueView, RunRole, SessionCleanup } from '../types/operations';
 import type {
   AmendmentRejection,
   ConversationEntry,
@@ -89,6 +89,22 @@ export function fetchPlanDraft(id: string, signal?: AbortSignal) {
 
 export function confirmPlanDraft(id: string, revision: string) {
   return operation<{ ok: boolean }>('/api/runs/' + encodeURIComponent(id) + '/plan-review/approve', 'POST', { revision });
+}
+
+export function editPlanDraft(id: string, revision: string, nodes: Array<{
+  id: string; title?: string; description?: string; dependsOn?: string[];
+}>) {
+  return operation<PlanDraftView>('/api/runs/' + encodeURIComponent(id) + '/plan-review/edit', 'POST', { revision, nodes });
+}
+
+const roleMessagesUrl = (id: string, role: RunRole) => '/api/runs/' + encodeURIComponent(id) + '/roles/' + role + '/messages';
+
+export function fetchRoleMessages(id: string, role: RunRole) {
+  return requestJson<RoleDialogueView>(roleMessagesUrl(id, role));
+}
+
+export function sendRoleMessage(id: string, role: RunRole, text: string) {
+  return operation<RoleDialogueView>(roleMessagesUrl(id, role), 'POST', { text });
 }
 
 export function fetchMeetings(signal?: AbortSignal, specId?: string) {
@@ -587,72 +603,6 @@ export async function sendOrchestratorMessage(
       applied: payload.applied ?? [],
       rejected: payload.rejected ?? [],
       conversation: payload.conversation,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/* ------------------------------------------------------------------ *
- * 节点会话：对单个节点说一句话
- * ------------------------------------------------------------------ */
-
-/**
- * 对某个节点说一句话的结果。
- *
- * `interrupted` 决定界面该说什么：true 是「打断了正在跑的那一轮，已按新要求
- * 重启」；false 是「记下了，下次运行该节点时生效」。这两句话对用户意味着
- * 完全不同的下一步，所以由后端判、前端不复述。
- */
-export interface NodeMessageResult {
-  ok: boolean;
-  interrupted: boolean;
-  /** 后端写下的回执原文，同时也会以 agent 消息落进会话 */
-  reply: string;
-  /** 落库之后的节点会话，界面用它立刻替换掉当前那份 */
-  conversation: ConversationEntry[];
-}
-
-/**
- * 给节点发一句话。
- *
- * 不走通用 `requestJson`：404（运行/节点不存在）与 400（空消息）都会带上
- * `error` 码，那是「为什么没发出去」的唯一依据，不能在失败分支上丢掉。
- * 返回 null 只代表网络层失败。
- */
-export async function sendNodeMessage(
-  runId: string,
-  nodeId: string,
-  input: { text: string; actor?: string },
-): Promise<NodeMessageResult | null> {
-  try {
-    const response = await fetch(
-      `${API_BASE}/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          // 与其余写接口同一约定：头里只放编码后的名字
-          'X-Actor': encodeURIComponent(getActor()),
-        },
-        body: JSON.stringify(input),
-      },
-    );
-
-    const payload = (await response.json().catch(() => undefined)) as
-      | (NodeMessageResult & { error?: string; message?: string })
-      | undefined;
-
-    if (!response.ok || !payload) {
-      return null;
-    }
-
-    return {
-      ok: payload.ok,
-      interrupted: payload.interrupted === true,
-      reply: payload.reply,
-      conversation: payload.conversation ?? [],
     };
   } catch {
     return null;

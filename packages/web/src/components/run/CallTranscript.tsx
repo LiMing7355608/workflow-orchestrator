@@ -12,10 +12,11 @@ import { Button } from '../ui/Button';
 import { CollapsibleText } from '../ui/CollapsibleText';
 import { AgentReply } from './AgentReply';
 
-export function CallTranscript({ initial, run, onShowAll }: {
+export function CallTranscript({ initial, run, onShowAll, allLabel = '编排器全部对话' }: {
   initial: AgentInterval;
   run: WorkflowRunDetail;
   onShowAll: () => void;
+  allLabel?: string;
 }) {
   const { data, reload, source } = useApiResource(
     () => fetchAgentActivity(run.id), null,
@@ -38,7 +39,7 @@ export function CallTranscript({ initial, run, onShowAll }: {
           <h3 className="break-words text-sm font-semibold text-ink">{call.title}</h3>
           <p className="text-[11px] text-muted">{call.agentLabel}{call.model && ' · ' + modelLabel(call.model)}</p>
         </div>
-        <Button size="sm" variant="secondary" onClick={onShowAll}>编排器全部对话</Button>
+        <Button size="sm" variant="secondary" onClick={onShowAll}>{allLabel}</Button>
       </div>
       <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
         <Clock3 className="size-3.5" />

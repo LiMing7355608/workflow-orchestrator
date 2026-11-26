@@ -4,6 +4,7 @@ import { modelLabel } from '../agents/AgentModelField';
 import type { InterviewView } from '../../types/operations';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
+import { MarkdownDocument } from '../ui/MarkdownDocument';
 import { DeleteInterviewButton } from './DeleteInterviewButton';
 
 export function SpecInterviewPanel({
@@ -107,7 +108,9 @@ export function SpecInterviewPanel({
                 <h3 className="flex items-center gap-2 text-[12px] font-semibold text-ink">
                   <Check className="h-4 w-4 text-success" /> 待确认的设计规格
                 </h3>
-                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-subtle/30 p-3 font-sans text-[12px] leading-6 text-ink">{session.spec}</pre>
+                {session.spec && <div className="mt-2">
+                  <MarkdownDocument text={session.spec} title="设计规格 Markdown" filename="spec.md" />
+                </div>}
                 <form className="mt-2 flex items-center gap-2" onSubmit={(event) => { event.preventDefault(); if (answer.trim() && !busy) void send(answer.trim()); }}>
                   <input value={answer} onChange={(event) => setAnswer(event.target.value)} aria-label="规格修订要求" maxLength={12000}
                     placeholder="填入要修改的范围或验收条件" className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-surface px-2 text-[12px] outline-offset-2" />
