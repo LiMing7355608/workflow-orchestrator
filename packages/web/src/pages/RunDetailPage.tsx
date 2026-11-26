@@ -7,6 +7,7 @@ import { NodeDetailPanel } from '../components/run/NodeDetailPanel';
 import { NodeInspector } from '../components/run/NodeInspector';
 import { PlanningSteps, PlanReviewPanel, RunPlanPanel } from '../components/run/PlanReviewPanel';
 import { OrchestratorPanel } from '../components/run/OrchestratorPanel';
+import { roleForCall } from '../components/run/RoleDialogue';
 import { RunBoard } from '../components/run/RunBoard';
 import { RunBlackboard } from '../components/run/RunBlackboard';
 import { RunHeader } from '../components/run/RunHeader';
@@ -19,7 +20,7 @@ import { getRunDetail } from '../data/run-detail';
 import { fetchRunDetail } from '../lib/api';
 import { useApiResource, useLiveRefresh } from '../lib/use-api';
 import { usePageTitle } from '../lib/use-page-title';
-import type { AgentInterval } from '../types/operations';
+import type { AgentInterval, RunRole } from '../types/operations';
 import type { PlanFailure } from '../types/workflow';
 
 /**
@@ -81,6 +82,7 @@ export function RunDetailPage() {
   const activeView: RunView = viewParam === 'monitor' || viewParam === 'plan' || viewParam === 'board' || viewParam === 'events'
     ? viewParam : 'graph';
   const [focusCall, setFocusCall] = useState<AgentInterval | null>(null);
+  const [dialogueScope, setDialogueScope] = useState<RunRole>();
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [draftLogOpen, setDraftLogOpen] = useState(false);
 
@@ -128,17 +130,17 @@ export function RunDetailPage() {
 
   // 关闭只收面板，不撤销高亮：读完了图上的选择仍然有效，再点一下就回来
   const closeDetail = () => setDetailNodeId(null);
-  function openPlanner(call: AgentInterval | null = null) {
+  function openPlanner(call: AgentInterval | null = null, scope?: RunRole) {
+    setDetailNodeId(null);
     setFocusCall(call);
+    setDialogueScope(scope);
     setOrchestratorOpen(true);
   }
   function openActivity(call: AgentInterval) {
     if (call.role === 'spec') {
       navigate('/new?spec=' + encodeURIComponent(call.runId));
-    } else if (call.nodeId && run?.nodes.some((node) => node.id === call.nodeId)) {
-      selectNode(call.nodeId);
     } else {
-      openPlanner(call);
+      openPlanner(call, roleForCall(call));
     }
   }
 
@@ -283,7 +285,7 @@ export function RunDetailPage() {
               className="w-full justify-start gap-2 border-accent/25 bg-accent-soft/40 text-accent hover:border-accent/40 hover:bg-accent-soft hover:text-accent"
             >
               <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.8} />
-              和编排器对话
+              总控与角色对话
               <span className="ml-auto rounded-full bg-surface px-1.5 text-[10px] tabular-nums text-muted">
                 {run.conversation.length}
               </span>
@@ -303,6 +305,7 @@ export function RunDetailPage() {
         run={run}
         open={orchestratorOpen}
         focusCall={focusCall}
+        initialScope={dialogueScope}
         onClose={() => { setOrchestratorOpen(false); setFocusCall(null); }}
         // 消息落库后重读：会话、图与节点状态全部由后端派生
         onRunChanged={reload}

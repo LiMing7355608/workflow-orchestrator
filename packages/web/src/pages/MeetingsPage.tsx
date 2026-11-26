@@ -1,12 +1,13 @@
-import { ArrowLeft, ArrowUpRight, Download, MessageCircle, Pause, Play, Plus, Settings2, UsersRound } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, MessageCircle, Pause, Play, Plus, Settings2, UsersRound } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ActiveFlow, ActivityTimeline } from '../components/agents/AgentActivityPanel';
 import { modelLabel } from '../components/agents/AgentModelField';
 import { MeetingEditor, inputStyle } from '../components/meetings/MeetingEditor';
+import { MeetingFlow, type MeetingSpeaker } from '../components/meetings/MeetingFlow';
 import { MeetingRunProgress } from '../components/meetings/MeetingRunProgress';
 import { Button, buttonStyles } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { MarkdownDocument, MarkdownText } from '../components/ui/MarkdownDocument';
 import { createMeeting, fetchAgents, fetchInterview, fetchMeeting, fetchMeetings, fetchRuntime, meetingAction, sendMeetingNote, updateMeeting } from '../lib/api';
 import { cn } from '../lib/cn';
 import { useApiResource, useLiveRefresh } from '../lib/use-api';
@@ -110,6 +111,9 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
   const { data: room, source, loading, reload } = useApiResource(() => fetchMeeting(id), null);
   useLiveRefresh(source === 'live', reload, { runId: id, refreshIntervalMs: 300 });
   const [picked, setPicked] = useState<string | null>(null);
+  const [speaker, setSpeaker] = useState<MeetingSpeaker | null>(null);
+  const discussionRef = useRef<HTMLDivElement>(null);
+  const deliveryRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -118,7 +122,6 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
     agentLabel: agents.find((agent) => agent.id === turn.agentId)?.label ?? turn.agentId,
   })).reverse() ?? [];
   const active = intervals.filter((turn) => turn.status === 'running');
-  const selected = intervals.find((turn) => turn.id === picked);
   useEffect(() => {
     if (!inProgress) return;
     const timer = window.setInterval(reload, 2500);
@@ -144,6 +147,10 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
 
   if (!room) return <Card className="p-4 text-sm text-muted">{loading ? '正在读取会议…' : '无法读取这场会议。'}</Card>;
   const reportUrl = '/api/meetings/' + id + '/report';
+  function selectSpeaker(voice: MeetingSpeaker) {
+    setSpeaker(voice);
+    discussionRef.current?.scrollIntoView({ block: 'nearest' });
+  }
   return <>
     <Link className="inline-flex items-center gap-1.5 text-xs font-medium text-muted hover:text-accent" to="/meetings">
       <ArrowLeft className="size-3.5" />会议协作
@@ -174,9 +181,21 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
       <MeetingEditor agents={agents} initial={room} directory={room.workspaceRoot} canBrowse={false} busy={busy} onSave={save}
         onCancel={() => { setError(''); setEditing(null); }} />
     </Card>}
+    <MeetingFlow room={room} catalogue={agents} intervals={intervals} speaker={speaker} picked={picked}
+      onSpeaker={(voice) => { setPicked(null); selectSpeaker(voice); }}
+      onTurn={(turnId) => {
+        setPicked(turnId);
+        const turn = intervals.find((item) => item.id === turnId);
+        if (turn?.lane) selectSpeaker(turn.lane === '主持人' ? 'host' : `role:${turn.lane}`);
+      }}
+      onDelivery={() => { deliveryRef.current?.scrollIntoView({ block: 'nearest' }); deliveryRef.current?.focus({ preventScroll: true }); }} />
     <div className="meeting-room-grid">
-      <MeetingChat room={room} inProgress={inProgress} active={active.map((turn) => turn.lane ?? turn.agentLabel)} reload={reload} />
+      <div ref={discussionRef} className="min-w-0">
+        <MeetingChat room={room} inProgress={inProgress} active={active.map((turn) => turn.lane ?? turn.agentLabel)} reload={reload}
+          speaker={speaker} onClearSpeaker={() => { setPicked(null); setSpeaker(null); }} />
+      </div>
       <div className="min-w-0 space-y-3">
+        <div ref={deliveryRef} tabIndex={-1} aria-label="会议方案交付">
         <Card className="space-y-3 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-ink">会议方案</h2>
@@ -185,9 +204,8 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
           </div>
           {room.report ? <>
             {room.reportStale && <p className="text-xs text-warning">有新发言或成员调整，可重新汇总后再采纳。</p>}
-            <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-subtle/35 p-3 font-sans text-xs leading-6 text-ink">{room.report}</pre>
+            <MarkdownDocument title="会议方案 Markdown" text={room.report} filename="solution.md" downloadHref={reportUrl} />
             <div className="flex flex-wrap gap-2">
-              <a className={buttonStyles({ variant: 'secondary', size: 'sm' })} href={reportUrl}><Download className="size-3.5" />下载方案</a>
               {room.status === 'complete' && !room.reportStale && !room.linkedRunId &&
                 <Link to={room.sourceSpecId ? specLink(room.sourceSpecId) : '/new?meeting=' + id} className={buttonStyles({ size: 'sm' })}>
                   {room.sourceSpecId ? '回规格页采纳方案' : '用方案新建运行'}
@@ -195,6 +213,7 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
             </div>
           </> : <p className="text-xs text-muted">主持人汇总成员意见后，方案会出现在这里。</p>}
         </Card>
+        </div>
         {room.linkedRunId && <MeetingRunProgress key={room.linkedRunId} id={room.linkedRunId} />}
         <details className="rounded-xl border border-line bg-surface px-4 py-3">
           <summary className="cursor-pointer text-sm font-semibold text-ink">议题与成员</summary>
@@ -214,30 +233,26 @@ function MeetingRoom({ id, agents }: { id: string; agents: AgentProfile[] }) {
         </details>
       </div>
     </div>
-    <details className="rounded-xl border border-line bg-surface p-4">
-      <summary className="cursor-pointer text-sm font-semibold text-ink">调用图谱与时间轴</summary>
-      <div className="mt-3 space-y-3">
-        <ActiveFlow entries={intervals} picked={picked} onPick={setPicked}
-          output={room.report ? { link: reportUrl, name: 'solution.md', description: '会议方案' } : undefined} />
-        <ActivityTimeline intervals={intervals} picked={picked} onPick={setPicked} />
-        {selected && <p className="rounded-lg border border-line px-3 py-2 text-xs text-muted">{selected.title} · {selected.progress || selected.description}</p>}
-      </div>
-    </details>
   </>;
 }
 
-function MeetingChat({ room, inProgress, active, reload }: {
+function MeetingChat({ room, inProgress, active, reload, speaker, onClearSpeaker }: {
   room: MeetingView; inProgress: boolean; active: string[]; reload: () => void;
+  speaker: MeetingSpeaker | null; onClearSpeaker: () => void;
 }) {
   const [note, setNote] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const name = speaker === 'host' ? '主持人' : speaker?.slice(5);
+  const messages = room.messages.filter((message) => !speaker || (speaker === 'host'
+    ? message.kind === 'host' : message.kind === 'agent' && message.author === name));
+  useEffect(() => { follow.current = true; }, [speaker]);
   useEffect(() => {
     const panel = scroll.current;
     if (panel && follow.current) panel.scrollTop = panel.scrollHeight;
-  }, [room.messages.length, inProgress]);
+  }, [messages.length, inProgress, speaker]);
 
   async function speak(interrupt: boolean) {
     if (!note.trim() || sending) return;
@@ -250,13 +265,16 @@ function MeetingChat({ room, inProgress, active, reload }: {
 
   let previousRound: number | undefined;
   return <Card className="min-w-0 space-y-3 p-4">
-    <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><MessageCircle className="size-4 text-accent" />会议群聊</h2>
+    <header className="flex flex-wrap items-center justify-between gap-2">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><MessageCircle className="size-4 text-accent" />{name ? name + '的发言' : '会议群聊'}</h2>
+      {speaker && <Button size="sm" variant="ghost" onClick={onClearSpeaker}>查看群聊</Button>}
+    </header>
     <div ref={scroll} onScroll={() => {
       const view = scroll.current;
       if (view) follow.current = view.scrollHeight - view.scrollTop - view.clientHeight < 80;
     }} className="min-h-56 max-h-[min(57dvh,650px)] space-y-3 overflow-auto rounded-xl bg-subtle/40 p-3" role="log" aria-label="会议发言">
-      {!room.messages.length && <p className="text-xs text-muted">讨论开始后，各成员的发言会出现在这里。</p>}
-      {room.messages.map((message) => {
+      {!messages.length && <p className="text-xs text-muted">{name ? '这个角色还没有发言。' : '讨论开始后，各成员的发言会出现在这里。'}</p>}
+      {messages.map((message) => {
         const divider = message.round !== undefined && message.round !== previousRound;
         if (message.round !== undefined) previousRound = message.round;
         return <div key={message.id}>
@@ -271,7 +289,7 @@ function MeetingChat({ room, inProgress, active, reload }: {
                 {message.model && <span className="break-all">{modelLabel(message.model)}</span>}
                 <time dateTime={message.at}>{formatTime(message.at)}</time>
               </header>
-              <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-ink">{message.text}</p>
+              <MarkdownText text={message.text} />
             </article>
           </div>
         </div>;
@@ -279,7 +297,7 @@ function MeetingChat({ room, inProgress, active, reload }: {
       {inProgress && <p role="status" className="text-[11px] text-accent">{[...new Set(active)].join('、') || '主持人'} 正在处理…</p>}
     </div>
     <form onSubmit={(event) => { event.preventDefault(); void speak(false); }} className="space-y-2">
-      <label className="block space-y-1 text-xs font-medium text-muted"><span>人工发言</span>
+      <label className="block space-y-1 text-xs font-medium text-muted"><span>向群聊发言</span>
         <textarea className={inputStyle} value={note} onChange={(event) => setNote(event.target.value)} maxLength={4000}
           rows={2} placeholder="补充条件、纠正方向或提出新问题" />
       </label>

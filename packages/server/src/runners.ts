@@ -603,6 +603,12 @@ export class MockAgentRunner implements AgentRunner {
 
     const discussionPrompt = request.stdin ?? request.argv.find((arg) => arg.startsWith('WORKFLOW_'));
     const marker = discussionPrompt?.split('\n')[0];
+    if (marker === 'WORKFLOW_ROLE_DIALOGUE') {
+      await delay(480);
+      if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');
+      const output = '## 修改建议\n\n优先确认首期范围，再按依赖逐项核对实施任务与验收条件。';
+      return { ok: true, output, exitCode: 0 };
+    }
     if (discussionPrompt && (marker === 'WORKFLOW_PLAN_CHECK_JSON' || marker?.startsWith('WORKFLOW_MEETING_'))) {
       await delay(480);
       if (slot.cancelled || request.signal?.aborted) return this.cancelledResult('');

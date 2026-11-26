@@ -12,7 +12,7 @@ const reviewSchema = z.object({
   })).max(12),
 });
 
-type PlanVerification = z.infer<typeof reviewSchema> & { status: 'checked' | 'unavailable'; agentId: string };
+type PlanVerification = z.infer<typeof reviewSchema> & { status: 'checked' | 'unavailable' | 'manual'; agentId: string };
 
 export interface PlanDraft {
   revision: string;

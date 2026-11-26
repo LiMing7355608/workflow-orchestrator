@@ -12,7 +12,7 @@ import { AgentLogo } from './AgentLogo';
 
 const roles: Record<AgentInterval['role'], string> = {
   spec: '规格访谈', plan: 'PM 分解', check: '草案核对', amend: '调整编排',
-  implement: '实现', review: '审查', meeting: '会议',
+  implement: '实现', review: '审查', meeting: '会议', dialogue: '角色对话',
 };
 const states: Record<AgentInterval['status'], string> = {
   running: '运行中', completed: '已返回', failed: '失败', interrupted: '已中断',
@@ -181,8 +181,9 @@ export function ActiveFlow({ entries, picked, onPick, output, reports = [], titl
   idleLabel?: string;
 }) {
   const planning = entries.filter((entry) => entry.role === 'plan' || entry.role === 'amend');
-  const review = entries.filter((entry) => entry.role === 'check' || entry.role === 'review');
-  const workers = entries.filter((entry) => entry.role === 'implement' || entry.role === 'spec' || entry.role === 'meeting');
+  const review = entries.filter((entry) => entry.role === 'check' || entry.role === 'review' || entry.roleScope === 'review');
+  const workers = entries.filter((entry) => entry.role === 'implement' || entry.role === 'spec' ||
+    entry.role === 'meeting' || (entry.role === 'dialogue' && entry.roleScope !== 'review'));
   const meeting = entries.some((entry) => entry.role === 'meeting');
   const active = entries.filter((entry) => entry.status === 'running');
   const now = useCurrentTime(active.length > 0);

@@ -483,7 +483,7 @@ export function deriveEvents(
     // 节点会话同理：节点面板里的会话区与这条流水是两处刻意分工的视图
     // （见 NodeDetailPanel 的注释），一条 node.message 若同时出现在两边，
     // 用户会以为同一句话被发了两次。
-    if (event.type === 'orchestrator.message' || event.type === 'node.message') {
+    if (event.type === 'orchestrator.message' || event.type === 'node.message' || event.type === 'role.message') {
       continue;
     }
 

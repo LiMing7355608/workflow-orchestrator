@@ -32,6 +32,7 @@ export type {
   ReviewVerdict,
   RunDetailView,
   RunFacts,
+  RunRole,
   RunStage,
   RunStatus,
   RunView,

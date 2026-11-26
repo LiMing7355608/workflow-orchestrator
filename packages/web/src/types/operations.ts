@@ -51,7 +51,8 @@ export interface AgentInterval {
   agentId: string;
   agentLabel: string;
   agentLogo?: string;
-  role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review' | 'meeting';
+  role: 'spec' | 'plan' | 'check' | 'amend' | 'implement' | 'review' | 'meeting' | 'dialogue';
+  roleScope?: RunRole;
   lane?: string;
   model?: string;
   progress?: string;
@@ -60,6 +61,17 @@ export interface AgentInterval {
   startedAt: string;
   finishedAt?: string;
   status: 'running' | 'completed' | 'failed' | 'interrupted';
+}
+
+export type RunRole = 'product' | 'engineering' | 'review';
+
+export interface RoleDialogueView {
+  agent?: { id: string; label: string; model?: string };
+  available: boolean;
+  pending: boolean;
+  messages: Array<{
+    id: string; at: string; role: 'user' | 'agent' | 'system'; author: string; text: string; model?: string;
+  }>;
 }
 
 export interface ActivityView {
@@ -89,7 +101,7 @@ export interface PlanDraftView {
   };
   verification: {
     agentId: string;
-    status: 'checked' | 'unavailable';
+    status: 'checked' | 'unavailable' | 'manual';
     summary: string;
     findings: Array<{ severity: 'required' | 'suggestion'; text: string; nodeIds: string[] }>;
   };

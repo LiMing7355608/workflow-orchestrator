@@ -293,6 +293,8 @@ export interface BaseEvent {
   runId: string;
 }
 
+export type RunRole = 'product' | 'engineering' | 'review';
+
 export type OrchestratorEvent =
   | (BaseEvent & { type: 'run.created'; run: RunFacts })
   | (BaseEvent & { type: 'run.deleted' })
@@ -300,6 +302,15 @@ export type OrchestratorEvent =
   | (BaseEvent & { type: 'blackboard.updated' })
   | (BaseEvent & { type: 'agent.activity' })
   | (BaseEvent & { type: 'meeting.updated' })
+  | (BaseEvent & {
+      type: 'role.message';
+      id: string;
+      scope: RunRole;
+      role: 'user' | 'agent' | 'system';
+      author: string;
+      text: string;
+      model?: string;
+    })
   | (BaseEvent & {
       /**
        * 图已冻结，进入执行阶段。

@@ -2,11 +2,9 @@ import { NodeTimes, TaskBreakdown } from './TaskBreakdown';
 import {
   GitBranch,
   Loader2,
-  MessageSquare,
   Play,
   RotateCcw,
   ScrollText,
-  Send,
   ShieldAlert,
   Square,
   X,
@@ -17,7 +15,6 @@ import {
   decideApproval,
   resetNode,
   runNode,
-  sendNodeMessage,
   stopNode,
 } from '../../lib/api';
 import { cn } from '../../lib/cn';
@@ -26,7 +23,6 @@ import { formatDuration } from '../../lib/format';
 import { useIdentity } from '../../lib/identity-store';
 import { displayNodeStatus, nodeStatusMeta, nodeTypeMeta } from '../../lib/workflow-meta';
 import type {
-  ConversationEntry,
   NodeStatus,
   WorkflowNode,
   WorkflowRunDetail,
@@ -35,8 +31,6 @@ import { AgentChip } from '../agents/AgentChip';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { CollapsibleText } from '../ui/CollapsibleText';
-import { Segmented } from '../ui/Segmented';
-import { ConversationEntryItem, QueuedHuman } from './ConversationBubbles';
 import { NodeTimeline } from './NodeTimeline';
 
 /**
@@ -179,49 +173,6 @@ function PanelSurface({
     [run.events, node.id],
   );
 
-  /**
-   * 节点会话。
-   *
-   * 与会话面板同样以「后端派生出来的那一份」为唯一来源，面板自己不攒对话：
-   * 两份状态迟早分叉，分叉之后没有任何一处能判定哪份是真的。useMemo 只是
-   * 为了稳住引用——`?? []` 每次渲染都会造一个新数组，把它塞进 effect 依赖里
-   * 等于让那个 effect 每次都跑。
-   */
-  const nodeConversation = useMemo(
-    () => run.nodeConversations[node.id] ?? [],
-    [run.nodeConversations, node.id],
-  );
-
-  /**
-   * 主体视图：会话 / 原始时间线，互斥（取舍见下面 section 的注释）。
-   *
-   * 默认会话：这个面板被点开时，人问的第一句通常是「它干到哪儿了、我说过什么」。
-   */
-  const [view, setView] = useState<NodePanelView>('conversation');
-  /** 乐观回显：这句话已经发出去了，但还没落库 */
-  const [echo, setEcho] = useState<string | null>(null);
-
-  // 换节点时把视图与回显复位：上一条没落库的话不该挂在新节点下面
-  useEffect(() => {
-    setView('conversation');
-    setEcho(null);
-  }, [node.id]);
-
-  // 落库之后真正的条目就到了，乐观回显必须让位：否则同一句话在会话里
-  // 出现两次，读的人会以为它被发了两遍
-  useEffect(() => {
-    if (echo === null) {
-      return;
-    }
-    if (
-      nodeConversation.some(
-        (entry) => entry.role === 'user' && entry.text === echo,
-      )
-    ) {
-      setEcho(null);
-    }
-  }, [nodeConversation, echo]);
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-5">
       {/* 遮罩自己吞掉点击：浮层外的每一寸都是「关掉」，不是「点到背后的东西」 */}
@@ -353,72 +304,14 @@ function PanelSurface({
           </details>
         </header>
 
-        {/*
-          主体：两个视图互斥，默认是会话。
-
-          为什么不是「时间线常驻 + 会话挂在下面」：这两块讲的是同一批事实。
-          时间线把每条 agent 输出、每次 start/end 都铺成一行；会话把它折成
-          「轮次 + 插话 + 每轮输出（默认收起）」。并排或上下堆叠，同一个节点
-          的同一段输出就会在同一个面板里出现两遍，而面板高度只有 720px ——
-          分给两块之后，两块都读不完整。
-
-          所以取舍是：默认给人看的会话，时间线降级成「排查视图」，切换才进。
-          时间线仍然是唯一的原始流水（精确时间列、工具调用、产物 diff 预览），
-          会话则承担「我中途改过什么要求、它因此重跑了几轮」这条叙事。
-        */}
         <section className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2 sm:px-5">
-          <div className="flex shrink-0 items-center justify-between gap-2">
-            <Segmented
-              ariaLabel="节点详情视图"
-              value={view}
-              onChange={setView}
-              options={[
-                {
-                  value: 'conversation',
-                  label:
-                    nodeConversation.length > 0
-                      ? `节点会话（${nodeConversation.length}）`
-                      : '节点会话',
-                },
-                { value: 'timeline', label: `原始时间线（${nodeEvents.length}）` },
-              ]}
-            />
-            <span className="flex items-center gap-1 text-[10px] text-passive">
-              <ScrollText className="h-3 w-3" strokeWidth={1.8} />
-              {view === 'timeline' ? '排查视图' : '对话与轮次'}
-            </span>
+          <div className="flex shrink-0 items-center gap-2 px-1 text-xs font-medium text-ink">
+            <ScrollText className="size-4 text-accent" />
+            节点记录
+            <span className="text-muted">{nodeEvents.length} 条事件</span>
           </div>
-
-          {view === 'timeline' ? (
-            /* key 绑 node.id：切节点时把「哪些长条目被展开」重置掉，
-               否则上一条输出的展开状态会串到下一个节点 */
-            <NodeTimeline
-              key={`timeline-${node.id}`}
-              runId={run.id}
-              node={node}
-              events={nodeEvents}
-              variant="roomy"
-            />
-          ) : (
-            <>
-              <NodeConversation entries={nodeConversation} echo={echo} />
-              <NodeComposer
-                runId={run.id}
-                nodeId={node.id}
-                state={
-                  node.status === 'running'
-                    ? 'running'
-                    : node.status === 'waiting_approval'
-                      ? 'waiting_approval'
-                      : 'idle'
-                }
-                onEcho={setEcho}
-                onDone={onRunChanged}
-              />
-            </>
-          )}
+          <NodeTimeline key={node.id} runId={run.id} node={node} events={nodeEvents} variant="roomy" />
         </section>
-
         {node.status === 'waiting_approval' ? (
           <footer className="shrink-0 border-t border-line">
             <ApprovalActions
@@ -439,224 +332,6 @@ function PanelSurface({
             onDone={onRunChanged}
           />
         </footer>
-      </div>
-    </div>
-  );
-}
-
-/**
- * 主体视图。
- *
- * `timeline` 不叫「执行时间线」而叫「原始时间线」：它是排查用的那一份
- * （精确时间列、工具调用、产物 diff），会话才是给人读的那一份。
- */
-type NodePanelView = 'conversation' | 'timeline';
-
-/**
- * 节点会话流。
- *
- * 与编排器会话共用同一套气泡（见 ConversationBubbles），差异只有两处措辞：
- * 这里的打断叫「打断执行」，系统行里展开的东西叫「本轮输出」。
- *
- * 滚动策略照抄编排器面板：默认跟到底部（这是一条流，最新一句必须在视野里），
- * 但人手动往上翻时必须让位，否则每来一条事件就把他拽回底部，什么都读不了。
- */
-function NodeConversation({
-  entries,
-  echo,
-}: {
-  entries: ConversationEntry[];
-  echo: string | null;
-}) {
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-
-  useEffect(() => {
-    if (!stick.current) {
-      return;
-    }
-    const node = scrollerRef.current;
-    if (node) {
-      node.scrollTop = node.scrollHeight;
-    }
-  }, [entries.length, echo]);
-
-  const handleScroll = (): void => {
-    const node = scrollerRef.current;
-    if (!node) {
-      return;
-    }
-    // 距底 48px 之内就算「还在跟着」：一点轻微回滚不该被当成「用户离开了底部」
-    stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-  };
-
-  if (entries.length === 0 && echo === null) {
-    // 空态也要说话：一个什么都没显示的区域会被读成「这个功能坏了」，
-    // 而它真实的含义是「还没有人跟这个节点说过话，它自己也没开始」
-    return (
-      <div className="mt-2 flex min-h-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line px-4 py-6 text-center">
-        <MessageSquare aria-hidden="true" className="h-4 w-4 text-passive" />
-        <p className="text-[11px] leading-5 text-muted">这个节点还没有会话。</p>
-        <p className="text-[11px] leading-5 text-passive">
-          它开始执行后，每一轮与你的插话都会记在这里。
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      ref={scrollerRef}
-      onScroll={handleScroll}
-      aria-live="polite"
-      aria-label="节点会话" tabIndex={0}
-      className="workspace-scroll mt-2 min-h-0 flex-1 pr-1"
-    >
-      <ul className="space-y-4">
-        {entries.map((entry) => (
-          <li key={entry.id}>
-            <ConversationEntryItem
-              entry={entry}
-              interruptLabel="打断执行 · 按这句重来"
-              outputsLabel="本轮输出"
-            />
-          </li>
-        ))}
-        {echo ? (
-          <li>
-            <QueuedHuman text={echo} />
-          </li>
-        ) : null}
-      </ul>
-    </div>
-  );
-}
-
-/**
- * 会话输入区的三种语义。
- *
- * 与后端一一对应，不能只分「在跑 / 没在跑」两态：等人工审批的节点有
- * `startedAt` 却没有任何 Agent 进程，后端对它只记录不打断（真打断会把
- * 「待你审批」抹掉）。前端要是照着「在跑」说「发送会打断当前执行」，
- * 用户就会以为审批被掐了。
- */
-type ComposerState = 'running' | 'waiting_approval' | 'idle';
-
-/** 输入框下面那句说明：它必须说清「按下去会发生什么」。 */
-const COMPOSER_HINTS: Record<ComposerState, string> = {
-  running: '发送会打断当前执行，并按这条要求重跑这个节点。',
-  waiting_approval: '它在等人工审批：发送只记录，审批通过后再次运行该节点时生效。',
-  idle: '发送后会记录；下次运行该节点时它会进提示词。',
-};
-
-/** 输入框占位：与说明配套，一个说「会发生什么」，一个说「该写什么」。 */
-const COMPOSER_PLACEHOLDERS: Record<ComposerState, string> = {
-  running: '打断并告诉它要改什么…（Enter 发送，Shift+Enter 换行）',
-  waiting_approval: '给这次审批补条要求…（Enter 发送，Shift+Enter 换行）',
-  idle: '给这个节点留条要求…（Enter 发送，Shift+Enter 换行）',
-};
-
-/**
- * 会话输入区。
- *
- * 可用性按节点状态分成三句话，而且这三句话必须与后端行为一一对应——
- * 前端只要含糊一句「发送消息」，用户就分不清自己是在打断还是在留言。
- */
-function NodeComposer({
-  runId,
-  nodeId,
-  state,
-  onEcho,
-  onDone,
-}: {
-  runId: string;
-  nodeId: string;
-  /** 后端 NodeView.status 的投影，见 ComposerState */
-  state: ComposerState;
-  onEcho: (text: string | null) => void;
-  onDone?: () => void;
-}) {
-  const [draft, setDraft] = useState('');
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const send = async (): Promise<void> => {
-    const text = draft.trim();
-    if (!text || pending) {
-      return;
-    }
-
-    setPending(true);
-    setError(null);
-    onEcho(text);
-    setDraft('');
-
-    const result = await sendNodeMessage(runId, nodeId, { text });
-    setPending(false);
-
-    if (!result) {
-      // 网络层失败：后端没收到这句话，把文本还给人，别让他重打一遍
-      onEcho(null);
-      setDraft(text);
-      setError('没有连上后端，这条消息没有发出去。');
-      return;
-    }
-
-    // 无论「打断了」还是「只记录」，这句话与回执都已经落成事实，
-    // 真实结果是会话里的两条记录，不该由这里猜
-    onDone?.();
-  };
-
-  return (
-    <div className="mt-2 shrink-0 border-t border-line pt-2">
-      <div className="flex items-end gap-2">
-        <label className="min-w-0 flex-1">
-          <span className="sr-only">给这个节点的消息</span>
-          <textarea
-            rows={2}
-            value={draft}
-            disabled={pending}
-            placeholder={COMPOSER_PLACEHOLDERS[state]}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              // Enter 发送、Shift+Enter 换行。IME 组合中的 Enter 不能当发送——
-              // 中文输入法选词会误触
-              if (
-                event.key === 'Enter' &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault();
-                void send();
-              }
-            }}
-            className="max-h-[120px] min-h-[56px] w-full resize-none rounded-lg border border-line bg-surface px-3 py-2 text-[12px] leading-5 text-ink placeholder:text-passive focus:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60"
-          />
-        </label>
-        <button
-          type="button"
-          onClick={() => void send()}
-          disabled={pending || draft.trim().length === 0}
-          aria-label="发送给这个节点"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary text-white transition-colors hover:bg-zinc-800 disabled:pointer-events-none disabled:opacity-40"
-        >
-          {pending ? (
-            <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
-          ) : (
-            <Send className="h-4 w-4" strokeWidth={2} />
-          )}
-        </button>
-      </div>
-
-      <div className="mt-1 flex items-center justify-between gap-3 text-[10px] leading-4">
-        <span className={state === 'running' ? 'text-warning' : 'text-passive'}>
-          {COMPOSER_HINTS[state]}
-        </span>
-        {pending ? (
-          <span className="shrink-0 text-muted">已发送，正在处理…</span>
-        ) : error ? (
-          <span className="shrink-0 text-danger">{error}</span>
-        ) : null}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { ArrowDown, Check, ChevronDown, Circle, CircleAlert, Copy, Download, Folder, Layers3, Loader2, MessageSquare } from 'lucide-react';
+import { ArrowDown, BookOpen, Check, ChevronDown, Circle, CircleAlert, Copy, Download, Folder, Layers3, Loader2, MessageSquare, Pencil } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { confirmPlanDraft, fetchBlackboard, fetchPlanDraft } from '../../lib/api';
 import { cn } from '../../lib/cn';
@@ -8,6 +8,8 @@ import { displayNodeStatus, nodeStatusMeta, nodeTypeMeta } from '../../lib/workf
 import type { PlanDraftView } from '../../types/operations';
 import type { NodeType, SavedTaskFiles, TaskDeliverable, WorkflowNode, WorkflowRunDetail } from '../../types/workflow';
 import { Button, buttonStyles } from '../ui/Button';
+import { MarkdownDocument } from '../ui/MarkdownDocument';
+import { PlanDraftEditor } from './PlanDraftEditor';
 import { NodeTimes, TaskBreakdown } from './TaskBreakdown';
 
 interface PlanTask {
@@ -56,18 +58,43 @@ export function PlanningSteps({ phase }: { phase: 'drafting' | 'checking' | 'app
 
 function PlanFiles({ runId, draft, directory, archive }: { runId: string; draft?: boolean; directory?: string | null; archive?: boolean }) {
   const base = '/api/runs/' + encodeURIComponent(runId);
-  return <section className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5" aria-label="已写入的规划文件">
+  const specUrl = base + '/plan-files/spec.md';
+  const [spec, setSpec] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [readError, setReadError] = useState('');
+  async function toggleSpec() {
+    if (spec !== null) { setSpec(null); return; }
+    setReading(true);
+    setReadError('');
+    try {
+      const response = await fetch(specUrl);
+      if (!response.ok) throw new Error('这条运行的规格文件暂不可读。');
+      setSpec(await response.text());
+    } catch (error) {
+      setReadError((error as Error).message);
+    } finally {
+      setReading(false);
+    }
+  }
+  return <section className="space-y-2" aria-label="已写入的规划文件">
+  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5">
     <div className="min-w-0">
       <p className="flex items-center gap-1.5 text-xs font-semibold text-ink"><Folder className="size-3.5 shrink-0 text-accent" />本地文件</p>
       {directory && <p className="mt-1 break-all font-mono text-[10px] text-muted">{directory}</p>}
     </div>
     <div className="flex flex-wrap gap-1.5">
-      {['spec.md', draft ? 'plan-draft.json' : 'plan.json'].map((name) => <a key={name} href={base + '/plan-files/' + name}
+      <Button variant="secondary" size="sm" aria-expanded={spec !== null} disabled={reading} onClick={() => void toggleSpec()}>
+        <BookOpen className="size-3.5" />{reading ? '正在读取…' : spec !== null ? '收起规格' : '阅读规格'}
+      </Button>
+      <a href={base + '/plan-files/' + (draft ? 'plan-draft.json' : 'plan.json')}
         className={buttonStyles({ size: 'sm', variant: 'secondary', className: 'font-mono text-[11px]' })}>
-        <Download className="size-3" />{name}
-      </a>)}
+        <Download className="size-3" />{draft ? 'plan-draft.json' : 'plan.json'}
+      </a>
       {archive && <a href={base + '/output'} className={buttonStyles({ size: 'sm', variant: 'secondary' })}><Download className="size-3.5" />下载集成 ZIP</a>}
     </div>
+  </div>
+    {readError && <p role="alert" className="text-xs text-danger">{readError}</p>}
+    {spec !== null && <MarkdownDocument title="设计规格 Markdown" text={spec} filename="spec.md" downloadHref={specUrl} />}
   </section>;
 }
 
@@ -156,6 +183,8 @@ export function PlanReviewPanel({ runId, revision, at, paused, onDiscuss, onComm
   const { data, loading, reload } = useApiResource(() => fetchPlanDraft(runId), null);
   const { data: board } = useApiResource(() => fetchBlackboard(runId), null);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const plan = data?.revision === revision ? data : null;
   const openIssues = plan?.verification.findings.filter((finding) => finding.severity === 'required').length ?? 0;
@@ -178,15 +207,18 @@ export function PlanReviewPanel({ runId, revision, at, paused, onDiscuss, onComm
             <p className="mt-1 text-[11px] text-muted">生成于 <time dateTime={at}>{formatDateTime(at)} · {formatClock(at)}</time>{plan && ' · ' + plan.attempts + ' 次生成尝试'}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm" onClick={onDiscuss}><MessageSquare className="size-3.5" />补充或要求重拆</Button>
-            <Button size="sm" disabled={!plan || busy || paused} onClick={() => void approve()}>{busy ? '正在提交…' : openIssues ? '带待核项确认并派发' : '确认草案并派发'}</Button>
+            <Button variant="secondary" size="sm" disabled={!plan || busy || paused || editing} onClick={() => setEditing(true)}><Pencil className="size-3.5" />临时编辑</Button>
+            <Button variant="secondary" size="sm" disabled={saving} onClick={onDiscuss}><MessageSquare className="size-3.5" />补充或要求重拆</Button>
+            <Button size="sm" disabled={!plan || busy || paused || editing} onClick={() => void approve()}>{busy ? '正在提交…' : openIssues ? '带待核项确认并派发' : '确认草案并派发'}</Button>
           </div>
         </div>
         {(error || paused) && <p role="status" className={cn('text-xs', error ? 'text-danger' : 'text-muted')}>{error || '运行已暂停，继续后可以确认草案。'}</p>}
         {plan ? <>
           <PlanFiles runId={runId} draft directory={board?.directory} />
           <Verification verification={plan.verification} tasks={plan.dag.nodes} />
-          <TaskPlan runId={runId} tasks={plan.dag.nodes} />
+          {editing ? <PlanDraftEditor key={plan.revision} runId={runId} plan={plan}
+            onCancel={() => setEditing(false)} onSaving={setSaving} onSaved={() => { setEditing(false); onCommit(); reload(); }} />
+            : <TaskPlan runId={runId} tasks={plan.dag.nodes} />}
         </> : <div className="py-6 text-xs text-muted">{loading ? '正在读取草案…' : <Button size="sm" variant="secondary" onClick={reload}>重读草案</Button>}</div>}
       </div>
     </div>
@@ -195,14 +227,15 @@ export function PlanReviewPanel({ runId, revision, at, paused, onDiscuss, onComm
 
 function Verification({ verification, tasks }: { verification: PlanDraftView['verification']; tasks: PlanTask[] }) {
   const required = verification.findings.some((finding) => finding.severity === 'required');
-  const needsAttention = required || verification.status === 'unavailable';
+  const needsAttention = required || verification.status !== 'checked';
   const Icon = needsAttention ? CircleAlert : Check;
   const labels = new Map(tasks.map((task) => [task.id, task.title]));
   return <details open={needsAttention} className="group rounded-xl border border-line bg-surface">
     <summary className="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2.5 text-xs font-semibold text-ink">
       <Icon className={cn('size-4', needsAttention ? 'text-warning' : 'text-success')} />
       核对结果
-      <span className="font-normal text-muted">{verification.status === 'unavailable' ? '交叉核对未完成' : '已交叉核对 · ' + verification.findings.length + ' 条反馈'}</span>
+      <span className="font-normal text-muted">{verification.status === 'manual' ? '人工修改 · 已重新校验'
+        : verification.status === 'unavailable' ? '交叉核对未完成' : '已交叉核对 · ' + verification.findings.length + ' 条反馈'}</span>
       <ChevronDown className="ml-auto size-3.5 -rotate-90 text-muted group-open:rotate-0" />
     </summary>
     <div className="space-y-2 border-t border-line px-3.5 py-2.5 text-xs leading-5 text-muted">

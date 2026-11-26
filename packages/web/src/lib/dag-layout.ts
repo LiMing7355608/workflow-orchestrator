@@ -18,8 +18,8 @@ export interface DagLayoutOptions {
  * 其他节点的层级等于所有上游层级最大值 + 1。
  */
 export function layoutDag(
-  nodes: WorkflowNode[],
-  edges: WorkflowEdge[],
+  nodes: ReadonlyArray<Pick<WorkflowNode, 'id'>>,
+  edges: ReadonlyArray<Pick<WorkflowEdge, 'source' | 'target'>>,
   options: DagLayoutOptions = {},
 ): Map<string, DagPosition> {
   const nodeWidth = options.nodeWidth ?? 220;
