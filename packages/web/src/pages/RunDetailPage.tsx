@@ -218,7 +218,8 @@ export function RunDetailPage() {
           {visibleView === 'monitor' ? (
             <div className="workspace-scroll h-full min-h-0 p-3 outline-offset-[-2px] sm:p-4"
               tabIndex={0} role="region" aria-label="Agent 监控滚动区域">
-              <AgentActivityPanel key={run.id} runId={run.id} title={run.title} onOpen={openActivity} />
+              <AgentActivityPanel key={run.id} runId={run.id} title={run.title} onOpen={openActivity}
+                idleLabel={run.planDraft && run.status === 'waiting_for_boss' ? '待人工确认草案' : undefined} />
             </div>
           ) : run.planDraft && visibleView === 'plan' ? (
             <PlanReviewPanel key={run.planDraft.revision} runId={run.id} revision={run.planDraft.revision}

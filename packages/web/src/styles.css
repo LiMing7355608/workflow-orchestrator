@@ -162,22 +162,56 @@
 }
 
 .activity-board { container-type: inline-size; }
-.activity-board-grid { display: grid; align-items: start; gap: 0.625rem; }
+.activity-board-grid { display: grid; align-items: start; gap: 0.875rem; }
+.activity-empty { min-height: 2.75rem; }
 .activity-member { border-color: var(--color-line); background: var(--color-surface); }
 .activity-member:hover, .activity-member[aria-pressed='true'] { border-color: #91adee; background: var(--color-accent-soft); }
 .activity-member[data-state='running'] { border-color: #b9d0f7; }
-.activity-member[data-state='running']::before { content: ''; flex: 0 0 5px; height: 5px; border-radius: 50%; background: var(--color-accent); }
 .activity-state { color: var(--color-muted); }
 .activity-state[data-state='running'] { color: var(--color-accent); }
 .activity-state[data-state='failed'] { color: var(--color-danger); }
 .activity-state[data-state='interrupted'] { color: var(--color-warning); }
-.activity-connection, .activity-connection-motion { fill: none; stroke: #c3ccda; stroke-width: 1; vector-effect: non-scaling-stroke; }
-.activity-board-grid g[data-live='true'] .activity-connection { stroke: #a0baf0; }
-.activity-connection-motion { stroke: #4d72cf; stroke-dasharray: 6 94; stroke-linecap: round; animation: activity-flow 2.4s linear infinite; }
-@keyframes activity-flow { to { stroke-dashoffset: -100; } }
-@container (min-width: 565px) {
-  .activity-board-grid { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: 24px; }
+.activity-connector { display: none; }
+@container (min-width: 620px) {
+  .activity-board-grid {
+    --activity-gap: 1.375rem;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: var(--activity-gap);
+  }
+  .activity-connector {
+    display: block;
+    position: absolute;
+    pointer-events: none;
+    top: 3rem;
+    left: calc(100% + 3px);
+    width: calc(var(--activity-gap) - 7px);
+    height: 1px;
+    color: #9aa9bf;
+    background: currentColor;
+  }
+  .activity-connector::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    width: 5px;
+    height: 5px;
+    border-right: 1px solid currentColor;
+    border-top: 1px solid currentColor;
+    transform: translateY(-2px) rotate(45deg);
+  }
+  .activity-connector[data-live='true'] { color: #6687d9; }
+  .activity-connector[data-live='true']::before {
+    content: '';
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    top: -1.5px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    animation: activity-flow 2.2s linear infinite;
+  }
 }
+@keyframes activity-flow { from { left: 0; opacity: .25; } to { left: calc(100% - 4px); opacity: 1; } }
 .activity-timeline { overscroll-behavior-x: contain; }
 .activity-lane { display: grid; grid-template-columns: minmax(92px, 20%) minmax(0, 1fr); align-items: start; gap: 0.625rem; padding-inline: 0.625rem; }
 .activity-track {
@@ -190,7 +224,7 @@
 .activity-span[data-state='failed'] { background: #f4dadd; color: #912b40; }
 .activity-span[data-state='interrupted'] { background: #f4e5cf; color: #805323; }
 @media (prefers-reduced-motion: reduce) {
-  .activity-connection-motion { animation: none; }
+  .activity-connector[data-live='true']::before { animation: none; }
 }
 
 .workflow-canvas {

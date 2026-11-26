@@ -53,6 +53,7 @@ import { registerModelRoutes } from './model-routes.js';
 import { registerMeetingRoutes } from './meeting-routes.js';
 import { MeetingError, Meetings } from './meetings.js';
 import { AgentActivity } from './agent-activity.js';
+import { cleanNativeSessions, type NativeSession } from './native-sessions.js';
 import { buildAmendInstruction, buildAmendmentReply, dagFromFacts, diffDag } from './amend.js';
 import type { LockHandle } from './locks.js';
 import type { LogFn, LogSink } from './log.js';
@@ -150,6 +151,11 @@ const createRunBodySchema = z.object({
   implementAgentId: z.string().min(1).optional(),
   /** 覆盖 DAG 里的审查节点 Agent；与实现用不同的 Agent 才能有异构视角 */
   reviewAgentId: z.string().min(1).optional(),
+  roleModels: z.object({
+    plan: modelIdSchema.optional(),
+    implement: modelIdSchema.optional(),
+    review: modelIdSchema.optional(),
+  }).optional(),
   /**
    * 这次运行在哪儿干活：目标仓库的绝对路径。
    *
@@ -1140,7 +1146,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
               chunk: '第 ' + attempt + ' 次拆解未通过 · ' + reason.slice(0, 430) + '。正在重试。' });
           },
         },
-        { agentId: requestedAgentId, runId, signal, requireDeliverables: store.snapshot.runs[runId]?.requireDeliverables },
+        { agentId: requestedAgentId, runId, signal, model: store.snapshot.runs[runId]?.roleModels?.plan,
+          requireDeliverables: store.snapshot.runs[runId]?.requireDeliverables },
       ).finally(relay.flush);
 
       // 角色覆盖要在校验之前：校验看的是最终 agentId，不是 Planner 猜的那个
@@ -1169,7 +1176,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           { runId, agentId: checker?.id ?? 'orchestrator' });
         const verification = checker
           ? await verifyPlan({ runId, goal: request.goal, dag, agent: checker, runner, signal,
-              workspace: workspaceFor(run), onEvents: checkerRelay.forward }).finally(checkerRelay.flush)
+              workspace: workspaceFor(run), onEvents: checkerRelay.forward,
+              model: (checker.id === run.reviewAgentId ? run.roleModels?.review : undefined) ?? checker.defaultModel,
+            }).finally(checkerRelay.flush)
           : { status: 'unavailable' as const, agentId: 'orchestrator', summary: '没有可用的核对 Agent。', findings: [] };
         signal.throwIfAborted();
         const draft: PlanDraft = { revision: randomUUID(), dag, attempts: generated.attempts, verification };
@@ -1359,6 +1368,39 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
 
   app.get('/api/agents', async () => catalog);
 
+  const preferenceRole = z.enum(['design', 'plan', 'implement', 'review']);
+  const preferenceChange = z.object({
+    role: preferenceRole,
+    agentId: z.string().trim().min(1).max(128),
+    model: z.union([modelIdSchema, z.literal('')]).optional(),
+  });
+  type Preferences = Partial<Record<z.infer<typeof preferenceRole>, { agentId: string; models: Record<string, string> }>>;
+  let preferenceWrites: Promise<unknown> = Promise.resolve();
+  const preferenceFile = () => ownedPath(dirname(resolve(options.logPath)), 'new-run-agents.json');
+  async function readPreferences(): Promise<Preferences> {
+    const raw = await readOptional(await preferenceFile());
+    return raw ? JSON.parse(raw) as Preferences : {};
+  }
+  app.get('/api/new-run/agents', async () => readPreferences());
+  app.post('/api/new-run/agents', async (request, reply) => {
+    const parsed = preferenceChange.safeParse(request.body);
+    if (!parsed.success || !findAgent(parsed.data.agentId, catalog)) {
+      return reply.code(400).send({ message: '执行 Agent 设置无效。' });
+    }
+    const { role, agentId, model } = parsed.data;
+    const write = preferenceWrites.catch(() => {}).then(async () => {
+      const all = await readPreferences();
+      const models = { ...all[role]?.models };
+      if (model === '') delete models[agentId];
+      else if (model !== undefined) models[agentId] = model;
+      all[role] = { agentId, models };
+      await writeAtomic(await preferenceFile(), JSON.stringify(all) + '\n');
+      return all;
+    });
+    preferenceWrites = write;
+    return write;
+  });
+
   app.get<{ Querystring: { runId?: string; summary?: string; active?: string } }>('/api/agents/activity', async (request) => {
     const intervals = [...activity.entries, ...interviews.activity, ...meetings.activity]
       .filter((entry) => entry.agentId !== 'orchestrator' && (!request.query.runId || entry.runId === request.query.runId)
@@ -1369,7 +1411,8 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       active: intervals.filter((entry) => entry.status === 'running').length,
       intervals: request.query.summary === 'true' ? [] : intervals.map((entry) => {
         const profile = findAgent(entry.agentId, catalog);
-        return { ...entry, agentLabel: profile?.label ?? entry.agentId, agentLogo: profile?.logo };
+        return { ...entry, model: entry.model ?? profile?.defaultModel,
+          agentLabel: profile?.label ?? entry.agentId, agentLogo: profile?.logo };
       }),
     };
   });
@@ -1400,10 +1443,38 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     if (body.data.model && !supportsModel(agent)) {
       return reply.code(422).send({ message: '该设计 Agent 使用客户端默认模型。' });
     }
-    return reply.code(201).send(await interviews.start(checked.root, body.data.idea, agent.id, body.data.model));
+    return reply.code(201).send(await interviews.start(checked.root, body.data.idea, agent.id, body.data.model ?? agent.defaultModel));
   });
 
-  app.get('/api/specs', async () => interviews.list().filter(({ id }) => !store.snapshot.runs[id]));
+  app.get<{ Querystring: { includeLinked?: string } }>('/api/specs', async (request) => {
+    const all = interviews.list();
+    return request.query.includeLinked === 'true'
+      ? all.map((entry) => ({ ...entry, linked: Boolean(store.snapshot.runs[entry.id]) }))
+      : all.filter(({ id }) => !store.snapshot.runs[id]);
+  });
+  async function cleanRunSessions(runId: string, refs: NativeSession[]) {
+    if (runnerMode === 'mock') return { deleted: 0, archived: 0, unmanaged: 0 };
+    const otherSessions = new Set(store.history.flatMap((event) =>
+      event.type === 'agent.session' && event.runId !== runId ? [event.sessionId] : []));
+    return cleanNativeSessions(refs.filter((entry) => !otherSessions.has(entry.sessionId)), (id) => findAgent(id, catalog));
+  }
+  app.delete<{ Params: { id: string } }>('/api/specs/:id', async (request, reply) => {
+    const { id } = request.params;
+    if (!runIdSchema.safeParse(id).success || !interviews.rootOf(id)) {
+      return reply.code(404).send({ message: '未找到这次规格访谈。' });
+    }
+    if (handingOff.has(id) || deletingRuns.has(id)) return reply.code(409).send({ message: '访谈正在交接或删除，请稍后重试。' });
+    handingOff.add(id);
+    try {
+      const cleanup = await interviews.remove(id, () => cleanRunSessions(id, interviews.sessionsOf(id)));
+      return cleanup ? { ok: true, cleanup } : reply.code(404).send({ message: '未找到这次规格访谈。' });
+    } catch (error) {
+      log.warn('删除访谈未完成', { id, error });
+      return reply.code(409).send({ message: (error as Error).message || '无法删除访谈，请稍后重试。' });
+    } finally {
+      handingOff.delete(id);
+    }
+  });
   app.get<{ Params: { id: string }; Querystring: { workspaceRoot?: string } }>('/api/specs/:id', async (request, reply) => {
     const id = runIdSchema.safeParse(request.params.id);
     if (!id.success) return reply.code(400).send({ message: '访谈编号无效。' });
@@ -1533,6 +1604,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     try {
       const managed = store.projectWorkspace(runId);
       const root = managed ?? (run.workspaceRoot || undefined);
+      const refs = [...interviews.sessionsOf(runId), ...store.eventsForRun(runId).flatMap((event) =>
+        event.type === 'agent.session' ? [{ agentId: event.agentId, sessionId: event.sessionId }] : [])];
+      const cleanup = await cleanRunSessions(runId, refs);
       if (root && existsSync(root)) {
         if (managed && await realpath(root) !== root) throw new Error('目标目录的真实位置已变化');
         if (!worktreeRootOverride) {
@@ -1544,13 +1618,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
       if (!managed) await artifacts.removeLegacyRun(runId);
       await store.removeRun(runId, now());
       activity.forget(runId);
-      interviews.forget(runId);
-      return { ok: true };
+      await interviews.forget(runId);
+      return { ok: true, cleanup };
     } catch (error) {
       log.warn('删除运行未完成', { runId, error });
       return reply.code(409).send({
         error: 'cleanup_failed',
-        message: '清理运行失败。请检查目标目录是否可写或工作区是否被占用，然后重试。',
+        message: error instanceof Error && error.message.includes('本地会话') ? error.message
+          : '清理运行失败。请检查目标目录是否可写或工作区是否被占用，然后重试。',
       });
     } finally {
       deletingRuns.delete(runId);
@@ -1748,6 +1823,14 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
     if (implementer?.transport === 'http-model') {
       return reply.code(422).send({ message: '实现角色需要具备工程工具的 Agent。' });
     }
+    const models = body.data.roleModels;
+    const planner = pickPlannerAgent(catalog, body.data.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined);
+    const reviewer = findAgent(body.data.reviewAgentId, catalog);
+    if ((models?.plan && (!planner || !supportsModel(planner))) ||
+        (models?.implement && (!implementer || !supportsModel(implementer))) ||
+        (models?.review && (!reviewer || !supportsModel(reviewer)))) {
+      return reply.code(422).send({ message: '有角色的客户端不支持所选模型，请检查执行 Agent 设置。' });
+    }
     if (body.data.sourceMeetingId) {
       try {
         const room = meetings.get(body.data.sourceMeetingId);
@@ -1804,6 +1887,11 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
         plannerAgentId: body.data.plannerAgentId,
         implementAgentId: body.data.implementAgentId,
         reviewAgentId: body.data.reviewAgentId,
+        roleModels: {
+          plan: models?.plan ?? planner?.defaultModel,
+          implement: models?.implement ?? implementer?.defaultModel,
+          review: models?.review ?? reviewer?.defaultModel,
+        },
         stage: submittedDag ? 'decompose' : 'orchestrate',
         createdAt: at,
         nodeOrder: nodes.map((node) => node.id),
@@ -2703,6 +2791,9 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           .map((node) => node.id);
 
         let amended: AmendedPlan;
+        const amendAgent = pickPlannerAgent(catalog, current.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined);
+        const amendRelay = createAgentEventRelay({ emit: (event) => store.emit(event), now },
+          { runId, agentId: amendAgent?.id ?? 'orchestrator' });
         try {
           amended = await amendDag(
             current.goal || current.title,
@@ -2718,6 +2809,7 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
             runner,
             // 改图同样在运行自己的目标目录里做：它要读的是这个工程的代码
             workspace: planningWorkspace(runId, workspaceFor(current)),
+            onEvents: amendRelay.forward,
             onOutput: (chunk) => {
               // 与规划同理：截断后入日志，全文会淹掉启动日志
               app.log.debug(
@@ -2728,10 +2820,11 @@ export async function buildApp(options: AppOptions): Promise<AppContext> {
           },
           {
             agentId: current.plannerAgentId || process.env.PLANNER_AGENT_ID || undefined,
+            model: current.roleModels?.plan ?? amendAgent?.defaultModel,
             runId,
             lockedNodeIds,
           },
-        );
+        ).finally(amendRelay.flush);
       } catch (error) {
         /**
          * 失败也是这个会话的一部分，必须落成一条回复。

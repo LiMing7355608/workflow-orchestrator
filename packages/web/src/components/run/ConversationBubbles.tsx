@@ -8,9 +8,11 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useState } from 'react';
+import { compactOutput } from '../../lib/agent-output';
 import { cn } from '../../lib/cn';
 import { formatClock } from '../../lib/format';
 import type { ConversationEntry } from '../../types/workflow';
+import { AgentReply } from './AgentReply';
 
 /**
  * 会话气泡的唯一实现：编排器面板与节点面板共用这一份。
@@ -100,9 +102,7 @@ function SpeakerEntry({ entry }: { entry: ConversationEntry }) {
         <Bot className="h-3 w-3" strokeWidth={1.8} />
       </span>
       <div className="min-w-0 flex-1 space-y-1">
-        <p className="whitespace-pre-wrap break-words text-[13px] leading-6 text-ink">
-          {entry.text}
-        </p>
+        <AgentReply text={entry.text} />
         <MessageTimestamp at={entry.at} />
       </div>
     </div>
@@ -124,7 +124,7 @@ function SystemEntry({
 }) {
   const tone = entry.tone ?? 'info';
   const [expanded, setExpanded] = useState(false);
-  const outputs = entry.outputs ?? [];
+  const outputs = compactOutput(entry.outputs ?? [], 'text');
   const hasOutputs = outputs.length > 0;
 
   return (
@@ -239,7 +239,9 @@ function PlanOutputs({
             key={output.id}
             className="whitespace-pre-wrap break-words text-[11px] leading-4 text-muted"
           >
-            {output.text}
+            {output.kind === 'text' || output.kind === 'result'
+              ? <AgentReply text={output.text} />
+              : output.text}
           </li>
         );
       })}

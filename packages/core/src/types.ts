@@ -138,6 +138,7 @@ export interface RunFacts {
   plannerAgentId?: string;
   implementAgentId?: string;
   reviewAgentId?: string;
+  roleModels?: { plan?: string; implement?: string; review?: string };
   /**
    * 通过对话下发的图改动，累计追加。
    *
@@ -492,7 +493,7 @@ export type OrchestratorEvent =
   | (BaseEvent & {
       /** 采集到 Agent 的原生会话 id。续跑要用，因此必须进事实而不是只走事件流。 */
       type: 'agent.session';
-      nodeId: string;
+      nodeId?: string;
       agentId: string;
       sessionId: string;
     })

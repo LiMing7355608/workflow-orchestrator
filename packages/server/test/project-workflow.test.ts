@@ -42,6 +42,35 @@ const dag = {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe('项目级运行与规格访谈', () => {
+  it('删除正在处理的访谈会取消当前轮，等待退出后移除聊天', async () => {
+    vi.stubEnv('AGENT_RUNNER', 'mock');
+    vi.stubEnv('AGENT_WORKSPACE', 'temp');
+    const workspaceRoot = await temp();
+    const data = await temp();
+    let running = false;
+    let stopped = false;
+    const runner: AgentRunner = {
+      async run({ signal }) {
+        running = true;
+        if (!signal?.aborted) await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+        stopped = true;
+        return { ok: false, exitCode: null, output: '', cancelled: true };
+      },
+    };
+    const ctx = await buildApp({ logPath: join(data, 'events.jsonl'), logger: false, runner });
+    apps.push(ctx);
+    const created = await ctx.app.inject({ method: 'POST', url: '/api/specs',
+      payload: { workspaceRoot, agentId: 'codex', idea: '即将删掉的聊天' } });
+    expect(created.statusCode).toBe(201);
+    const { id, workspaceRoot: root } = created.json();
+    await vi.waitFor(() => expect(running).toBe(true));
+    const url = '/api/specs/' + id;
+    expect((await ctx.app.inject({ method: 'DELETE', url })).statusCode).toBe(200);
+    expect(stopped).toBe(true);
+    expect((await ctx.app.inject(url + '?workspaceRoot=' + encodeURIComponent(root))).statusCode).toBe(404);
+    await expect(readFile(join(root, '.workflow-orchestrator', 'runs', id, 'spec-interview.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('跟踪访谈和真实执行区间、确认后才分解，并按项目存储和删除产物', async () => {
     vi.stubEnv('AGENT_RUNNER', 'mock');
     vi.stubEnv('AGENT_WORKSPACE', 'git');
@@ -56,12 +85,14 @@ describe('项目级运行与规格访谈', () => {
     let checkCalls = 0;
     let implementationCalls = 0;
     const interviewModels: Array<string | undefined> = [];
+    const executionModels = new Map<string, string | undefined>();
     let reviewPrompt = '';
     let plannerPrompt = '';
     let reviewDone = false;
     const runner: AgentRunner = {
       async run(request, onChunk) {
         const prompt = request.stdin ?? request.argv.join(' ');
+        executionModels.set(request.nodeId, request.model);
         let output: string;
         if (request.nodeId.startsWith('spec-')) {
           interviewModels.push(request.model);
@@ -103,6 +134,14 @@ describe('项目级运行与规格访谈', () => {
     const ctx = await buildApp({ logPath, logger: false, runner });
     apps.push(ctx);
     const { app, store } = ctx;
+    const preferences = '/api/new-run/agents';
+    const choose = (agentId: string, model?: string) => app.inject({
+      method: 'POST', url: preferences, payload: { role: 'plan', agentId, model },
+    });
+    expect((await choose('codex', 'planner-model')).statusCode).toBe(200);
+    expect((await choose('dsh-acp')).statusCode).toBe(200);
+    expect((await choose('codex')).statusCode).toBe(200);
+    expect((await app.inject(preferences)).json().plan).toEqual({ agentId: 'codex', models: { codex: 'planner-model' } });
     const create = await app.inject({ method: 'POST', url: '/api/specs', payload: {
       workspaceRoot: directory, agentId: 'codex', model: 'test-model', idea: '做个社团公告工具',
     } });
@@ -122,7 +161,10 @@ describe('项目级运行与规格访谈', () => {
       expect.objectContaining({ role: 'spec', agentId: 'codex', runId }),
     ]));
     await poll('question');
-    const payload = { workspaceRoot: root, specId: runId, reviewPlan: true, plannerAgentId: 'codex', reviewAgentId: 'codex', goal: '这段原始描述不应传给 PM', title: '公告工具' };
+    const payload = { workspaceRoot: root, specId: runId, reviewPlan: true,
+      plannerAgentId: 'codex', implementAgentId: 'codex', reviewAgentId: 'codex',
+      roleModels: { plan: 'planner-model', implement: 'implement-model', review: 'review-model' },
+      goal: '这段原始描述不应传给 PM', title: '公告工具' };
     const submit = () => app.inject({ method: 'POST', url: '/api/runs', payload });
     expect((await submit()).statusCode).toBe(409);
     expect(planCalls).toBe(0);
@@ -147,6 +189,11 @@ describe('项目级运行与规格访谈', () => {
     expect(checkCalls).toBe(1);
     expect(implementationCalls).toBe(0);
     expect((await app.inject(runUrl)).json()).toMatchObject({ status: 'waiting_for_boss', nodes: [] });
+    expect(executionModels.get('attempt-1')).toBe('planner-model');
+    expect((await app.inject('/api/specs?includeLinked=true')).json()).toContainEqual(expect.objectContaining({ id: runId, linked: true }));
+    expect((await app.inject({ method: 'DELETE', url })).statusCode).toBe(200);
+    expect((await app.inject(url)).statusCode).toBe(404);
+    expect((await app.inject(draftUrl)).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: runUrl + '/messages', payload: { text: '额外要求：标题栏中文。' } })).statusCode).toBe(200);
     await vi.waitFor(() => {
       const revision = store.snapshot.runs[runId]?.planDraft?.revision;
@@ -162,6 +209,8 @@ describe('项目级运行与规格访谈', () => {
       expect(store.snapshot.approvals.some((approval) => approval.runId === runId && approval.status === 'pending')).toBe(true);
     }, { timeout: 15_000, interval: 50 });
     expect(reviewDone).toBe(true);
+    expect(executionModels.get('implement')).toBe('implement-model');
+    expect(executionModels.get('review')).toBe('review-model');
     expect(plannerPrompt).toContain(specText);
     expect(plannerPrompt).not.toContain(payload.goal);
     expect(reviewPrompt).toContain('审查请核对离线刷新');

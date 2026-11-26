@@ -505,20 +505,46 @@ export class CodexAppServerWire {
     return { models: [...models.values()], defaultModel };
   }
 
+  async removeThreads(ids: string[], signal: AbortSignal): Promise<{ deleted: number; archived: number }> {
+    let deleted = 0;
+    let archived = 0;
+    let archiveOnly = false;
+    for (const threadId of ids) {
+      if (!archiveOnly) {
+        try {
+          await this.request('thread/delete', { threadId }, signal, 'thread-start');
+          deleted += 1;
+          continue;
+        } catch (error) {
+          const message = (error as Error).message;
+          if (/thread.*(?:not found|does not exist)|no rollout found/i.test(message)) continue;
+          if (!/-32601|unknown (?:variant|method)|not supported|experimental.*(?:disabled|required)/i.test(message)) throw error;
+          archiveOnly = true;
+        }
+      }
+      try {
+        await this.request('thread/archive', { threadId }, signal, 'thread-start');
+        archived += 1;
+      } catch (error) {
+        if (!/thread.*(?:not found|does not exist)|no rollout found/i.test((error as Error).message)) throw error;
+      }
+    }
+    return { deleted, archived };
+  }
+
   /**
    * 握手：`initialize` → `initialized` 通知。
    *
    * app-server 要求先声明客户端身份与能力，之后才接受产品方法；跳过这一步的
-   * 结果不是「降级」，而是每条请求都拿到错误帧。`experimentalApi: false` 是刻意的：
-   * 我们只用稳定面，不为了一个 ephemeral 会话去要求实验开关。
+   * 会话清理使用独立连接，由调用方协商 thread/delete。
    */
-  async initialize(signal: AbortSignal): Promise<void> {
+  async initialize(signal: AbortSignal, experimentalApi = false): Promise<void> {
     requireObject(
       await this.request(
         'initialize',
         {
           clientInfo: { name: 'workflow-orchestrator', title: 'Workflow Orchestrator', version: '0.1.0' },
-          capabilities: { experimentalApi: false, requestAttestation: false },
+          capabilities: { experimentalApi, requestAttestation: false },
         },
         signal,
         'initialize',
@@ -1581,13 +1607,16 @@ export class CodexAppServerRunner implements AgentRunner {
   }
 }
 
-export async function listCodexModels(bin: string, cwd: string): Promise<ModelDirectory> {
+async function withCodexClient<Result>(
+  bin: string, cwd: string, operation: (wire: CodexAppServerWire, signal: AbortSignal) => Promise<Result>,
+  cleanup = false,
+): Promise<Result> {
   const executable = await resolveExecutable(bin);
   if (!executable) throw new Error('找不到 Codex 客户端。');
   const child = spawn(executable.command, [...executable.prefixArgs, ...APP_SERVER_ARGS], {
     cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
   });
-  const signal = AbortSignal.timeout(15_000);
+  const signal = AbortSignal.timeout(cleanup ? 45_000 : 15_000);
   const exit = new AbortController();
   child.on('error', () => exit.abort());
   child.on('exit', () => exit.abort());
@@ -1595,11 +1624,21 @@ export async function listCodexModels(bin: string, cwd: string): Promise<ModelDi
   const wire = new CodexAppServerWire({ input: child.stdout, output: child.stdin, threadParams: {}, onLine: () => {} });
   try {
     wire.start();
-    await wire.initialize(scoped);
-    return { ...await wire.models(scoped), source: 'Codex App Server', checkedAt: new Date().toISOString() };
+    await wire.initialize(scoped, cleanup);
+    return await operation(wire, scoped);
   } finally {
     wire.close();
     child.stdin.end();
     if (!await waitForExit(child, 300)) await killProcessTree(child.pid, { force: true, log: silentLog });
   }
+}
+
+export function listCodexModels(bin: string, cwd: string): Promise<ModelDirectory> {
+  return withCodexClient(bin, cwd, async (wire, signal) => ({
+    ...await wire.models(signal), source: 'Codex App Server', checkedAt: new Date().toISOString(),
+  }));
+}
+
+export function removeCodexThreads(bin: string, cwd: string, ids: string[]) {
+  return withCodexClient(bin, cwd, (wire, signal) => wire.removeThreads(ids, signal), true);
 }

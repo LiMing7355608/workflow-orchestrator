@@ -124,6 +124,8 @@ export interface AgentProfile {
    * 与旧 profile 的语义都不会被悄悄改写。
    */
   transport?: AgentTransport;
+  /** Configured default for a model endpoint. */
+  defaultModel?: string;
   launch: AgentLaunchSpec;
   capabilities: AgentCapabilities;
   availability: AgentAvailability;
@@ -562,7 +564,7 @@ export function buildAgentArgv(
     argv.push(expanded);
   }
 
-  if (options.model) {
+  if (options.model && profile.transport !== 'acp' && profile.transport !== 'http-model') {
     argv.push(...(profile.launch.modelArgs ?? ['--model', '{model}']).map(expand));
   }
 

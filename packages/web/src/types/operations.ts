@@ -132,3 +132,12 @@ export interface MeetingView extends MeetingSettings, MeetingSummary {
   reportStale?: boolean;
   error?: string;
 }
+export type AgentPreferenceRole = 'design' | 'plan' | 'implement' | 'review';
+
+export type AgentPreferences = Partial<Record<AgentPreferenceRole, { agentId: string; models: Record<string, string> }>>;
+
+export interface SessionCleanup {
+  deleted: number;
+  archived: number;
+  unmanaged: number;
+}

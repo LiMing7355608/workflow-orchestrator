@@ -4,9 +4,10 @@ import { modelLabel } from '../agents/AgentModelField';
 import type { InterviewView } from '../../types/operations';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
+import { DeleteInterviewButton } from './DeleteInterviewButton';
 
 export function SpecInterviewPanel({
-  session, busy, canStart, locating, settings, onStart, onAnswer, onReset, related,
+  session, busy, canStart, locating, settings, onStart, onAnswer, onReset, onDeleted, related,
 }: {
   session: InterviewView | null;
   busy: boolean;
@@ -17,8 +18,10 @@ export function SpecInterviewPanel({
   onStart: () => void;
   onAnswer: (answer?: string) => Promise<boolean>;
   onReset: () => void;
+  onDeleted: (notice: string) => void;
 }) {
   const [answer, setAnswer] = useState('');
+  const [deleteError, setDeleteError] = useState('');
 
   async function send(text?: string) {
     if (await onAnswer(text)) setAnswer('');
@@ -35,8 +38,11 @@ export function SpecInterviewPanel({
             新开访谈
           </Button>
         )}
+        {session && <DeleteInterviewButton id={session.id} title={session.idea.split('\n')[0] ?? '规格访谈'}
+          onDeleted={onDeleted} onError={setDeleteError} disabled={busy} />}
       </div>
       <div className="space-y-3 p-4">
+        {deleteError && <p role="alert" className="text-xs text-danger">{deleteError}</p>}
         {!session ? (
           locating ? <p role="status" className="text-[12px] text-muted">正在恢复访谈记录…</p> : (
             <>

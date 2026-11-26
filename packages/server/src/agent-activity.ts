@@ -55,13 +55,14 @@ export class AgentActivity {
       run: async (request, onChunk) => {
         const run = this.getRun(request.runId);
         if (!run) return runner.run(request, onChunk);
+        const agent = getAgent(request.agentId);
         const interval: AgentInterval = {
-          id: randomUUID(), runId: run.id, runTitle: run.title, agentId: request.agentId, model: request.model,
+          id: randomUUID(), runId: run.id, runTitle: run.title, agentId: request.agentId,
+          model: request.model ?? agent?.defaultModel,
           ...describe(run, request.nodeId), startedAt: new Date().toISOString(), status: 'running',
         };
         this.intervals.set(interval.id, interval);
         this.notify(run.id);
-        const agent = getAgent(request.agentId);
         const parser = agent ? createParser(agent.launch.parser) : undefined;
         let lastNotice = 0;
         try {
@@ -116,9 +117,15 @@ export class AgentActivity {
     }
     function start(key: string, at: string, agentId: string, nodeId?: string) {
       finish(key, at, 'interrupted');
+      const details = describe(run, nodeId);
+      const model = details.role === 'check' || details.role === 'review'
+        ? (run.reviewAgentId === agentId ? run.roleModels?.review : undefined)
+        : details.role === 'implement'
+          ? (run.implementAgentId === agentId ? run.roleModels?.implement : undefined)
+          : run.roleModels?.plan;
       open.set(key, {
         id: randomUUID(), runId: run.id, runTitle: run.title, agentId,
-        ...describe(run, nodeId), startedAt: at, status: 'running',
+        ...details, model, startedAt: at, status: 'running',
       });
     }
     for (const event of events) {

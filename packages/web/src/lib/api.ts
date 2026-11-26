@@ -1,5 +1,5 @@
 import type { AgentProfile, ModelDirectory, ModelProvider, ModelProviderSettings } from '../types/agent';
-import type { ActivityView, BlackboardView, InterviewSummary, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView } from '../types/operations';
+import type { ActivityView, AgentPreferenceRole, AgentPreferences, BlackboardView, InterviewSummary, InterviewView, MeetingSettings, MeetingSummary, MeetingView, PlanDraftView, SessionCleanup } from '../types/operations';
 import type {
   AmendmentRejection,
   ConversationEntry,
@@ -38,8 +38,20 @@ export function startInterview(idea: string, workspaceRoot: string, agentId: str
   return operation<InterviewView>('/api/specs', 'POST', { idea, workspaceRoot, agentId, model });
 }
 
-export function fetchInterviews() {
-  return requestJson<InterviewSummary[]>('/api/specs');
+export function fetchInterviews(includeLinked = false) {
+  return requestJson<Array<InterviewSummary & { linked?: boolean }>>('/api/specs' + (includeLinked ? '?includeLinked=true' : ''));
+}
+
+export function deleteInterview(id: string) {
+  return operation<{ ok: boolean; cleanup?: SessionCleanup }>('/api/specs/' + encodeURIComponent(id), 'DELETE');
+}
+
+export function fetchAgentPreferences() {
+  return operation<AgentPreferences>('/api/new-run/agents', 'GET');
+}
+
+export function saveAgentPreference(role: AgentPreferenceRole, agentId: string, model?: string) {
+  return operation<AgentPreferences>('/api/new-run/agents', 'POST', { role, agentId, model });
 }
 
 export function fetchInterview(id: string, workspaceRoot?: string | null, signal?: AbortSignal) {
@@ -60,7 +72,7 @@ export function submitInterviewAnswer(session: InterviewView, answer?: string) {
 }
 
 export function deleteRun(id: string) {
-  return operation<{ ok: boolean }>('/api/runs/' + encodeURIComponent(id), 'DELETE');
+  return operation<{ ok: boolean; cleanup?: SessionCleanup }>('/api/runs/' + encodeURIComponent(id), 'DELETE');
 }
 
 export function fetchBlackboard(id: string) {
@@ -191,6 +203,7 @@ export interface CreateRunInput {
   implementAgentId?: string;
   /** 覆盖 DAG 里的审查节点 Agent */
   reviewAgentId?: string;
+  roleModels?: { plan?: string; implement?: string; review?: string };
   /**
    * 这次运行允许同时跑几个节点。
    *

@@ -443,6 +443,7 @@ export function reduce(
     case 'agent.session':
       // 会话 id 是唯一需要落事实的 Agent 输出：它是后续续跑唯一的锚点，
       // 只活在事件流里的话，重启重放后就会永远拿不到。
+      if (!event.nodeId) return state;
       return withNode(state, event.runId, event.nodeId, (node) => {
         node.nativeSessionId = event.sessionId;
       });

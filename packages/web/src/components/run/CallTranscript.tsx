@@ -1,6 +1,7 @@
 import { Clock3, FileText } from 'lucide-react';
 import { useState } from 'react';
 import { modelLabel } from '../agents/AgentModelField';
+import { compactOutput, replyFromOutput } from '../../lib/agent-output';
 import { fetchAgentActivity } from '../../lib/api';
 import { formatDateTime } from '../../lib/format';
 import { eventToolLabel } from '../../lib/workflow-meta';
@@ -9,6 +10,7 @@ import type { AgentInterval } from '../../types/operations';
 import type { WorkflowRunDetail } from '../../types/workflow';
 import { Button } from '../ui/Button';
 import { CollapsibleText } from '../ui/CollapsibleText';
+import { AgentReply } from './AgentReply';
 
 export function CallTranscript({ initial, run, onShowAll }: {
   initial: AgentInterval;
@@ -25,9 +27,8 @@ export function CallTranscript({ initial, run, onShowAll }: {
     item.kind && (initial.nodeId ? item.nodeId === initial.nodeId : !item.nodeId) &&
     (item.agent === call.agentLabel || item.agent === call.agentId) &&
     item.at >= call.startedAt && (!call.finishedAt || item.at <= call.finishedAt));
-  const reply = output.filter((item) => item.kind === 'result').at(-1)?.message
-    || output.filter((item) => item.kind === 'text').map((item) => item.message).join('\n');
-  const trace = output.filter((item) => item.kind !== 'result' && item.kind !== 'text' && item.kind !== 'usage');
+  const reply = replyFromOutput(output);
+  const trace = compactOutput(output.filter((item) => item.kind !== 'result' && item.kind !== 'text' && item.kind !== 'usage'), 'message');
   const visible = fullTrace ? trace : trace.slice(-24);
 
   return <section aria-label="本次 Agent 对话" className="space-y-3">
@@ -49,7 +50,7 @@ export function CallTranscript({ initial, run, onShowAll }: {
     </div>
     {reply && <article className="rounded-xl border border-line px-3 py-2.5">
       <h4 className="flex items-center gap-1.5 text-xs font-medium text-ink"><FileText className="size-3.5 text-accent" />Agent 回复</h4>
-      <CollapsibleText text={reply} lines={4} className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-ink" />
+      <div className="mt-2"><AgentReply text={reply} active={!call.finishedAt} /></div>
     </article>}
     {trace.length > 0 && <details className="rounded-xl border border-line px-3 py-2.5">
       <summary className="cursor-pointer text-xs font-medium text-ink">调用记录 · {trace.length} 条</summary>

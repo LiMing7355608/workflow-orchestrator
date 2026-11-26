@@ -307,12 +307,14 @@ export async function amendDag(
       prompt,
       workdir: cwd,
       policy,
+      model: options.model,
     });
 
     const parser = createParser(agent.launch.parser);
     let answer = '';
     let final = '';
     const collect = (events: ReturnType<typeof parser.push>): void => {
+      execution.onEvents?.(events);
       for (const event of events) {
         if (event.kind === 'text') answer += event.text ?? '';
         if (event.kind === 'result' && event.text) final = event.text;
@@ -324,6 +326,7 @@ export async function amendDag(
         runId: options.runId ?? workspaceRunId,
         nodeId,
         agentId: agent.id,
+        model: options.model,
         bin: agent.launch.bin,
         argv,
         stdin: agent.launch.stdin ? prompt : undefined,

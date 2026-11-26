@@ -1,4 +1,5 @@
 import { RecentInterviews } from '../components/run/RecentInterviews';
+import { cleanupNotice } from '../components/run/DeleteInterviewButton';
 import { Boxes, Clock, Plus, Search, SearchX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -50,16 +51,19 @@ export function RunRecordsPage() {
   const [sort, setSort] = useState<SortKey>('updated');
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteNotice, setDeleteNotice] = useState('');
 
   const { data: runs, source, reload } = useApiResource(fetchRuns, seedRuns);
   useLiveRefresh(source === 'live', reload);
 
   async function remove(run: WorkflowRunSummary) {
-    if (deleting || !window.confirm('删除「' + run.title + '」的运行记录、工作区、协作记忆和产物？已经合入项目正式分支的文件会保留。')) return;
+    if (deleting || !window.confirm('删除「' + run.title + '」的运行记录、工作区、协作记忆和产物，并同步其 CLI 会话？已经合入项目正式分支的文件会保留。')) return;
     setDeleting(run.id);
     setDeleteError(null);
+    setDeleteNotice('');
     try {
-      await deleteRun(run.id);
+      const { cleanup } = await deleteRun(run.id);
+      setDeleteNotice(cleanupNotice(cleanup) || '运行已删除。');
       reload();
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : '删除运行失败。');
@@ -196,7 +200,8 @@ export function RunRecordsPage() {
         </div>
       </Card>
 
-      <div className="mt-4 empty:hidden"><RecentInterviews /></div>
+      {deleteNotice && <p role="status" className="mt-3 text-xs text-muted">{deleteNotice}</p>}
+      <div className="mt-4 empty:hidden"><RecentInterviews includeLinked /></div>
       <div className="mt-3 flex items-center justify-between text-[11px] text-muted">
         <span>共 {filteredRuns.length} 个运行</span>
         <span className="text-passive">

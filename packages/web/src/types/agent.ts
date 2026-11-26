@@ -101,6 +101,7 @@ export interface AgentProfile {
   /** 厂商图标路径（public 下） */
   logo: string;
   transport?: 'cli' | 'claude-sdk' | 'codex-app-server' | 'dsh-sdk' | 'acp' | 'http-model';
+  defaultModel?: string;
   launch: AgentLaunchSpec;
   capabilities: AgentCapabilities;
   availability: AgentAvailability;
